@@ -1,0 +1,51 @@
+# LiteLLM + Postgres —— 带数据库的版本，预算才能真正生效
+#
+# 为什么必须带 Postgres：
+#   LiteLLM 的 max_budget / budget_duration 全部依赖数据库里的 spend 记录。
+#   没有 DATABASE_URL 时它是 fail-open —— 超额请求照放，只打条 warning。
+#   要「硬封顶」就必须用这一套。
+
+services:
+  litellm:
+    image: docker.litellm.ai/berriai/litellm:main-stable
+    container_name: litellm
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@litellm_db:5432/litellm
+      # 告警 webhook（Slack / 自建都可以，留空则只写日志）
+      WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
+    depends_on:
+      litellm_db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:4000/health/liveliness')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  litellm_db:
+    image: postgres:16-alpine
+    container_name: litellm_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: litellm
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: litellm
+    volumes:
+      - litellm_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm -d litellm"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  litellm_pgdata:

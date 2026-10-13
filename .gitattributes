@@ -1,0 +1,26 @@
+# 换行符规则 —— 显式写死，不依赖每个人的 core.autocrlf 设置
+#
+# 不加这个文件的话：Windows 上 core.autocrlf=true 会让 git 在 checkout 时
+# 把 LF 换成 CRLF，于是 Linux 上拿到 install.sh 会报：
+#     bash: ./install.sh: /bin/bash^M: bad interpreter: No such file or directory
+# 这种错很难一眼看出原因（文件看着是好的，只是行尾多了个不可见字符）。
+
+# 默认：仓库里一律存 LF，checkout 时也保持 LF
+* text=auto eol=lf
+
+# 要在 Linux 上执行的，必须 LF。这一条是上面的显式重复，防止将来改动默认值
+*.sh    text eol=lf
+Dockerfile text eol=lf
+
+# Windows 原生脚本给 CRLF（PowerShell 两种都能跑，但 CRLF 更自然）
+*.ps1   text eol=crlf
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# 二进制：别做任何转换
+*.db    binary
+*.sqlite binary
+*.png   binary
+*.jpg   binary
+*.zip   binary
+*.exe   binary

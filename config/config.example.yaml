@@ -1,0 +1,170 @@
+# LifeLogging 全局配置
+# 复制为 config/config.yaml 后修改。所有脚本都读这个文件，改这里不用改代码。
+#
+# 三个待定项（Apple Health / Linux 服务器 / AI 接入）全部在这里落地，
+# 你答完直接改对应的值即可。
+
+# ── 全局 ──────────────────────────────────────────────────
+vault_path: "C:/path/to/LifeLogging/vault"
+timezone: "Asia/Shanghai"
+state_dir: "C:/path/to/LifeLogging/state"   # 台账、日志、中间产物
+
+# 分类（顺序即日记/面板里的展示顺序）
+# 所有记录一律英文。
+# ⚠️ 改这里的名字，要同步改三处，否则会被判为「非标准分类」：
+#      scripts/normalize.py 的 APP_RULES / TITLE_HINTS
+#      scripts/generate_journal.py 的 SYSTEM_PROMPT
+#      vault/99-Templates/ 里各面板的 CATEGORIES 数组
+categories:
+  - Work
+  - Study
+  - Life
+  - Transport
+  - Leisure
+  - Health
+  - Social
+  - Other
+
+# ── 采集层 ────────────────────────────────────────────────
+sources:
+  # ── 屏幕/麦克风录制 —— 已关闭 ──────────────────────────────
+  # 明确不要录屏录音，所以整条链路关闭。
+  #
+  # 关掉之后失去的：音频转录、会议记录、屏幕全文 OCR。
+  # 保留下来的：ActivityWatch 的窗口标题。它本身信息量不小 ——
+  #   直接告诉你在哪个文档 / 哪个页面 / 哪个文件上，
+  #   足以支撑「工作/学习/休闲」这类判断和「这段时间在干嘛」的描述。
+  #
+  # 如将来要重新开启，把 enabled 改回 true 即可，代码还在。
+  # 另注意：screenpipe 是 source-available 不是开源，个人自用免费但不能商用。
+  screenpipe:
+    enabled: false
+    db_path: "C:/Users/<you>/.screenpipe/db.sqlite"
+    api_base: "http://127.0.0.1:3030"
+    api_bearer: ""
+
+  # ── 窗口 / AFK —— 主力数据源 ───────────────────────────────
+  activitywatch:
+    enabled: true
+    api_base: "http://127.0.0.1:5600"
+    # ★ 强烈建议装浏览器扩展 aw-watcher-web（开源，不录屏不截图）。
+    #   它上报 URL 和页面标题，比只靠窗口标题信息量大得多 ——
+    #   这是在「不录制」前提下提升日记质量最划算的一步。
+    #   安装：https://docs.activitywatch.net/en/latest/watchers.html
+    #   装完会在 buckets 里多出 aw-watcher-web-* 桶。
+
+  # Linux 服务器
+  dawarich:
+    enabled: true
+    api_base: "http://REPLACE_WITH_SERVER:3000"
+    api_key: "REPLACE_ME"
+    # 若服务器无公网、走 Tailscale，这里填 Tailscale 内网地址即可
+
+  # 本机中间件（统一事件表）
+  events_api:
+    enabled: true
+    api_base: "http://127.0.0.1:8787"
+    api_key: "REPLACE_ME"
+
+  # Gadgetbridge 导出的 SQLite（手环数据）
+  gadgetbridge:
+    enabled: false            # 没有手环就设 false
+    db_path: "C:/Users/<you>/gadgetbridge-export/gadgetbridge.db"  # 手机导出后同步过来
+
+  # Apple Health —— 纯 Android 的话整块设 false，iOS 链路不再需要
+  apple_health:
+    enabled: false
+    ingest_url: "http://127.0.0.1:8787/ingest/apple-health"
+    # 启用时：iPhone 装 Health Auto Export，Automations → REST API
+    # 指向上面 ingest_url，加 Bearer header = events_api.api_key
+
+# ── 理解层 ────────────────────────────────────────────────
+ai:
+  # deepseek    = DeepSeek API（推荐：成本极低，中英文都好，OpenAI 兼容协议）
+  # anthropic   = Anthropic API
+  # claude_code = 复用 Claude Code 订阅，走 `claude -p --output-format json`
+  # ollama      = 本地零成本
+  provider: "deepseek"
+
+  # ── DeepSeek ────────────────────────────────────────────────
+  deepseek_base: "https://api.deepseek.com"
+  deepseek_model: "deepseek-flash"
+  deepseek_api_key_env: "DEEPSEEK_API_KEY"
+  # deepseek-flash     快、极便宜。日记生成够用，先从这个开始
+  # deepseek-v4-pro    贵约 3 倍，写作质量更高。不满意 Flash 的输出再换
+  #
+  # 缓存是**自动的**（磁盘前缀缓存），不需要 cache_control 标记。
+  # 前缀 ≥1024 token 且逐字节匹配就自动命中，命中价约为未命中的 1/50。
+  # 所以：系统提示词越长越稳定越省钱，千万不要把日期拼进 system 里。
+
+  # ── Anthropic（备用）────────────────────────────────────────
+  model: "claude-sonnet-5-5"
+  api_key_env: "ANTHROPIC_API_KEY"
+
+  max_output_tokens: 8000
+  temperature: 0.3
+
+  # ── 本地 ────────────────────────────────────────────────────
+  ollama_base: "http://127.0.0.1:11434"
+  ollama_model: "qwen2.5:14b"
+
+# 价格表（每百万 token，CNY）
+#
+# ⚠️ 这是**本地估算**，不是账单。DeepSeek 的官方价会在控制台公告，
+#    数字变了请更新这里，否则预算控制会失真。
+#    核对命令：python scripts/cost_guard.py check-deepseek
+#
+# 峰谷计费：北京时间周一至周五 09:00-12:00 与 14:00-18:00 为 peak，
+#          其余（含周末）为 off_peak，价格是 peak 的一半。
+#          每晚 23:00 跑流水线正好落在 off_peak —— 直接省一半。
+#
+# 账户以人民币结算，所以这里用 CNY。改币种要连 budget.currency 一起改。
+pricing:
+  _currency: "CNY"
+
+  "deepseek-flash":
+    currency: "CNY"
+    cache_hit:  {peak: 0.04, off_peak: 0.02}
+    cache_miss: {peak: 2.00, off_peak: 1.00}
+    output:     {peak: 8.00, off_peak: 4.00}
+
+  "deepseek-v4-pro":
+    currency: "CNY"
+    cache_hit:  {peak: 0.30, off_peak: 0.15}
+    cache_miss: {peak: 9.00, off_peak: 4.50}
+    output:     {peak: 27.00, off_peak: 13.50}
+
+  "claude-sonnet-5-5":
+    currency: "USD"
+    cache_hit: 0.30
+    cache_miss: 3.00
+    output: 15.00
+
+# ── 成本控制 ──────────────────────────────────────────────
+budget:
+  # ⚠️ 单位跟随 pricing 的币种（当前 CNY）。
+  #    字段名里不带 _usd 是有意的 —— 「叫 USD 却装人民币」是埋雷。
+  currency: "CNY"
+  daily_cap: 3.00            # 每日硬上限（CNY）
+  warn_pct: 0.80             # 到达 80% 时告警
+  fail_closed: true          # true = 超限直接中止；false = 只告警继续跑
+  ledger_path: "C:/path/to/LifeLogging/state/cost_ledger.jsonl"
+  max_llm_calls_per_run: 8   # 单次流水线最多调用几次 LLM（防跑飞）
+
+  # 接近上限时降级到哪个模型。deepseek-flash 已经是最便宜的档位，
+  # 所以默认留空（不降级）。填 ollama 之类的本地模型才有意义。
+  fallback_model: ""
+
+# ── 厂商账单对账（需要 Admin key，普通 API key 无效）──────
+reconcile:
+  enabled: false
+  anthropic_admin_key_env: "ANTHROPIC_ADMIN_KEY"   # sk-ant-admin01-...
+  delta_warn_pct: 0.05       # 本地估算与厂商账单差异超 5% 告警
+
+# ── 可选的 LiteLLM 网关（要硬预算封顶才需要）─────────────
+litellm:
+  enabled: false
+  base_url: "http://REPLACE_WITH_SERVER:4000"
+  master_key_env: "LITELLM_MASTER_KEY"
+  # ⚠️ LiteLLM 的 max_budget 在没有 Postgres 时是 fail-open（静默放行超额）
+  #    要真正硬封顶必须接 database_url，见 docker/litellm/

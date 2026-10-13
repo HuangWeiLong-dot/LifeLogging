@@ -1,0 +1,45 @@
+# Grafana + SQLite 数据源 —— 长期可视化
+#
+# 直接读 state/events.db，不复制、不导出、不多一份数据。
+#
+# 启动：
+#   cd docker/grafana
+#   docker compose up -d
+#   http://localhost:3001   （admin / admin，首次登录会要求改）
+#
+# ⚠️ 关于 SQLite 的并发：
+#   events.db 是 WAL 模式，Windows 侧的采集脚本在写、容器里的 Grafana 在读。
+#   SQLite 支持「一写多读」，但**读的一方必须能访问 -wal 和 -shm 文件**，
+#   所以这里挂的是整个 state 目录、且是可写挂载（插件默认只发 SELECT）。
+#   如果遇到 "database is locked"，说明有长事务，看 README 的排障段。
+
+services:
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: lifelogging-grafana
+    restart: unless-stopped
+    ports:
+      - "3001:3000"          # 用 3001，避免和 Dawarich 的 3000 撞
+    environment:
+      # SQLite 数据源插件。这不是内置的，必须显式装。
+      GF_INSTALL_PLUGINS: "frser-sqlite-datasource"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      # 关了遥测，符合「数据不出本机」
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      # 只读挂载 vault 和 state 所在的父目录都不行 ——
+      # WAL 需要写 -shm，所以给整个 state 目录的可写挂载。
+      - ../../state:/lifelog:rw
+      - ./provisioning:/etc/grafana/provisioning:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  grafana_data:

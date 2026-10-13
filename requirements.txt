@@ -1,0 +1,13 @@
+# LifeLogging 依赖
+# Windows: python -m venv .venv && .venv/Scripts/activate && pip install -r requirements.txt
+
+fastapi>=0.115
+uvicorn[standard]>=0.32
+httpx>=0.27
+PyYAML>=6.0
+anthropic>=0.40
+
+# ⚠️ Windows 必装：Windows 不带系统时区数据库，
+# 没有这个包，zoneinfo.ZoneInfo("Asia/Shanghai") 会直接抛
+# ZoneInfoNotFoundError，整套系统起不来。
+tzdata>=2024.1

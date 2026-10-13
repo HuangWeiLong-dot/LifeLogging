@@ -1,0 +1,66 @@
+# LiteLLM 网关配置 —— 可选的硬预算层
+#
+# ⚠️⚠️ 最关键的一条（官方原文明示）：
+#   **没有 database_url 时，max_budget 是 fail-open** ——
+#   代理会静默继续放行超额请求，只在启动时打一条 warning。
+#   也就是说：不接 Postgres，你以为设了预算，其实没有。
+#
+# 所以要用 LiteLLM 做硬封顶，必须起来带 Postgres 的那套 compose。
+
+model_list:
+  - model_name: claude
+    litellm_params:
+      model: anthropic/claude-sonnet-5-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  # 降级用：接近预算上限时切过来
+  - model_name: claude-cheap
+    litellm_params:
+      model: anthropic/claude-haiku-5-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: ollama
+    litellm_params:
+      model: ollama/qwen2.5:14b
+      api_base: http://host.docker.internal:11434
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+
+  # ↓↓↓ 没有这一行，下面所有预算都不生效
+  database_url: os.environ/DATABASE_URL
+
+  # 告警
+  alerting: ["webhook"]
+  alerting_threshold: 300
+  alert_types:
+    - budget_alerts
+    - spend_reports
+    - llm_exceptions
+  spend_report_frequency: "1d"
+
+litellm_settings:
+  # 全局上限：所有 key 加起来一天不超过这个数
+  max_budget: 5.0
+  budget_duration: 1d
+
+  # 新 key 的默认参数 —— 这是给日记流水线用的
+  default_key_generate_params:
+    max_budget: 1.5
+    budget_duration: 1d
+
+  upperbound_key_generate_params:
+    max_budget: 50.0
+    budget_duration: 30d
+
+  # 接近上限时自动降级，而不是直接失败
+  # （注意：budget fallbacks 的行为随版本变化，上线前实测一次）
+  # fallbacks: [{"claude": ["claude-cheap"]}]
+
+  # 缓存：命中缓存能省一大截
+  cache: true
+  cache_params:
+    type: local
+
+  # 别把请求内容写进日志（隐私）
+  turn_off_message_logging: true

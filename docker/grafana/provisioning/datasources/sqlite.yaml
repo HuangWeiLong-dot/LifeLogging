@@ -1,0 +1,16 @@
+# 自动配好 SQLite 数据源 —— 不用进 UI 手点
+apiVersion: 1
+
+datasources:
+  - name: LifeLogging
+    type: frser-sqlite-datasource
+    access: proxy
+    isDefault: true
+    jsonData:
+      # 容器内的路径。宿主机的 state/ 挂载在 /lifelog
+      path: /lifelog/events.db
+      # 保险起见声明只读 —— 可视化不该改数据
+      # （插件本身也只发 SELECT，这是双保险）
+      # 如果你的插件版本不支持这个字段，删掉即可，不影响使用
+      # readonly: true
+    editable: true

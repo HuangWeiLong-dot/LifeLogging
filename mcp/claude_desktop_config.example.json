@@ -1,0 +1,82 @@
+{
+  "_comment": [
+    "=== 用法 ===",
+    "1. 复制到 %APPDATA%\\Claude\\claude_desktop_config.json",
+    "   或给 Claude Code 用：放到项目根目录的 .mcp.json",
+    "2. 替换所有 REPLACE_ME 和路径",
+    "3. 重启客户端（改完配置必须以管理员身份重启）",
+    "",
+    "=== Windows 上的一个大坑 ===",
+    "npm 系的 MCP 服务器如果用裸 'npx' 会大面积连接失败。",
+    "必须写完整的 npx.cmd 路径。uvx/python 系的没这个问题。",
+    "参见 modelcontextprotocol/servers issue #76",
+    "",
+    "=== 本方案不含屏幕/麦克风录制 ===",
+    "所以这里没有 screenpipe 的 MCP。数据源是：",
+    "  ActivityWatch（窗口/AFK/浏览器 URL）+ Dawarich（位置）+ 本机事件表",
+    "",
+    "=== 各服务前置条件 ===",
+    "obsidian    : Obsidian 开着 + Local REST API 插件启用",
+    "sqlite      : 路径存在（ActivityWatch 的库）",
+    "events      : python -m middleware.events_api 在跑（默认 :8787）",
+    "dawarich    : 服务器上的 Dawarich 在跑，且已拿到 API key"
+  ],
+
+  "mcpServers": {
+    "activitywatch": {
+      "_note": "窗口 / AFK / 浏览器活动。ActivityWatch 没有官方 MCP，直接查它的 SQLite。",
+      "command": "C:\\Program Files\\nodejs\\npx.cmd",
+      "args": [
+        "-y",
+        "mcp-server-sqlite-npx",
+        "C:\\Users\\<you>\\AppData\\Local\\activitywatch\\activitywatch\\aw-server\\peewee-sqlite.v2.db"
+      ],
+      "env": {
+        "PATH": "C:\\Program Files\\nodejs;%PATH%"
+      }
+    },
+
+    "obsidian": {
+      "_note": "需要 Obsidian 的 Local REST API 插件（v5.1.0+ 自带 /mcp/ 端点，可省掉这个 MCP）",
+      "command": "C:\\Program Files\\nodejs\\npx.cmd",
+      "args": ["-y", "obsidian-mcp-server"],
+      "env": {
+        "OBSIDIAN_API_KEY": "REPLACE_ME",
+        "OBSIDIAN_BASE_URL": "http://127.0.0.1:27123",
+        "OBSIDIAN_PROTOCOL": "http",
+        "VERIFY_SSL": "false"
+      }
+    },
+
+    "filesystem": {
+      "_note": "直接读写 vault 目录。参数是允许访问的目录白名单",
+      "command": "C:\\Program Files\\nodejs\\npx.cmd",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "C:\\Users\\<you>\\Desktop\\LifeLogging\\vault",
+        "C:\\Users\\<you>\\Desktop\\LifeLogging\\state"
+      ]
+    },
+
+    "dawarich": {
+      "_note": "位置轨迹。Dawarich 官方内置只读 MCP，Streamable HTTP 传输。工具：get_timeline / get_latest_location / search_visits",
+      "type": "http",
+      "url": "http://REPLACE_WITH_SERVER:3000/api/v1/mcp",
+      "headers": {
+        "Authorization": "Bearer REPLACE_WITH_DAWARICH_API_KEY"
+      }
+    },
+
+    "events": {
+      "_note": "统一事件表的 MCP 桥。中间件本身是 FastAPI，用 mcp-openapi-proxy 桥过来。如果不愿意跑 proxy，也可以不配，让脚本直接调 REST",
+      "command": "uvx",
+      "args": ["mcp-openapi-proxy"],
+      "env": {
+        "OPENAPI_SPEC_URL": "http://127.0.0.1:8787/openapi.json",
+        "API_KEY": "REPLACE_ME",
+        "TOOL_WHITELIST": "get_events_events_get,aggregate_aggregate_get,days_days_get,health_health_get"
+      }
+    }
+  }
+}
