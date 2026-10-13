@@ -161,6 +161,62 @@ if (-not $hasKey) {
     Write-Log "     Set it: setx DEEPSEEK_API_KEY \"sk-...\"  then reopen the terminal"
 }
 
+# ── 保证事件表服务在跑 ──────────────────────────────────────────────
+# 它原本没有开机自启 —— 机器重启后流水线会全线失败（采集脚本 ping 不通就中止），
+# 而失败信息只是「事件表服务没在跑」，看不出是「因为重启了」。
+# 与其依赖 NSSM 装服务（要管理员），不如让流水线自己拉起它：
+# 这样计划任务就是自足的，重启后第二天照常工作。
+function Ensure-EventsApi {
+    $health = "http://127.0.0.1:8787/health"
+
+    try {
+        $r = Invoke-WebRequest -Uri $health -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop
+        if ($r.StatusCode -eq 200) {
+            Write-Log "   events API already running"
+            return $true
+        }
+    } catch { }
+
+    Write-Log "   events API is down -- starting it"
+
+    # 端口从 config.yaml 读。
+    # ⚠️ 不能用 Select-String 抓 "127.0.0.1:数字" 再取第一条 ——
+    #    config 里 activitywatch 的 api_base(http://127.0.0.1:5600) 排在
+    #    events_api 前面，取第一条会拿到 5600。让 Python 按字段名读，别靠顺序。
+    $port = 8787
+    try {
+        $parsed = & $Py -c "import sys;sys.path.insert(0,'scripts');from common import load_config;print(load_config()['sources']['events_api']['api_base'].rsplit(':',1)[-1].strip('/'))"
+        if ($parsed -and $parsed -match '^\d+$') { $port = [int]$parsed }
+    } catch {
+        Write-Log "   WARN could not read the events API port from config; using $port"
+    }
+    $health = "http://127.0.0.1:$port/health"
+
+    Start-Process -FilePath $Py `
+        -ArgumentList @("-m", "uvicorn", "middleware.events_api:app",
+                        "--host", "127.0.0.1", "--port", "$port", "--log-level", "warning") `
+        -WorkingDirectory $Root -WindowStyle Hidden
+
+    for ($i = 0; $i -lt 24; $i++) {
+        Start-Sleep -Milliseconds 500
+        try {
+            $r = Invoke-WebRequest -Uri $health -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
+            if ($r.StatusCode -eq 200) {
+                Write-Log "   events API is up (port $port)"
+                return $true
+            }
+        } catch { }
+    }
+
+    Write-Log "   WARN events API did not come up within 12s -- collection will fail"
+    return $false
+}
+
+# 放在这里而不是日循环里 —— 「今天无事可做」的提前 exit 会跳过日循环，
+# 那样每次重开机后如果当天没数据要处理，服务就永远起不来。
+# 位置必须在函数定义之后：PowerShell 自上而下执行。
+Ensure-EventsApi | Out-Null
+
 # ── 决定处理哪几天 ──────────────────────────────────────────────────
 
 $today = (Get-Date).Date
