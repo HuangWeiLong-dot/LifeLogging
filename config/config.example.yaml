@@ -168,3 +168,15 @@ litellm:
   master_key_env: "LITELLM_MASTER_KEY"
   # ⚠️ LiteLLM 的 max_budget 在没有 Postgres 时是 fail-open（静默放行超额）
   #    要真正硬封顶必须接 database_url，见 docker/litellm/
+
+# ── 反向地理编码（本地离线，不联网）────────────────────────────
+# Dawarich 自带的默认关闭，开启需要配托管 provider（坐标会发给第三方）。
+# 这里用本地的 GeoNames 城市表，全程离线。
+#
+# 精度档位（越大越细，文件也越大）：
+#   cities1000   人口>1000   到区/县        17 万条   32 MB
+#   cities500    人口>500    到街道/镇      24 万条   42 MB  <- 当前
+#   allCountries 全部居民点   到小区(PPLX)   千万级    GB 级，需另建索引
+geocoding:
+  dataset: "cities500"
+  enabled: true

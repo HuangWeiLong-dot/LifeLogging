@@ -238,6 +238,19 @@ def collect_points_summary(day: Day) -> list[Event]:
     span_km = max(max(lats) - min(lats), max(lons) - min(lons)) * 111.0
     top_place = max(cities, key=lambda k: cities[k]) if cities else ""
 
+    # Dawarich 的 city 字段实测是空的 —— 它的反向地理编码**默认关闭**，
+    # 开启需要配 provider，而那几个 provider（chibigeo/Geoapify/Photon/Nominatim）
+    # 基本都是托管服务，等于把坐标发给第三方。
+    # 所以这里用本地的 GeoNames 城市表兜底，全程离线。
+    if not top_place and lats:
+        try:
+            from geo import describe as geo_describe, ensure_dataset
+
+            if ensure_dataset(quiet=True):
+                top_place = geo_describe(sum(lats) / len(lats), sum(lons) / len(lons))
+        except Exception as e:  # noqa: BLE001
+            print(f"  · local geocoding unavailable ({e}); using coordinates only")
+
     print(f"  OK  Dawarich track points: {len(lats)} points, span about {span_km:.1f} km"
           + (f", main place {top_place}" if top_place else "(no reverse-geocoded place)"))
 
