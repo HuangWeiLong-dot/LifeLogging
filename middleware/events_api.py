@@ -508,8 +508,44 @@ def ingest_apple_health(payload: dict[str, Any]) -> dict[str, Any]:
     return {"inserted": _insert_many(events)}
 
 
+def _bind() -> tuple[str, int]:
+    """监听地址和端口，读 config.yaml 的 sources.events_api.api_base。
+
+    ⚠️ **默认只绑 127.0.0.1，也就是只有本机能连。** 手机（Tasker）要上报
+       手机使用事件，就得让它能连上 —— 但那是**把端口开出去**，属于安全决定，
+       所以不默认改，要你自己在 config.yaml 里写。
+
+    推荐做法是绑 **Tailscale 地址**而不是 0.0.0.0：
+
+        sources:
+          events_api:
+            api_base: "http://100.x.y.z:8787"   # tailscale ip -4 拿到的地址
+
+        改完两处都要跟着改（它们指向同一个服务）：
+          · config.yaml 的 sources.events_api.api_base
+          · run_daily.ps1 里拉起服务用的 --host（它按 api_base 解析，自动跟随）
+
+    绑 Tailscale 地址 = 只有你 tailnet 里的设备能访问，公网和局域网都碰不到。
+    绑 0.0.0.0 会把局域网也开出去，别这么干。
+
+    ⚠️ 开出去之前先把 `api_key` 从 `dev-local-key-please-change` 换成随机串 ——
+       这个端点收的是任意写入，占位 key 等于没有 key。
+    """
+    base = (CFG.get("sources", {}).get("events_api", {}).get("api_base")
+            or "http://127.0.0.1:8787")
+    from urllib.parse import urlparse
+    u = urlparse(base)
+    host = u.hostname or "127.0.0.1"
+    port = u.port or 8787
+    return host, port
+
+
 if __name__ == "__main__":
     import uvicorn
 
     init_db()
-    uvicorn.run(app, host="127.0.0.1", port=8787)
+    host, port = _bind()
+    if host not in ("127.0.0.1", "localhost"):
+        print(f"⚠️  events API is binding to {host}:{port} — reachable from outside this machine.")
+        print("    Make sure sources.events_api.api_key is not the placeholder value.")
+    uvicorn.run(app, host=host, port=port)

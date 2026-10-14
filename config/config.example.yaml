@@ -101,7 +101,11 @@ ai:
   model: "claude-sonnet-5-5"
   api_key_env: "ANTHROPIC_API_KEY"
 
-  max_output_tokens: 8000
+  # ⚠️ 这是**推理 token + 正文**共用的额度，不是正文的额度。
+  #    实测：输出整 8,000 token 里有 7,915 是推理，正文只剩几十个 token 就撞顶，
+  #    日记被拦腰截断。推理量在不同天能差一个数量级，估不出「够用的数」——
+  #    所以既要留足余量（这里），又要检测截断（common.TruncatedOutput）。
+  max_output_tokens: 16000
   temperature: 0.3
 
   # ── 本地 ────────────────────────────────────────────────────

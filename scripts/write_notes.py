@@ -112,7 +112,16 @@ def write_location(day_iso: str, tl: dict) -> Path | None:
 
 
 def write_phone(day_iso: str, tl: dict) -> Path | None:
-    """02-Phone —— 解锁次数、应用切换。需要 Tasker/MacroDroid 上报。"""
+    """02-Phone —— 解锁次数、应用切换、用得最多的应用。
+
+    数据来自 Tasker/MacroDroid 往 `/ingest/phone` 上报的两类事件；
+    手机上没配好的话这里是空的（返回 None，不生成文件）。
+
+    ⚠️ 「前台时长」是**推导**的，不是上报的：两条相邻 App 切换之间的时间差
+       就是前一个应用在前台待了多久（见 `normalize.summarize_phone`）。
+       第一个和最后一个应用没有下一跳，测不出时长，所以这个数字是**下界**，
+       不能当成「手机总使用时长」。页面上也这么标。
+    """
     phone = tl.get("phone") or {}
     if not phone:
         return None
@@ -120,17 +129,53 @@ def write_phone(day_iso: str, tl: dict) -> Path | None:
     p = VAULT / "02-Phone" / f"{day_iso}.md"
     p.parent.mkdir(parents=True, exist_ok=True)
 
+    fm = {
+        "date": day_iso,
+        "tags": ["phone"],
+        "unlocks": phone.get("unlocks", 0),
+        "app_switches": phone.get("app_switches", 0),
+    }
+    if phone.get("screen_minutes"):
+        fm["screen_minutes"] = phone["screen_minutes"]
+    if phone.get("first_unlock"):
+        fm["first_unlock"] = phone["first_unlock"]
+        fm["last_unlock"] = phone["last_unlock"]
+    if phone.get("foreground_minutes"):
+        fm["foreground_minutes_lower_bound"] = phone["foreground_minutes"]
+
     body = [
-        _fm({"date": day_iso, "tags": ["phone"], **{k: v for k, v in phone.items()}}),
+        _fm(fm),
         "",
         f"# Phone · {day_iso}",
         "",
-        "| Metric | Count |",
-        "|---|---|",
+        f"- Unlocks: **{phone.get('unlocks', 0)}**"
+        + (f" (first {phone['first_unlock']}, last {phone['last_unlock']})"
+           if phone.get("first_unlock") else ""),
+        f"- App switches: **{phone.get('app_switches', 0)}**",
     ]
-    for k, v in sorted(phone.items(), key=lambda x: -x[1]):
-        body.append(f"| {k} | {v} |")
+    if phone.get("screen_minutes"):
+        body.append(
+            f"- Screen-on time: **{phone['screen_minutes']:.0f} min**"
+            " — measured directly from screen on/off events."
+        )
+    if phone.get("foreground_minutes"):
+        body.append(
+            f"- Foreground time (summed over apps): **{phone['foreground_minutes']:.0f} min**"
+            " — a **lower bound**: missed app switches and unpaired screen events are"
+            " not counted, so it sits below the screen-on time."
+        )
     body.append("")
+
+    top = phone.get("top_apps") or []
+    if top:
+        body += ["## Most used apps", "", "| App | Foreground |", "|---|---|"]
+        for name, mins in top:
+            body.append(f"| {name} | {mins:.0f} min |")
+        body.append("")
+    else:
+        body += ["> No app-switch events. Check that the Tasker `App Changed` profile is"
+                 " enabled and that Usage Access is granted.", ""]
+
     p.write_text("\n".join(body), encoding="utf-8")
     return p
 

@@ -3,14 +3,37 @@ apiVersion: 1
 
 datasources:
   - name: LifeLogging
+    # ⚠️ 固定 uid。仪表盘 JSON 是靠这个 uid 引用数据源的。
+    #    不写的话 Grafana 会按名字生成一个（这里是 P8737DA7ED0B6E1E5），
+    #    数据源一旦被删掉重建就可能变，整片面板会静默失效。
+    #
+    # ⚠️ 改这个 uid 的正确顺序是「先删数据源，再改这里，最后重启」。
+    #    直接改会让 Grafana 启动时崩在 provisioning 上，报：
+    #      "Datasource provisioning error: data source not found"
+    #    容器会进入重启循环。删掉数据源再重启就好了。
+    uid: lifelogging-sqlite
     type: frser-sqlite-datasource
     access: proxy
     isDefault: true
     jsonData:
       # 容器内的路径。宿主机的 state/ 挂载在 /lifelog
       path: /lifelog/events.db
+
       # 保险起见声明只读 —— 可视化不该改数据
       # （插件本身也只发 SELECT，这是双保险）
       # 如果你的插件版本不支持这个字段，删掉即可，不影响使用
       # readonly: true
+
+      # ⚠️⚠️ 这一行是**必须的**，不是优化。
+      #
+      # 插件的默认值是 "_pragma=query_only(1)" —— 也就是 busy_timeout = 0。
+      # busy_timeout=0 的含义是「遇到锁立刻报错，不等待」。而 Grafana 打开
+      # 一个仪表盘会**同时**发十几个面板查询，它们必然互撞，于是每个面板都
+      # 报 "database is locked (261)"，整个仪表盘全是 No data。
+      #
+      # 单个查询测不出来 —— 单独查 5 次全部成功，只有并发才炸。
+      #
+      # 注意这个默认值在配置页里是**预填**进输入框的，所以它看起来像
+      # 「已经配好了」，实际上并没有配 busy_timeout。
+      pathOptions: "_pragma=query_only(1)&_pragma=busy_timeout(10000)"
     editable: true

@@ -119,6 +119,12 @@ function Invoke-OneDay($d) {
     # 1. 采集
     Invoke-Step "collect-desktop" "scripts\collect_desktop.py" @("--date", $ds) | Out-Null
     Invoke-Step "collect-phone"   "scripts\collect_phone.py"   @("--date", $ds) | Out-Null
+    # 手机**使用**事件（解锁/切应用）走服务器中继 —— 手机直连本机会丢数据，
+    # 因为这台笔记本一天只醒几小时。跟 collect-phone 拉位置是对称的。
+    Invoke-Step "collect-phone-events" "scripts\collect_phone_events.py" @("--date", $ds) | Out-Null
+    # 手表：先把 Gadgetbridge 导出的 SQLite 从中继取回来，再读它。
+    # 两步必须按这个顺序 —— ingest_gadgetbridge 读的是本地那份文件。
+    Invoke-Step "collect-watch"   "scripts\collect_watch.py"   @("--date", $ds) | Out-Null
     Invoke-Step "gadgetbridge"    "middleware\ingest_gadgetbridge.py" @("--date", $ds) | Out-Null
 
     # 2. 归一化
@@ -167,8 +173,35 @@ if (-not $hasKey) {
 # 与其依赖 NSSM 装服务（要管理员），不如让流水线自己拉起它：
 # 这样计划任务就是自足的，重启后第二天照常工作。
 function Ensure-EventsApi {
-    $health = "http://127.0.0.1:8787/health"
+    # 地址和端口从 config.yaml 读。
+    # ⚠️ 不能用 Select-String 抓 "127.0.0.1:数字" 再取第一条 ——
+    #    config 里 activitywatch 的 api_base(http://127.0.0.1:5600) 排在
+    #    events_api 前面，取第一条会拿到 5600。让 Python 按字段名读，别靠顺序。
+    #
+    # ⚠️ host 也要从配置读，不能写死 127.0.0.1：手机（Tasker）要上报的话
+    #    必须绑到 Tailscale 地址上，那时候健康检查也得查同一个地址 ——
+    #    绑了 100.x 之后 127.0.0.1 是连不上的，写死会让服务「起得来但判定为没起」。
+    $apiHost = "127.0.0.1"
+    $port = 8787
+    try {
+        $parsed = & $Py -c "import sys;sys.path.insert(0,'scripts');from urllib.parse import urlparse;from common import load_config;u=urlparse(load_config()['sources']['events_api']['api_base']);print((u.hostname or '127.0.0.1') + ' ' + str(u.port or 8787))"
+        if ($parsed) {
+            $parts = "$parsed".Trim() -split '\s+'
+            if ($parts.Count -ge 2 -and $parts[1] -match '^\d+$') {
+                $apiHost = $parts[0]
+                $port = [int]$parts[1]
+            }
+        }
+    } catch {
+        Write-Log "   WARN could not read the events API host/port from config; using ${apiHost}:$port"
+    }
+    $health = "http://${apiHost}:$port/health"
 
+    # ⚠️ 健康检查必须放在**解析之后**。
+    #    原来这里写死 "http://127.0.0.1:8787/health" 放在函数最前面，
+    #    一旦 api_base 改成 Tailscale 地址，第一次检查必然失败 ->
+    #    每次都去拉一个重复实例（端口被占，它其实起不来）->
+    #    第二次检查才发现服务本来就在跑。日志里会看到假的「events API is down」。
     try {
         $r = Invoke-WebRequest -Uri $health -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop
         if ($r.StatusCode -eq 200) {
@@ -179,22 +212,9 @@ function Ensure-EventsApi {
 
     Write-Log "   events API is down -- starting it"
 
-    # 端口从 config.yaml 读。
-    # ⚠️ 不能用 Select-String 抓 "127.0.0.1:数字" 再取第一条 ——
-    #    config 里 activitywatch 的 api_base(http://127.0.0.1:5600) 排在
-    #    events_api 前面，取第一条会拿到 5600。让 Python 按字段名读，别靠顺序。
-    $port = 8787
-    try {
-        $parsed = & $Py -c "import sys;sys.path.insert(0,'scripts');from common import load_config;print(load_config()['sources']['events_api']['api_base'].rsplit(':',1)[-1].strip('/'))"
-        if ($parsed -and $parsed -match '^\d+$') { $port = [int]$parsed }
-    } catch {
-        Write-Log "   WARN could not read the events API port from config; using $port"
-    }
-    $health = "http://127.0.0.1:$port/health"
-
     Start-Process -FilePath $Py `
         -ArgumentList @("-m", "uvicorn", "middleware.events_api:app",
-                        "--host", "127.0.0.1", "--port", "$port", "--log-level", "warning") `
+                        "--host", "$apiHost", "--port", "$port", "--log-level", "warning") `
         -WorkingDirectory $Root -WindowStyle Hidden
 
     for ($i = 0; $i -lt 24; $i++) {

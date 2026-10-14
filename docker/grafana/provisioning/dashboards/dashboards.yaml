@@ -1,0 +1,18 @@
+# 仪表盘自动加载 —— 放进这个目录的 .json 会被 Grafana 启动时读进来。
+#
+# ⚠️ 这个目录里除了 .json 和本文件，不要放别的东西：
+#    Grafana 会把目录下所有文件都当仪表盘去解析，一个非 JSON 文件就会报错。
+apiVersion: 1
+
+providers:
+  - name: LifeLogging
+    orgId: 1
+    folder: LifeLogging          # 在 Grafana 里归到一个文件夹下
+    folderUid: lifelogging
+    type: file
+    disableDeletion: false       # 从磁盘删掉 json，Grafana 里也会跟着删
+    updateIntervalSeconds: 30    # 改完 json 不用重启，30 秒内自动重载
+    allowUiUpdates: true         # 允许在 UI 里改（改了不会写回文件，见 README）
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false

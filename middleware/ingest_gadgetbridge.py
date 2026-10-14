@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
 import sys
 from collections import defaultdict
@@ -28,6 +29,8 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+import httpx
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -56,8 +59,23 @@ METRIC_COLUMNS: dict[str, list[str]] = {
 DEFAULT_SAMPLE_MINUTES = 1.0
 
 
-def find_candidate_tables(conn: sqlite3.Connection) -> list[tuple[str, list[str], dict[str, str]]]:
-    """扫描所有表，返回 [(表名, 列, {metric: 列名})]，按覆盖指标数排序。"""
+def find_candidate_tables(
+    conn: sqlite3.Connection,
+) -> list[tuple[str, list[str], dict[str, str], int]]:
+    """扫描所有表，返回 ``[(表名, 列, {metric: 列名}, 行数)]``。
+
+    **排序：先看有没有数据，再看匹配到几个指标。**
+
+    ⚠️ 顺序不能反 —— 这是一个实测踩出来的坑。
+       Gadgetbridge 的库会把**所有**设备的 schema 都建出来（小米、华米、
+       Garmin……），没接的设备就是一张空表。所以「匹配到几个指标」这个
+       指标会**系统性地偏向空表**：实测 Garmin Forerunner 235 的库里
+       `HUAMI_EXTENDED_ACTIVITY_SAMPLE` 匹配 5 个指标但 **0 行**，
+       而真正有 21090 行的 `GARMIN_ACTIVITY_SAMPLE` 只匹配 2 个指标。
+
+       只按指标数排的话会选中空表，然后打印
+       「没数据，可能没戴表」—— 一个错的解释，掩盖了一个真 bug。
+    """
     tables = [
         r[0]
         for r in conn.execute(
@@ -76,9 +94,15 @@ def find_candidate_tables(conn: sqlite3.Connection) -> list[tuple[str, list[str]
                 if cand.lower() in col_lower:
                     mapping[metric] = col_lower[cand.lower()]
                     break
-        if mapping:
-            found.append((t, cols, mapping))
-    found.sort(key=lambda x: len(x[2]), reverse=True)
+        if not mapping:
+            continue
+        try:
+            rows = conn.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
+        except sqlite3.DatabaseError:
+            rows = 0
+        found.append((t, cols, mapping, rows))
+    # 有数据的排前面；同为有数据（或同为空）时，匹配指标多的排前面
+    found.sort(key=lambda x: (x[3] > 0, len(x[2])), reverse=True)
     return found
 
 
@@ -209,6 +233,159 @@ def to_events(grouped: dict[str, list[tuple[datetime, float]]], day: Day) -> lis
     return out
 
 
+# ── 锻炼会话 ────────────────────────────────────────────────────────
+#
+# 和上面那张「每分钟采样」是完全不同的东西：这是**一次完整的锻炼**，
+# 汇总了距离、配速、心率区间、VO2max、训练效果。
+#
+# ⚠️ 它不会出现在 find_candidate_tables 的候选里 —— 那张表的时间列叫
+#    START_TIME 而且单位是**毫秒**（不是 TIMESTAMP / 秒），所以只能单独读。
+#    非 Garmin 设备没有这张表，读不到就安静跳过。
+WORKOUT_TABLE = "BASE_ACTIVITY_SUMMARY"
+
+
+def _summary_value(d: dict[str, Any], key: str) -> Any:
+    """SUMMARY_DATA 里每个字段是 ``{unit, value}``，但也有的直接是裸值。"""
+    v = d.get(key)
+    return v.get("value") if isinstance(v, dict) else v
+
+
+def read_workouts(conn: sqlite3.Connection, day: Day) -> list[dict[str, Any]]:
+    """读当天的锻炼会话。表不存在、或没有那天的记录，都返回空列表。"""
+    names = {
+        r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (WORKOUT_TABLE,)
+        )
+    }
+    if not names:
+        return []
+
+    out: list[dict[str, Any]] = []
+    for row in conn.execute(
+        f'SELECT NAME, START_TIME, END_TIME, ACTIVITY_KIND, SUMMARY_DATA '
+        f'FROM "{WORKOUT_TABLE}" ORDER BY START_TIME'
+    ):
+        start_ms = row["START_TIME"]
+        if not isinstance(start_ms, (int, float)) or start_ms <= 0:
+            continue
+        # ⚠️ 毫秒。按秒解释会得到 1970 年，静默落到错误的那一天。
+        #    这里用 1e11 做分界：秒级时间戳要到公元 5138 年才到这个量级，
+        #    所以低于它的当秒、高于它的当毫秒，两边都不会误判。
+        start = _ms_or_s(row["START_TIME"])
+        end = _ms_or_s(row["END_TIME"])
+        if start is None:
+            continue
+        if start.astimezone(TZ).date() != day.d:
+            continue                       # 只取目标那一天
+
+        try:
+            s = json.loads(row["SUMMARY_DATA"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            s = {}
+
+        secs = _summary_value(s, "activeSeconds") or 0
+        meters = _summary_value(s, "distanceMeters") or 0
+        try:
+            secs = float(secs)
+            meters = float(meters)
+        except (TypeError, ValueError):
+            secs, meters = 0.0, 0.0
+
+        out.append({
+            "name": (row["NAME"] or "").strip() or f"activity {row['ACTIVITY_KIND']}",
+            "kind": row["ACTIVITY_KIND"],
+            "start": start,
+            "end": end,
+            "minutes": round(secs / 60.0, 1),
+            "km": round(meters / 1000.0, 2),
+            "avg_hr": _summary_value(s, "averageHR"),
+            "max_hr": _summary_value(s, "maxHR"),
+            "pace_s_per_km": _summary_value(s, "averageKMPaceSeconds"),
+            "ascent_m": _summary_value(s, "activityTotalAscent"),
+            "calories": _summary_value(s, "caloriesBurnt"),
+            "vo2max": _summary_value(s, "maximumOxygenUptake"),
+            "training_effect": _summary_value(s, "aerobicTrainingEffect"),
+            "recovery_hours": (
+                round(float(_summary_value(s, "recoveryTime")) / 3600.0, 1)
+                if _summary_value(s, "recoveryTime") else None
+            ),
+        })
+    return out
+
+
+def _ms_or_s(v: Any) -> datetime | None:
+    """毫秒或秒都认，统一成 tz-aware datetime。认不出来返回 None。"""
+    if not isinstance(v, (int, float)) or v <= 0:
+        return None
+    secs = v / 1000.0 if v > 1e11 else float(v)
+    try:
+        return datetime.fromtimestamp(secs, tz=timezone.utc).astimezone(TZ)
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def workouts_to_events(workouts: list[dict[str, Any]], day: Day) -> list[Event]:
+    """锻炼 → 两类事件。
+
+    分开是有原因的：
+
+      · **每次锻炼** 用 ``domain="fitness"`` —— 带全部细节，给可视化用的。
+        它**故意不进** domain="health"，否则会被 normalize 收进日记的
+        `## Health` 里，变成一行没头没尾的「workout: 20.0」。
+      · **当天汇总** 用 ``domain="health"`` —— 日记要的是「今天跑了 4.2 公里」，
+        不是每次的流水账。
+    """
+    out: list[Event] = []
+    for w in workouts:
+        out.append(
+            Event(
+                ts_utc=w["start"].astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                domain="fitness",
+                metric="workout",
+                value_num=w["minutes"],
+                value_text=w["name"],
+                source="gadgetbridge",
+                meta={k: v for k, v in {
+                    "kind": w["kind"],
+                    "distance_km": w["km"],
+                    "end_utc": (w["end"].astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                                if w["end"] else None),
+                    "avg_hr": w["avg_hr"],
+                    "max_hr": w["max_hr"],
+                    "pace_s_per_km": w["pace_s_per_km"],
+                    "ascent_m": w["ascent_m"],
+                    "calories": w["calories"],
+                    "vo2max": w["vo2max"],
+                    "training_effect": w["training_effect"],
+                    "recovery_hours": w["recovery_hours"],
+                }.items() if v is not None},
+            )
+        )
+
+    if not workouts:
+        return out
+
+    ts = day.start_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    total_min = round(sum(w["minutes"] for w in workouts), 1)
+    total_km = round(sum(w["km"] for w in workouts), 2)
+
+    def daily(metric: str, value: Any, text: str = "") -> Event:
+        return Event(ts_utc=ts, domain="health", metric=metric,
+                     value_num=value, value_text=text, source="gadgetbridge")
+
+    out.append(daily("run_count", len(workouts)))
+    out.append(daily("run_minutes", total_min))
+    out.append(daily("run_km", total_km))
+    if total_min > 0 and total_km > 0:
+        # 全天合并配速（秒/公里）
+        out.append(daily("run_pace_s_per_km", round(total_min * 60.0 / total_km, 1)))
+    # VO2max 是当次测得的值，一天跑几次就取最后一次
+    vo2 = [w["vo2max"] for w in workouts if w["vo2max"]]
+    if vo2:
+        out.append(daily("vo2max", round(float(vo2[-1]), 2)))
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", default="today")
@@ -233,33 +410,49 @@ def main() -> None:
 
     with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=30.0)) as conn:
         conn.row_factory = sqlite3.Row
-        candidates = find_candidate_tables(conn)
 
+        # 先读锻炼会话：它来自另一张表（时间列是毫秒级 START_TIME，
+        # 没有 TIMESTAMP，所以不会出现在候选里），而且**即使没有分钟级采样
+        # 也该照样读** —— 不能因为候选表为空就把它一起跳过。
+        workouts = read_workouts(conn, day)
+
+        grouped: dict[str, list[tuple[datetime, float]]] = {}
+        candidates = find_candidate_tables(conn)
         if not candidates:
             print("FAIL No activity table containing a TIMESTAMP column.")
             print("   Likely causes: the export file is empty, or the device model is not in the known list.")
             print("   Inspect it yourself: sqlite3 <db> \".tables\"")
-            return
+        else:
+            print("-> Candidate tables (has-data first, then metric coverage):")
+            for t, _cols, mapping, rows in candidates[:5]:
+                note = "" if rows else "   ← 空表，跳过"
+                print(f"    {t:40s} rows={rows:<8} matched {len(mapping)} metrics{note}")
 
-        print(f"-> Candidate tables (sorted by metric coverage):")
-        for t, cols, mapping in candidates[:5]:
-            print(f"    {t:40s}  matched {len(mapping)} metrics")
+            table, cols, mapping, rows = candidates[0]
+            print(f"\n-> Using table: {table}  ({rows} rows total)")
+            print(f"   Metric mapping: {mapping}")
+            grouped = read_table(conn, table, mapping, day)
 
-        table, cols, mapping = candidates[0]
-        print(f"\n-> Using table: {table}")
-        print(f"   Metric mapping: {mapping}")
+    events = to_events(grouped, day) + workouts_to_events(workouts, day)
 
-        grouped = read_table(conn, table, mapping, day)
-
-    if not grouped:
+    if not events:
         print(f"\n⚠️  No data for this day. The band may not have been worn, or data has not synced yet.")
         return
 
-    events = to_events(grouped, day)
+    if workouts:
+        print(f"\n-> Workouts: {len(workouts)}")
+        for w in workouts:
+            pace = ""
+            if w["pace_s_per_km"]:
+                p = float(w["pace_s_per_km"])
+                pace = f"  {int(p // 60)}:{int(p % 60):02d}/km"
+            hr = f"  HR {w['avg_hr']:.0f}" if w["avg_hr"] else ""
+            print(f"    {w['start']:%H:%M}  {w['name']}  {w['km']} km / {w['minutes']:.0f} min{pace}{hr}")
 
     print(f"\n-> Normalised:")
     for e in events:
-        unit = {"steps": "steps", "sleep_hours": "h"}.get(e.metric, "")
+        unit = {"steps": "steps", "sleep_hours": "h", "run_km": "km",
+                "run_minutes": "min", "run_count": "", "vo2max": "ml/kg/min"}.get(e.metric, "")
         print(f"    {e.metric:24s} {e.value_num}{unit}")
 
     if args.dry_run:
@@ -270,6 +463,23 @@ def main() -> None:
     if not client.ping():
         print(f"\nFAIL events API is not running ({client.base}）")
         return
+
+    # ⚠️ 先删掉当天这个来源的旧行，再写。
+    #
+    # 事件表的唯一索引是 (source, domain, metric, ts_utc, value_text) —— **不含 value_num**。
+    # 所以同一天第二次写入会被静默忽略，**值不会更新**。
+    #
+    # 这在手表数据上是致命的：步数、心率、跑步时长都是**当天累计**的，
+    # 早上读到 6532 步、晚上读到 12000 步，第二次会被当成重复丢掉，
+    # 那天就永远停在早上的数字上。实测踩到过（6532 → 6558 写不进去）。
+    #
+    # 删了再写就对了，代价是那几个汇总事件重写一遍 —— 很便宜。
+    # collect_phone.py 用的也是这个套路。
+    try:
+        httpx.delete(f"{client.base}/day", headers=client.headers,
+                     params={"day": day.iso, "source": "gadgetbridge"}, timeout=30.0)
+    except Exception:  # noqa: BLE001
+        pass          # 删不掉不至于阻断写入
 
     for e in events:
         e.source = "gadgetbridge"

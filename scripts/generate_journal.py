@@ -28,6 +28,7 @@ from common import (  # noqa: E402
     CostLedger,
     Day,
     LLM,
+    TruncatedOutput,
     header,
     load_config,
     new_run_id,
@@ -181,6 +182,35 @@ def load_timeline(day: Day) -> dict:
     return json.loads(p.read_text(encoding="utf-8"))
 
 
+# 健康指标 → 单位。没列出来的就不加后缀（大部分指标的名字本身已经够清楚）。
+HEALTH_UNITS = {
+    "steps": "steps",
+    "sleep_hours": "h",
+    "run_km": "km",
+    "run_minutes": "min",
+    "run_count": "runs",
+    "vo2max": "ml/kg/min",
+    "heart_rate_avg": "bpm",
+    "heart_rate_min": "bpm",
+    "heart_rate_max": "bpm",
+}
+
+
+def _fmt_health(key: str, value) -> str:
+    """把一条健康数据渲染成「模型不会读错」的一行。
+
+    ⚠️ 配速必须**换算**，不能只给秒数。存量是 283（秒/公里），
+       直接写「run_pace_s_per_km: 283.0」的话模型有两种翻车方式：
+       当成 283 分钟配速（荒谬，它可能不说），或者干脆忽略这一项。
+       写成「283 s/km = 4:43/km」就没有歧义了。
+    """
+    if key == "run_pace_s_per_km" and isinstance(value, (int, float)) and value:
+        mmss = f"{int(value // 60)}:{int(value % 60):02d}"
+        return f"{key}: {value} s/km (= {mmss} per km)"
+    unit = HEALTH_UNITS.get(key)
+    return f"{key}: {value} {unit}" if unit else f"{key}: {value}"
+
+
 def build_user_prompt(tl: dict, day: Day, carryover: list[str]) -> str:
     lines: list[str] = []
     lines.append(f"# Data for {day.iso} ({day.d.strftime('%A')})")
@@ -207,7 +237,7 @@ def build_user_prompt(tl: dict, day: Day, carryover: list[str]) -> str:
         lines.append("## Health data")
         lines.append("")
         for k, v in health.items():
-            lines.append(f"- {k}: {v}")
+            lines.append(f"- {_fmt_health(k, v)}")
         lines.append("")
 
     loc = tl.get("location") or []
@@ -220,10 +250,34 @@ def build_user_prompt(tl: dict, day: Day, carryover: list[str]) -> str:
 
     phone = tl.get("phone") or {}
     if phone:
+        # ⚠️ 逐键打印会把 top_apps 变成 Python 列表字面量（[['Alipay', 38.0], …]），
+        #    模型只能猜那是什么。按真实形状渲染。
         lines.append("## Phone")
         lines.append("")
-        for k, v in phone.items():
-            lines.append(f"- {k}: {v}")
+        lines.append(f"- Unlocks: {phone.get('unlocks', 0)}"
+                     + (f" (first {phone['first_unlock']}, last {phone['last_unlock']})"
+                        if phone.get("first_unlock") else ""))
+        lines.append(f"- App switches: {phone.get('app_switches', 0)}")
+        if phone.get("screen_minutes"):
+            # 这个是**实测**的（screen_on → screen_off）。跟下面那个推导值
+            # 必须区分开，否则模型会拿错那个数字当屏幕时间报出去。
+            lines.append(
+                f"- Screen-on time: {phone['screen_minutes']:.0f} min "
+                "(measured directly from screen on/off events — this IS the phone's "
+                "screen time)"
+            )
+        if phone.get("foreground_minutes"):
+            lines.append(
+                f"- App foreground time: {phone['foreground_minutes']:.0f} min "
+                "(a lower bound — missed app switches and unpaired screen events are "
+                "not counted, so it sits BELOW the screen-on time above. Do not report "
+                "this one as screen time.)"
+            )
+        top = phone.get("top_apps") or []
+        if top:
+            lines.append("- Most used apps, by inferred foreground minutes:")
+            for name, mins in top:
+                lines.append(f"  - {name}: {mins:.0f} min")
         lines.append("")
 
     web = tl.get("web") or []
@@ -291,6 +345,14 @@ BLOCK_RE = re.compile(
     r"\[blackhole::\s*(true|false)\]",
     re.IGNORECASE,
 )
+
+
+# 模型写出的总时长与规则引擎相差超过这个比例，就判定正文没有落在数据上，
+# **拒绝写出**（退出码非 0 → run_daily.ps1 不推进水位线 → 下次自动重来）。
+#
+# 定 60%：模型合并/拆分块、重新判断分类都会让总数动一些，这是正常的；
+# 但差到一倍以上就不是「有出入」，是「编的」。实测那次是 607%。
+MAX_DEVIATION = 0.60
 
 
 def validate_body(body: str, expected_hours: float) -> tuple[float, list[str]]:
@@ -397,15 +459,24 @@ def compose(day: Day, body: str, stats: dict, timeline: dict,
         f'generated_at: "{stats["generated_at"]}"',
         "sources:",
         *[f"  - {s}" for s in stats["sources"]],
-        "---",
-        "",
     ]
+
+    # ⚠️ health 必须在收尾的 `---` **之前**追加。
+    #
+    #    原来写成了「先 fm += ['---', '']，再 fm += ['health:', ...]」——
+    #    于是整个 health 块落到 frontmatter **外面**，日记文件的开头变成：
+    #        ---             ← frontmatter 收尾
+    #        health:         ← 莫名其妙出现在正文里
+    #          steps: 18120.0
+    #        # 2026-10-13 Tuesday
+    #
+    #    这个 bug 一直都在，只是从来没有设备产出过健康数据，所以从没触发。
+    #    Garmin 的跑步数据一进来就现形了。
     if timeline.get("health"):
-        fm += [
-            "health:",
-            *[f"  {k}: {v}" for k, v in timeline["health"].items()],
-            "",
-        ]
+        fm.append("health:")
+        fm += [f"  {k}: {v}" for k, v in timeline["health"].items()]
+
+    fm += ["---", ""]
 
     head = f"# {day.iso} {day.d.strftime('%A')}\n"
 
@@ -513,6 +584,11 @@ def main() -> None:
     except BudgetExceeded as e:
         print(f"❌ {e}")
         sys.exit(1)
+    except TruncatedOutput as e:
+        # 退出码非 0 → run_daily.ps1 不会推进水位线 → 那天会重跑。
+        # 关键是**别把半截正文写出去**：写出去就等于这一天被「成功」处理了。
+        print(f"❌ {e}")
+        sys.exit(1)
 
     entries = ledger.entries()
     last = entries[-1] if len(entries) > before else {}
@@ -548,6 +624,24 @@ def main() -> None:
     print(f"-> Output {len(body):,} chars, {stats['blocks']} blocks, total {total:.1f}h")
     for w in warnings:
         print(f"  ⚠️  {w}")
+
+    # ── 硬闸门：模型写的时长和规则引擎对不上太多，就不要写 ─────────────
+    #
+    # 原来这里只是打一条警告，然后把错的正文写进 vault。实测 2026-10-13：
+    # 规则引擎 0.41h，模型写了 2.9h，差 607% —— 警告进了 AI 会话日志，
+    # 而日记里那几条时间块是编的（连「19:16-21:11」这种数据里根本不存在的
+    # 区间都写出来了）。退出码 0、水位线照常推进，于是那一天永远不会重跑。
+    #
+    # 跟输出被 max_tokens 截断是同一类问题：**发现得了，但拦不住。**
+    rule_hours = float(tl.get("total_hours") or 0)
+    if rule_hours > 0 and total > 0:
+        dev = abs(total - rule_hours) / rule_hours
+        if dev > MAX_DEVIATION:
+            print(f"❌ Model total {total:.1f}h vs rule-engine {rule_hours:.1f}h — "
+                  f"{dev*100:.0f}% apart, over the {MAX_DEVIATION*100:.0f}% limit.")
+            print("   The time log is not grounded in the data, so it is NOT written.")
+            print("   The day stays unprocessed and will be retried on the next run.")
+            sys.exit(1)
 
     if args.dry_run:
         print("\n" + "=" * 60)

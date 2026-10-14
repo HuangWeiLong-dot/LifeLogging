@@ -1,0 +1,68 @@
+# systemd 单元 —— 手机使用事件中继
+#
+# 安装：
+#   sudo cp lifelogging-relay.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now lifelogging-relay
+#
+# 密钥写在 /etc/lifelogging/relay.env 里（见 README），不要写进这个文件 ——
+# 这个文件是要进 git 的。
+#
+# ⚠️ 改完这个文件要 `daemon-reload` 才生效，只 restart 不行。
+
+[Unit]
+Description=LifeLogging phone-usage relay (Tasker -> server -> laptop)
+Documentation=https://github.com/  # 指向你自己的仓库
+After=network-online.target
+Wants=network-online.target
+# Tailscale 起来之前绑不上 100.x 地址，所以等它
+After=tailscaled.service
+
+[Service]
+Type=simple
+
+# 运行身份。**必须显式写** —— 不写就是以 root 跑，这是个对外的网络服务，别那样。
+#
+# 这里给的是专用用户（更安全，推荐）。不想多建一个用户、就用你自己跑，装之前执行：
+#   sudo sed -i "s/^User=.*/User=$USER/; s/^Group=.*/Group=$(id -gn)/" /tmp/lifelogging-relay.service
+#
+# ⚠️ 用自己跑的话，数据目录要归你（sudo chown 你自己 /var/lib/lifelogging），
+#    否则下面 ProtectSystem=strict + ReadWritePaths 放行了、文件权限还是写不进去。
+User=lifelogging
+Group=lifelogging
+
+# ⚠️ 只绑 Tailscale 地址。写 0.0.0.0 会把公网和局域网一起开出去 ——
+#    这是个人生命记录，不该有对外入口。
+Environment=RELAY_HOST=127.0.0.1
+Environment=RELAY_PORT=8788
+Environment=RELAY_DATA_DIR=/var/lib/lifelogging
+Environment=RELAY_TZ=Asia/Shanghai
+EnvironmentFile=/etc/lifelogging/relay.env
+
+ExecStart=/usr/bin/python3 /opt/lifelogging/phone_relay.py
+
+Restart=always
+RestartSec=3
+
+# 基础加固：这个进程只需要「读自己的脚本 + 写数据目录 + 监听 8788」三件事，
+# 别的能力全部不要。**以 root 跑的话这几条就是主要防线。**
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/lifelogging
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+
+# 丢掉所有 Linux capability。
+# 8788 是高位端口（不需要 CAP_NET_BIND_SERVICE），
+# 它也不碰内核、不挂载、不改时钟 —— 一个都不需要。
+# ⚠️ 这条在**以 root 跑**时尤其值钱：root + 空 capability 集
+#    比裸 root 小得多，而对这个服务毫无损失。
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

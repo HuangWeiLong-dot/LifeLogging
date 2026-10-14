@@ -44,3 +44,9 @@ vault/
 
 # GeoNames 城市表：25MB，重新下载即可，不值得进仓库
 data/
+
+# 参考用的第三方仓库（自带 .git，提交进去会变成 gitlink 而不是文件）
+FxLifeSheet/
+
+# Claude Code 自己的目录，里面有 worktree，提交进去是一团乱麻
+.claude/

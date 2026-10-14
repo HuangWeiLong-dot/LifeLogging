@@ -311,6 +311,7 @@ class Usage:
     cache_miss: int = 0   # 未命中的输入 token（含首次写入缓存的）
     output: int = 0       # 输出 token
     reasoning: int = 0    # 其中的推理 token（信息性，已包含在 output 里）
+    finish_reason: str = ""   # 供应商原样返回的结束原因（"stop" / "length" / ...）
 
     @property
     def total_in(self) -> int:
@@ -398,6 +399,27 @@ class BudgetExceeded(RuntimeError):
     pass
 
 
+class TruncatedOutput(RuntimeError):
+    """模型输出被 max_tokens 截断 —— 正文根本没写完。
+
+    为什么值得单独立一个异常：**截断是静默的**。
+    HTTP 还是 200，`content` 还是个合法字符串，只是少了后半段。
+    不显式检查 `finish_reason` 的话，半截正文会被当成正常结果写进日记 ——
+    退出码 0、水位线照常推进，于是那一天**永远不会重跑**。
+
+    实测（2026-10-13 23:00 那次）：`max_output_tokens: 8000`，模型输出整
+    8,000 token，其中 **7,915 是推理 token**，正文只剩几十个 token 的额度。
+    产出的日记在第二条时间块中间断掉
+    （`- [time:: 19:16-21:11] [duration:: 2h] [category:: Work] [` 就没了），
+    而日志里只有一行「out 8,000」—— 看不出任何异常。
+
+    ⚠️ 根因是**推理 token 和正文共用同一个 max_tokens 预算**。
+       调大上限只是降低概率，真正兜底的是这个检查。
+    """
+
+    pass
+
+
 @dataclass
 class LLM:
     """统一的 LLM 入口，内置预算预检与记账。
@@ -475,6 +497,22 @@ class LLM:
                 f"Add it to the price table or budget control fails silently.",
                 file=sys.stderr,
             )
+
+        # ⚠️ 这个检查必须放在**记账之后**：被截断的那次调用照样花了钱，
+        #    先抛异常就会让这笔钱进不了台账，预算统计就偏低。
+        # ⚠️ 两种写法都要认：OpenAI 兼容端（DeepSeek）回 "length"，
+        #    Anthropic 回 "max_tokens"。
+        if usage.finish_reason in ("length", "max_tokens"):
+            raise TruncatedOutput(
+                f"Output was cut off by max_tokens (finish_reason={usage.finish_reason!r}): "
+                f"{usage.output:,} tokens out, of which {usage.reasoning:,} were reasoning.\n"
+                f"  Reasoning tokens share the ai.max_output_tokens budget "
+                f"({self.cfg['ai']['max_output_tokens']}) with the actual answer,\n"
+                f"  so a hard day can leave almost nothing for the body.\n"
+                f"  The incomplete result is NOT written; the day stays unprocessed and "
+                f"will be retried on the next run."
+            )
+
         return text
 
     def _model_name(self) -> str:
@@ -535,14 +573,18 @@ class LLM:
 
         u = d.get("usage") or {}
         reasoning = (u.get("completion_tokens_details") or {}).get("reasoning_tokens", 0)
+        choice = d["choices"][0]
         # content 可能为 None（模型只产出了推理、没产出正文）
-        text = (d["choices"][0]["message"].get("content") or "")
+        text = (choice["message"].get("content") or "")
+        # "length" = 撞上 max_tokens 被截断。必须往上带，见 TruncatedOutput。
+        finish = str(choice.get("finish_reason") or "")
 
         return text, Usage(
             cache_hit=int(u.get("prompt_cache_hit_tokens", 0) or 0),
             cache_miss=int(u.get("prompt_cache_miss_tokens", 0) or 0),
             output=int(u.get("completion_tokens", 0) or 0),
             reasoning=int(reasoning or 0),
+            finish_reason=finish,
         )
 
     def _anthropic(self, system: str, user: str, cache_system: bool):
@@ -576,6 +618,8 @@ class LLM:
             cache_miss=int(getattr(u, "input_tokens", 0) or 0)
             + int(getattr(u, "cache_creation_input_tokens", 0) or 0),
             output=int(getattr(u, "output_tokens", 0) or 0),
+            # Anthropic 的 max_tokens 截断用 "max_tokens" 表示（OpenAI 兼容端是 "length"）
+            finish_reason=str(getattr(resp, "stop_reason", "") or ""),
         )
 
     def _claude_code(self, system: str, user: str):

@@ -58,8 +58,10 @@ LifeLogging/
 ├── config/
 │   └── config.example.yaml      ← 全部可调参数集中在这，改这里不用改代码
 ├── docs/
+│   ├── 实现文档.md                ← ★ 系统现在有什么、记录了哪些数据
 │   ├── 工具核实报告.md            ← ⚠️ 先读这个：哪些工具名与现实有出入
 │   ├── 分阶段落地.md              ← 最小可行 / 完整 两套方案对照
+│   ├── 扩展路线图.md              ← 以后想加的数据源
 │   └── 运维手册.md                ← 排障、备份、隐私开关
 ├── vault/                       ← Obsidian 库（用 Obsidian 打开这个目录）
 │   ├── 01-Location/
@@ -76,7 +78,8 @@ LifeLogging/
 ├── scripts/
 │   ├── smoke_test.py            ← 冒烟测试：不碰采集源，验证代码与配置
 │   ├── collect_desktop.py       ← ActivityWatch → 事件表（无录屏录音）
-│   ├── collect_phone.py         ← Dawarich → 事件表
+│   ├── collect_phone.py         ← Dawarich → 事件表（手机位置）
+│   ├── collect_phone_events.py  ← 服务器中继 → 事件表（手机使用：解锁/切应用）
 │   ├── normalize.py             ← 原始数据 → 柳比歇夫分类
 │   ├── generate_journal.py      ← 夜间 AI 生成日记
 │   ├── cost_guard.py            ← 预算硬封顶
@@ -84,6 +87,8 @@ LifeLogging/
 │   ├── run_daily.ps1            ← 每日流水线（供计划任务调用）
 │   ├── setup_scheduler.ps1      ← 注册 Windows 计划任务
 │   └── check_ps1.ps1            ← .ps1 语法预检（改完脚本先跑它）
+├── server/
+│   └── phone-relay/             ← Linux 服务器：手机使用事件中继（单文件，无依赖）
 ├── docker/
 │   ├── dawarich/                ← Linux 服务器：位置后端
 │   ├── grafana/                 ← 可视化：直接读 state/events.db
