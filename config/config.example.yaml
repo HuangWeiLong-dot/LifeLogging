@@ -25,6 +25,39 @@ categories:
   - Social
   - Other
 
+# ── 时间黑洞 ──────────────────────────────────────────────
+# 「黑洞」= 事后回想不起来、也不觉得值的那段时间（刷短视频、无目的逛站点）。
+# 只在概览页出数字，不影响日记分类。
+#
+# 判定用的是**看得见的东西**：应用名 + 窗口标题里的关键词，小写子串匹配。
+# 不用「时长超过 X 小时」这种纯时间规则 —— 一次 3 小时的专注时长更长，
+# 但它恰恰是黑洞的反面。
+#
+# ⚠️ enabled: false 或者整节删掉，就一个都不标。面板会一直空着，
+#    但这比标错好 —— 被冤枉的时间会直接显示在面板上。
+# ⚠️ 关键词写得太宽会把正常时间也吃进去（"bilibili" 命中学习视频）。
+#    宁可少写几个，看几天再补。
+blackhole:
+  enabled: false
+  apps:                      # 命中应用名（子串）
+    - "douyin"
+    - "tiktok"
+    - "weibo"
+    - "xiaohongshu"
+    - "kuaishou"
+  sites:                     # 命中 URL（子串）—— 浏览器里的黑洞主要在站点上，
+    - "douyin.com"           #   靠窗口标题是认不出来的（常常只剩「某文档 / New tab」）
+    - "weibo.com"
+    - "xiaohongshu.com"
+    - "zhihu.com/hot"
+  titles:                    # 命中窗口标题（子串）
+    - "抖音"
+    - "小红书"
+    - "微博"
+    - "recommend"            # 各种「猜你喜欢 / 推荐」
+    - "shorts"
+  min_minutes: 6             # 短于这个时长的块不算 —— 刷 30 秒手机算不上一次活动
+
 # ── 采集层 ────────────────────────────────────────────────
 sources:
   # ── 屏幕/麦克风录制 —— 已关闭 ──────────────────────────────
@@ -90,6 +123,18 @@ ai:
   deepseek_base: "https://api.deepseek.com"
   deepseek_model: "deepseek-flash"
   deepseek_api_key_env: "DEEPSEEK_API_KEY"
+
+  # ── 精确账单（可选，但强烈建议配）────────────────────────────
+  # 上面那把 API key 只能查余额，**查不到按天按模型的用量**。
+  # 想拿到和官网「用量」页一模一样的数字，得用**登录态 userToken**
+  # （platform.deepseek.com → F12 → Application → Local Storage → userToken
+  #   → 复制 value 字段那个字符串）。见 scripts/collect_ai_usage.py 的文件头。
+  #
+  # ⚠️ 它是登录凭证，等于你的账号：别提交进 git、别贴进聊天记录。
+  #    和 API key 一样只存环境变量，这里只写变量名。
+  #       setx DEEPSEEK_USER_TOKEN "..."
+  # ⚠️ 会过期（重新登录就换）。过期后 collect_ai_usage.py 会报 401 让你重拷。
+  deepseek_user_token_env: "DEEPSEEK_USER_TOKEN"
   # deepseek-flash     快、极便宜。日记生成够用，先从这个开始
   # deepseek-v4-pro    贵约 3 倍，写作质量更高。不满意 Flash 的输出再换
   #

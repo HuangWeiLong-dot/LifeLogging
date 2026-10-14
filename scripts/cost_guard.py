@@ -18,6 +18,7 @@
   python scripts/cost_guard.py status            # 今天花了多少
   python scripts/cost_guard.py gate              # 预检（超了返回退出码 1）
   python scripts/cost_guard.py report --days 30  # 近 30 天报表
+  python scripts/cost_guard.py emit-events       # 每日合计写进事件表（给 Grafana）
   python scripts/cost_guard.py check-deepseek    # 余额 + 剩余可用天数
 """
 
@@ -25,16 +26,17 @@ from __future__ import annotations
 
 import argparse
 import os
+import sqlite3
 import sys
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import CostLedger, header, is_peak, load_config  # noqa: E402
+from common import CostLedger, Event, EventsClient, header, is_peak, load_config  # noqa: E402
 
 CFG = load_config()
 TZ = ZoneInfo(CFG["timezone"])
@@ -172,6 +174,107 @@ def cmd_report(days: int) -> int:
     return 0
 
 
+def daily_totals() -> dict[str, dict[str, float]]:
+    """台账 → ``{日期: {cost, calls, hit, miss, output, reasoning, peak}}``。"""
+    rows: dict[str, dict[str, float]] = defaultdict(
+        lambda: {"cost": 0.0, "calls": 0.0, "hit": 0.0, "miss": 0.0,
+                 "output": 0.0, "reasoning": 0.0, "peak": 0.0}
+    )
+    for e in LEDGER.entries():
+        d = e.get("day") or ""
+        if not d:
+            continue
+        r = rows[d]
+        r["cost"] += float(e.get("cost", 0))
+        r["calls"] += 1
+        r["hit"] += int(e.get("cache_hit", 0))
+        r["miss"] += int(e.get("cache_miss", 0))
+        r["output"] += int(e.get("output", 0))
+        # reasoning 已经含在 output 里（见 common.Usage 的注释），这里只是
+        # 额外记一份，好在面板上看出「钱主要花在思考上」这件事。
+        r["reasoning"] += int(e.get("reasoning", 0))
+        r["peak"] += 1 if e.get("peak") else 0
+    return dict(rows)
+
+
+def cmd_emit_events(days: int) -> int:
+    """把台账**按天**写成 ``ai/daily_cost`` 事件，供 Grafana 读。
+
+    为什么要有这一步：每次调用的花费记在 ``state/cost_ledger.jsonl``（JSONL），
+    而 Grafana 挂的是 ``state/events.db``。JSONL 那边它一个字都读不到 ——
+    所以「每日 AI 花费」这个面板在补上这条链路之前一直是空的。
+    真话是：不是面板坏了，是**没有任何东西往事件表写这个 metric**。
+
+    ⚠️ 必须「先删再写」，不能直接 post
+    ---------------------------------
+    事件表的唯一索引是 ``(source, domain, metric, ts_utc, COALESCE(value_text,''))``，
+    **不含 value_num**。而台账是**当天累加**的 —— 早上 0.003、晚上 0.05，
+    第二次会被当成重复静默丢掉（``INSERT OR IGNORE``），那天就永远停在早上的数字上。
+
+    手表步数踩的是同一个坑，见 ``middleware/ingest_gadgetbridge.py`` 里那段注释。
+    """
+    cur = _cur()
+    client = EventsClient(CFG)
+    if not client.ping():
+        print(f"FAIL events API is not running ({client.base})")
+        return 1
+
+    since = (datetime.now(TZ).date() - timedelta(days=days - 1)).isoformat()
+    rows = {d: r for d, r in daily_totals().items() if d >= since}
+
+    header(f"Emit daily cost events · last {days} days")
+    if not rows:
+        print("  No ledger records in this window; nothing to write.")
+        return 0
+
+    for d in sorted(rows):
+        r = rows[d]
+        # 当天本地 00:00 → UTC。和 health/location 的日汇总事件同一个约定。
+        try:
+            y, m, dd = (int(x) for x in d.split("-"))
+        except ValueError:
+            print(f"  WARN unparseable day {d!r}, skipped")
+            continue
+        ts = datetime(y, m, dd, tzinfo=TZ).astimezone(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+
+        # 删掉这一天上一次写的（可能只有半天数据），再写完整的。
+        try:
+            httpx.delete(
+                f"{client.base}/day",
+                headers=client.headers,
+                params={"day": d, "source": "cost_guard"},
+                timeout=30.0,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"  WARN delete failed for {d}: {e} (a stale row may survive)")
+
+        client.post_batch([
+            Event(
+                ts_utc=ts,
+                domain="ai",
+                metric="daily_cost",
+                value_num=round(r["cost"], 6),
+                value_text=cur,
+                source="cost_guard",
+                meta={
+                    "calls": int(r["calls"]),
+                    "cache_hit": int(r["hit"]),
+                    "cache_miss": int(r["miss"]),
+                    "output": int(r["output"]),
+                    "reasoning": int(r["reasoning"]),
+                    "peak_calls": int(r["peak"]),
+                },
+            )
+        ])
+        print(f"  OK  {d}  {r['cost']:.4f} {cur}  "
+              f"({int(r['calls'])} calls, {int(r['peak'])} at peak rate)")
+
+    print(f"\nOK  {len(rows)} day(s) written as ai/daily_cost")
+    return 0
+
+
 def cmd_check_deepseek() -> int:
     """查 DeepSeek 余额，并用台账的消耗速度推算还能用多久。
 
@@ -225,35 +328,94 @@ def cmd_check_deepseek() -> int:
         print(f"  {amt:>10.2f} {cur}"
               f"   (topped up {b.get('topped_up_balance', '?')} / granted {b.get('granted_balance', '?')}）")
 
-    # 用最近 7 天的实际消耗推算
-    recent = []
+    print()
+
+    # ── 用**余额差**推算还能撑几天 ──────────────────────────────────
+    #
+    # ⚠️ 这里原来是拿台账算的，那个数**会骗人**：
+    #    台账只记本流水线自己的调用（一天几分钱），而余额是被**所有**
+    #    用这把 key 的东西一起扣的 —— 最典型的是 Claude Code 和
+    #    AI 编辑器，它们一个字节都不往我们的台账里写。
+    #    实测：台账算出来「还能用 41 天」，而真实消耗是它的 100 倍。
+    #
+    #    余额是唯一能反映真实支出的数。两次采样做差即可。
+    #    样本在 events 表里（collect_ai_usage.py 每天写一条 ai/balance）。
+    real = _balance_history()
+    if len(real) >= 2:
+        first_day, first_bal = real[0]
+        last_day, last_bal = real[-1]
+        span = max((last_day - first_day).days, 1)
+        burn = (first_bal - last_bal) / span
+        print(f"  Balance history: {len(real)} samples "
+              f"({first_day.isoformat()} -> {last_day.isoformat()})")
+        print(f"  Real burn: {burn:.2f} {_cur()}/day "
+              f"(all tools, not just this pipeline)")
+        if burn > 0:
+            remain = total / burn
+            print(f"  -> At the real rate the balance lasts about {remain:.1f} days")
+            if remain < 3:
+                print("  ⚠️  CRITICAL: under three days. Top up, or the nightly")
+                print("      journal will start failing on an empty balance.")
+            elif remain < 14:
+                print("  WARN Under two weeks. Top up, or reduce usage.")
+        else:
+            print("  (balance flat or topped up over this window; no projection)")
+        print()
+        print(f"  For comparison, this pipeline's own ledger says "
+              f"{LEDGER.spend_on(today, TZ):.4f} today "
+              f"-- that is a different number and a much smaller one.")
+        return 0
+
+    # 只有一个样本（或没有）：退回台账口径，但**必须说清楚它只覆盖本流水线**
     today = datetime.now(TZ).date()
-    for i in range(7):
-        d_i = today - timedelta(days=i)
-        recent.append(LEDGER.spend_on(d_i, TZ))
+    recent = [LEDGER.spend_on(today - timedelta(days=i), TZ) for i in range(7)]
     spent_7d = sum(recent)
     days_with_data = sum(1 for x in recent if x > 0)
 
-    print()
     if days_with_data == 0:
         print("  No spend in the last 7 days of ledger; cannot project runway.")
+        print("  (Only one balance sample so far -- runway needs at least two.)")
         return 0
 
     per_day = spent_7d / 7
-    print(f"  Last 7 days: {spent_7d:.4f} {_cur()} ({days_with_data} days with data)")
+    print(f"  Last 7 days (pipeline ledger only): {spent_7d:.4f} {_cur()}")
     print(f"  Daily average {per_day:.4f} {_cur()}")
-
     if per_day > 0:
-        remaining_days = total / per_day
-        print(f"  -> At this rate the balance lasts about {remaining_days:.0f} days")
-        if remaining_days < 14:
-            print("  WARN Under two weeks. Top up, or reduce call frequency.")
-
+        print(f"  -> At this rate the balance lasts about {total / per_day:.0f} days")
     print()
-    print("  Note: DeepSeek exposes no itemised billing API, so this can only project runway.")
-    print("        To check precisely, compare the usage page at platform.deepseek.com")
-    print("        against the magnitude of state/cost_ledger.jsonl.")
+    print("  ⚠️  This projection uses state/cost_ledger.jsonl, which only sees THIS")
+    print("      pipeline's calls. Anything else using the same key (Claude Code,")
+    print("      editors, ...) is invisible here and can easily be 100x larger.")
+    print("      At least two days of balance samples are needed for the real rate --")
+    print("      collect_ai_usage.py records one per run.")
     return 0
+
+
+def _balance_history() -> list[tuple[date, float]]:
+    """从 events 表里读余额采样，按天取最后一条。
+
+    直接读 SQLite（只读）而不是走 HTTP：这是本地诊断命令，
+    不该依赖事件表服务在不在跑。
+    """
+    db = Path(CFG["state_dir"]) / "events.db"
+    if not db.exists():
+        return []
+    try:
+        with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
+            rows = conn.execute(
+                "SELECT day_local, value_num FROM events "
+                "WHERE domain='ai' AND metric='balance' ORDER BY ts_utc"
+            ).fetchall()
+    except sqlite3.Error:
+        return []
+
+    per_day: dict[date, float] = {}
+    for day_s, value in rows:
+        try:
+            per_day[date.fromisoformat(day_s)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return sorted(per_day.items())
 
 
 def main() -> None:
@@ -264,6 +426,9 @@ def main() -> None:
     sub.add_parser("gate", help="pre-flight gate (exit 1 when over budget)")
     p = sub.add_parser("report", help="report for the last N days")
     p.add_argument("--days", type=int, default=30)
+    p = sub.add_parser("emit-events",
+                       help="write daily totals into the events table (for Grafana)")
+    p.add_argument("--days", type=int, default=90)
     sub.add_parser("check-deepseek", help="balance + projected runway")
 
     args = ap.parse_args()
@@ -274,6 +439,8 @@ def main() -> None:
         sys.exit(cmd_gate())
     elif args.cmd == "report":
         sys.exit(cmd_report(args.days))
+    elif args.cmd == "emit-events":
+        sys.exit(cmd_emit_events(args.days))
     elif args.cmd == "check-deepseek":
         sys.exit(cmd_check_deepseek())
 

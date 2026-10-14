@@ -18,15 +18,18 @@ import argparse
 import json
 import re
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
     BudgetExceeded,
     CostLedger,
     Day,
+    EventsClient,
     LLM,
     TruncatedOutput,
     header,
@@ -419,6 +422,71 @@ def extract_section(text: str, heading: str) -> str:
     return "\n".join(out).rstrip()
 
 
+def _local_span_to_utc(day: Day, span: str) -> list[str] | None:
+    """``"09:30-12:00"`` → ``["…T01:30:00Z", "…T04:00:00Z"]``（当天本地时区）。"""
+    try:
+        a, b = span.split("-", 1)
+        t1 = datetime.strptime(a.strip(), "%H:%M")
+        t2 = datetime.strptime(b.strip(), "%H:%M")
+    except (ValueError, AttributeError):
+        return None
+
+    d = day.start_local.date()
+    start = datetime.combine(d, t1.time(), tzinfo=TZ)
+    end = datetime.combine(d, t2.time(), tzinfo=TZ)
+    # 跨午夜的块（"23:40-00:30"）要往后挪一天，否则 end < start 会被端点当无效丢掉。
+    if end <= start:
+        end += timedelta(days=1)
+
+    return [
+        start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    ]
+
+
+def write_back_blackholes(day: Day, body: str) -> int:
+    """把日记正文里标了 ``[blackhole:: true]`` 的时间段回写进 blocks 表。
+
+    ⚠️ 为什么必须有这一步：
+       黑洞是 AI 读完一天活动之后的**语义判断**，规则引擎判不出来。
+       但 AI 的输出落在**日记正文**（Markdown），而 Grafana 读的是数据库 ——
+       不回写的话面板永远是空的。这正是本次改动之前的状态：
+       概览页「今日时间黑洞」和「时间与分类 → 时间黑洞」两张面板全空，
+       因为 blocks.blackhole 从来没有任何代码把它设成 True。
+
+    ⚠️ **失败不能影响日记**：日记这时已经写盘了，回写只是给可视化补数据。
+       为了它让整天的处理失败（退出码非 0 → 水位线不推进 → 反复重跑）
+       是本末倒置。
+    """
+    ranges = [
+        r for r in (
+            _local_span_to_utc(day, m.group(1))
+            for m in BLOCK_RE.finditer(body)
+            if m.group(4).strip().lower() == "true"
+        )
+        if r
+    ]
+    if not ranges:
+        return 0
+
+    try:
+        client = EventsClient(CFG)
+        if not client.ping():
+            print("  ⚠️  events API is down -- blackhole flags not written back")
+            return 0
+        r = httpx.post(
+            f"{client.base}/blocks/mark-blackhole",
+            headers=client.headers,
+            json={"day": day.iso, "ranges": ranges},
+            timeout=30.0,
+        )
+        r.raise_for_status()
+        return int(r.json().get("marked", 0))
+    except Exception as e:  # noqa: BLE001
+        print(f"  ⚠️  Blackhole write-back failed: {e}")
+        return 0
+
+
 def actual_sources(tl: dict) -> list[str]:
     """这个日记真正用到了哪些源。
 
@@ -666,6 +734,11 @@ def main() -> None:
 
     write_ai_session(day, stats, run_id, warnings)
     print(f"OK  Appended to the AI session log")
+
+    # 5b. 把 AI 标出的时间黑洞回写进数据库（Grafana 读的是数据库，不是日记）
+    n_bh = write_back_blackholes(day, body)
+    if n_bh:
+        print(f"OK  Blackhole flags: {n_bh} block(s) marked from the journal")
 
     # 6. 各分区的副笔记（位置 / 手机 / 时间明细 / 任务 / 周报）
     #    有数据才写，没数据不生成空文件 —— 空目录比没有目录更让人困惑，

@@ -1,0 +1,666 @@
+{
+  "uid": "lifelogging-ai",
+  "title": "生命记录 · AI 用量",
+  "description": "AI 到底花了多少钱、花在哪。数据来自三处：DeepSeek 平台的用量接口（精确账单，需要 userToken）、账户余额（精确但只有当前值）、以及 Claude Code 的本地会话记录（估算，只用来出「花在哪个项目上」这个形状）。⚠️ 本流水线自己的花费只是其中很小一部分，见「其中：本流水线」那个面板。",
+  "tags": [
+    "lifelogging"
+  ],
+  "timezone": "Asia/Shanghai",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5m",
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "今日实际花费（元）",
+      "description": "**权威数字**：来自 DeepSeek 平台账号的用量接口，和官网页面上那个数一模一样。它包含**所有**用这把 key 的东西 —— Claude Code、编辑器、本流水线，全都算在内。⚠️ 它不是「日记花了多少钱」，是「今天这个账号被扣了多少钱」。",
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "rawQueryText": "SELECT ROUND(value_num,2) AS v FROM events WHERE domain='ai' AND metric='spend' AND day_local = date('now','+8 hours')",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 2
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "今日请求数",
+      "description": "平台侧统计的 API 请求次数。和下面「Token 明细」里的数字同源。",
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 5,
+        "y": 0
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "rawQueryText": "SELECT MAX(CAST(json_extract(meta_json,'$.requests') AS INTEGER)) AS v FROM events WHERE domain='ai' AND metric='model_tokens' AND day_local = date('now','+8 hours')",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "今日 Tokens",
+      "description": "当天消耗的全部 token（输入命中 + 输入未命中 + 输出）。",
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 10,
+        "y": 0
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "rawQueryText": "SELECT SUM(value_num) AS v FROM events WHERE domain='ai' AND metric='model_tokens' AND day_local = date('now','+8 hours')",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "账号余额（元）",
+      "description": "DeepSeek 账户当前余额。**余额归零 = 当晚日记生成直接失败**，所以这个数要盯着。它每次跑流水线采一次。",
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 15,
+        "y": 0
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "rawQueryText": "SELECT ROUND(value_num,2) AS v FROM events WHERE domain='ai' AND metric='balance' ORDER BY ts_utc DESC LIMIT 1",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 2
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "其中：本流水线（元）",
+      "description": "★ 这就是**原来那个面板**统计的东西 —— 我们的采集脚本每晚写日记时自己的调用。实测它只占总支出的 1% 左右，两者差两个数量级。两个数都对，只是它们回答的是不同的问题。",
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 19,
+        "y": 0
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "rawQueryText": "SELECT ROUND(COALESCE(SUM(value_num),0),4) AS v FROM events WHERE domain='ai' AND metric='daily_cost' AND day_local = date('now','+8 hours')",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 4
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "每日实际花费（近 30 天，元）",
+      "description": "以平台账单为准 —— 不是估算，是账号真被扣掉的钱。",
+      "gridPos": {
+        "h": 9,
+        "w": 14,
+        "x": 0,
+        "y": 5
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "timeColumns": [
+            "time"
+          ],
+          "rawQueryText": "SELECT strftime('%Y-%m-%dT%H:%M:%S+08:00', day_local) AS time, ROUND(SUM(value_num),2) AS '实际花费' FROM events WHERE domain='ai' AND metric='spend' AND day_local >= date('now','+8 hours','-30 days') GROUP BY day_local ORDER BY day_local",
+          "queryType": "time series"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 2,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 2,
+            "fillOpacity": 70,
+            "barAlignment": 0,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "scaleDistribution": {
+              "type": "linear"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "piechart",
+      "title": "模型花费占比（近 30 天）",
+      "description": "按模型拆。平台会把当月所有模型都列出来（没用过的记 0），这里已经过滤掉了。",
+      "gridPos": {
+        "h": 9,
+        "w": 10,
+        "x": 14,
+        "y": 5
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "rawQueryText": "SELECT value_text AS '模型', ROUND(SUM(value_num),2) AS '元' FROM events WHERE domain='ai' AND metric='model_cost' AND day_local >= date('now','+8 hours','-30 days') GROUP BY value_text ORDER BY 2 DESC",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "pieType": "donut",
+        "displayLabels": [
+          "name",
+          "percent"
+        ],
+        "reduceOptions": {
+          "calcs": [
+            "sum"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true,
+          "values": [
+            "value",
+            "percent"
+          ]
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 2,
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "每日 Tokens（近 30 天）",
+      "description": "⚠️ 单位是百万级，图上显示的是 SI 缩写（Mil = 百万）。输入绝大部分走缓存命中，所以 token 数很大但钱不多 —— 真正贵的是输出。",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "timeColumns": [
+            "time"
+          ],
+          "rawQueryText": "SELECT strftime('%Y-%m-%dT%H:%M:%S+08:00', day_local) AS time, SUM(value_num) AS 'Tokens' FROM events WHERE domain='ai' AND metric='model_tokens' AND day_local >= date('now','+8 hours','-30 days') GROUP BY day_local ORDER BY day_local",
+          "queryType": "time series"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 2,
+            "fillOpacity": 70,
+            "barAlignment": 0,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "scaleDistribution": {
+              "type": "linear"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "type": "barchart",
+      "title": "按项目 Token（近 30 天）",
+      "description": "⚠️ **这一张是估算**：来自 Claude Code 本地会话记录，按 message.id 去重后汇总。平台账单答不出「花在哪个项目上」，只有本地文件知道。所以它的**形状可信，绝对值不可信** —— 别拿它当账单。",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "rawQueryText": "SELECT value_text AS '项目', SUM(value_num) AS 'Tokens' FROM events WHERE domain='ai' AND metric='project_tokens' AND day_local >= date('now','+8 hours','-30 days') GROUP BY value_text ORDER BY 2 DESC LIMIT 15",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "xTickLabelRotation": 0,
+        "showValue": "auto",
+        "stacking": "none",
+        "legend": {
+          "showLegend": false,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 0,
+            "fillOpacity": 85,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "每日明细",
+      "description": "逐日汇总。请求数取的是当天各模型的和；缓存命中率 = 命中 /（命中+未命中）。",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 23
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "rawQueryText": "SELECT day_local AS '日期', ROUND(SUM(CASE WHEN metric='spend' THEN value_num END),2) AS '花费(元)', ROUND(SUM(CASE WHEN metric='model_tokens' THEN value_num END)/1000000.0,1)   AS 'Tokens(百万)', MAX(CASE WHEN metric='model_tokens'   THEN CAST(json_extract(meta_json,'$.requests') AS INTEGER) END) AS '请求数', ROUND(100.0 * SUM(CASE WHEN metric='model_tokens'   THEN CAST(json_extract(meta_json,'$.in_cache_hit') AS INTEGER) ELSE 0 END)   / MAX(1, SUM(CASE WHEN metric='model_tokens'   THEN CAST(json_extract(meta_json,'$.in_cache_hit') AS INTEGER)      + CAST(json_extract(meta_json,'$.in_cache_miss') AS INTEGER) ELSE 0 END)),1)   AS '缓存命中率(%)' FROM events WHERE domain='ai' AND metric IN ('spend','model_tokens') AND day_local >= date('now','+8 hours','-30 days') GROUP BY day_local ORDER BY day_local DESC",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false,
+          "fields": ""
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true,
+            "inspect": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "日期"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "花费(元)"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Tokens(百万)"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 1
+              },
+              {
+                "id": "custom.width",
+                "value": 130
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "请求数"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "缓存命中率(%)"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 1
+              },
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

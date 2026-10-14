@@ -541,6 +541,70 @@ def fold_short_blocks(blocks: list[Block],
     return out
 
 
+# ── 时间黑洞 ────────────────────────────────────────────────────────
+#
+# 「黑洞」= 事后回想不起来、也不觉得值的那段时间。
+#
+# ⚠️ 这个判定**必须可解释**，所以只用看得见的东西：应用名和窗口标题里的关键词。
+#    不用「时长 > 2 小时」这种纯时间规则 —— 一次 3 小时的专注工作时长更长，
+#    但它恰恰是黑洞的反面。
+#
+# ⚠️ 规则放在 config.yaml 的 `blackhole:` 节里，不写死在代码里：
+#    什么算黑洞因人因时而异（刷短视频算，看行业新闻可能不算）。
+#    写死等于替用户下结论，而被冤枉的时间会直接出现在面板上。
+#
+# ⚠️ **没有配置就一个都不标**，不是「全标」—— 面板空着比标错好。
+#    这也让老配置文件（没有 blackhole 节）不会因为这个功能而行为突变。
+
+
+def mark_blackholes(blocks: list[Block], rules: dict[str, Any]) -> int:
+    """按配置里的关键词给块打黑洞标记，返回标记了几个。
+
+    匹配的是**子串**（小写化后），不是全等：窗口标题千变万化
+    （「抖音 - Google Chrome」「Bilibili - 哔哩哔哩」），全等永远匹配不上。
+
+    ⚠️ 除了应用名和标题，还要看 **URL**。
+       浏览器里的黑洞基本都发生在**站点**上，而窗口标题常常是
+       「✳ 某文档 / New tab」这种看不出内容的串 —— 光看标题会漏掉
+       整片该标的东西。`sites` 那一列就是给这个用的。
+
+    `min_minutes` 用来放过太短的块：刷 30 秒手机不是「黑洞」，
+    那连一次活动切换都算不上。
+    """
+    if not rules or not rules.get("enabled", False):
+        return 0
+
+    apps = [str(a).lower() for a in (rules.get("apps") or []) if str(a).strip()]
+    titles = [str(t).lower() for t in (rules.get("titles") or []) if str(t).strip()]
+    sites = [str(s).lower() for s in (rules.get("sites") or []) if str(s).strip()]
+    if not apps and not titles and not sites:
+        return 0
+
+    try:
+        min_seconds = float(rules.get("min_minutes", 6)) * 60.0
+    except (TypeError, ValueError):
+        min_seconds = 360.0
+
+    marked = 0
+    for b in blocks:
+        if b.seconds < min_seconds:
+            continue
+        app = (b.app or "").lower()
+        url = (b.url or "").lower()
+        if any(k in app for k in apps):
+            b.blackhole = True
+            marked += 1
+            continue
+        if any(k in url for k in sites):
+            b.blackhole = True
+            marked += 1
+            continue
+        if any(k in (t or "").lower() for t in b.titles for k in titles):
+            b.blackhole = True
+            marked += 1
+    return marked
+
+
 # ── 手机应用名 ──────────────────────────────────────────────────────
 #
 # Tasker 上报的通常是**包名**（`%app_package` → com.tencent.mm），
@@ -1093,6 +1157,16 @@ def main() -> None:
     raw_n = len(blocks)
     blocks = fold_short_blocks(blocks)
     print(f"  ✓ Merged into {raw_n} time blocks → {len(blocks)} after folding the short ones in")
+
+    # 黑洞判定放在**折叠之后**：并进相邻块的那几分钟不该单独判一次，
+    # 要判就判合并后的整块（那才是日记和面板里显示的那一行）。
+    n_bh = mark_blackholes(blocks, CFG.get("blackhole") or {})
+    if CFG.get("blackhole", {}).get("enabled"):
+        if n_bh:
+            print(f"  ✓ Marked {n_bh} block(s) as time sinks "
+                  f"({sum(b.hours for b in blocks if b.blackhole):.2f}h)")
+        else:
+            print("  . No block matched the blackhole rules today")
 
     tl = Timeline(day=day.iso, blocks=blocks, unmatched_apps=unmatched)
 

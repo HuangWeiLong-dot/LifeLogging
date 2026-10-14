@@ -17,6 +17,11 @@
  *
  *   node docker/grafana/verify_dashboards.mjs
  *   node docker/grafana/verify_dashboards.mjs http://localhost:3001/d/xxx
+ *   node docker/grafana/verify_dashboards.mjs --shot state/logs   # 顺带截图
+ *
+ * `--shot <目录>` 给每个仪表盘存一张 PNG。**地图面板只能靠它验**：
+ * 别的面板"有数"就等于画对了，而地图"不是 No data"也可能是空白底图、
+ * 点全堆在坐标原点、或者路线连成了乱麻 —— 那些都只有看图才知道。
  *
  * 环境变量：
  *   GRAFANA_URL   默认 http://127.0.0.1:3001
@@ -29,7 +34,7 @@
 
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { existsSync, mkdtempSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -53,10 +58,24 @@ if (!chromePath) {
   process.exit(2);
 }
 
-// 默认验证本仓库 provisioning 的三个仪表盘
-const urls = process.argv.slice(2).length
-  ? process.argv.slice(2)
-  : [`${BASE}/d/lifelogging-overview`, `${BASE}/d/lifelogging-time`, `${BASE}/d/lifelogging-location`];
+// 默认验证本仓库 provisioning 的全部仪表盘。
+// ⚠️ 这个列表是**写死的**：它不会去读 provisioning 目录。
+//    新增仪表盘时忘了加进来，它就会安安静静地不被验证 —— 加一行的事。
+const ALL = [
+  'lifelogging-overview',
+  'lifelogging-time',
+  'lifelogging-location',
+  'lifelogging-phone',
+  'lifelogging-health',
+  'lifelogging-ai',
+].map(uid => `${BASE}/d/${uid}`);
+
+const argv = process.argv.slice(2);
+const shotIdx = argv.indexOf('--shot');
+const shotDir = shotIdx >= 0 ? argv[shotIdx + 1] : null;
+// 剩下的才当 URL：去掉选项本身，以及紧跟在 --shot 后面的那个目录名
+const urlArgs = argv.filter((a, i) => !a.startsWith('--') && i !== shotIdx + 1);
+const urls = urlArgs.length ? urlArgs : ALL;
 
 const AUTH = 'Basic ' + Buffer.from(`${USER}:${PASS}`).toString('base64');
 const profile = mkdtempSync(join(tmpdir(), 'grafana-verify-'));
@@ -104,6 +123,14 @@ try {
 
   let problems = 0;
   for (const url of urls) {
+    // ⚠️ 视口必须在**导航之前**放大，不能在截图前临时改。
+    //    geomap 的「自动缩放到数据范围」只在初次布局时算一次；导航后再改视口尺寸，
+    //    地图会重排并掉回全世界视图 —— 截出来的图看不出任何东西，
+    //    而这时候面板**是正常的**，只是被截图这一步搞坏了。
+    if (shotDir) {
+      await send('Emulation.setDeviceMetricsOverride',
+                 { width: 1600, height: 2200, deviceScaleFactor: 1, mobile: false });
+    }
     await send('Page.navigate', { url });
     await sleep(9000);
 
@@ -129,6 +156,19 @@ try {
 
     const r = JSON.parse(raw);
     const name = url.replace(BASE, '') || '/';
+
+    if (shotDir) {
+      const shot = await send('Page.captureScreenshot', { format: 'png' });
+      if (shot?.data) {
+        mkdirSync(shotDir, { recursive: true });
+        const file = join(shotDir, `${name.replace(/[^a-z0-9-]/gi, '_') || 'root'}.png`);
+        writeFileSync(file, Buffer.from(shot.data, 'base64'));
+        console.log(`   📷 ${file}`);
+      } else {
+        console.log('   ⚠️ 截图失败（Page.captureScreenshot 没返回数据）');
+      }
+    }
+
     const bad = r.onLogin || r.noData || r.locked;
     if (bad) problems++;
     console.log(`\n${bad ? '❌' : '✅'} ${name}`);

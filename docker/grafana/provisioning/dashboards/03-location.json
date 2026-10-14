@@ -170,8 +170,8 @@
     {
       "id": 4,
       "type": "stat",
-      "title": "近 30 天出行",
-      "description": "transport 类事件合计时长。只统计真正在移动的段，原地不动不计入。",
+      "title": "近 30 天出门",
+      "description": "当天「离开上一个停留点 → 到达下一个停留点」的时间合计。口径是**停留点的间隔**，不是 Dawarich 判为移动的段 —— 后者在地铁里会严重少算（14 号 110 分钟的通勤，Dawarich 只认出 50.8 分钟在移动）。⚠️ 一天只有一个停留点时算不出来，那天记 0。",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -190,7 +190,7 @@
             "uid": "lifelogging-sqlite"
           },
           "rawQuery": true,
-          "rawQueryText": "SELECT ROUND(COALESCE(SUM(value_num),0)/60.0,1) AS h FROM events WHERE domain='location' AND metric='transport' AND day_local >= date('now','+8 hours','-30 days')",
+          "rawQueryText": "WITH v AS (SELECT day_local, json_extract(meta_json,'$.end_utc') AS end_utc, LEAD(ts_utc) OVER (PARTITION BY day_local ORDER BY ts_utc) AS next_start FROM events WHERE domain='location' AND metric='visit' AND day_local >= date('now','+8 hours','-30 days')) SELECT ROUND(SUM((julianday(next_start) - julianday(end_utc)) * 24.0), 1) AS h FROM v WHERE next_start IS NOT NULL",
           "queryType": "table"
         }
       ],
@@ -225,7 +225,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 4
+        "y": 14
       },
       "datasource": {
         "type": "frser-sqlite-datasource",
@@ -340,7 +340,7 @@
         "h": 10,
         "w": 14,
         "x": 0,
-        "y": 12
+        "y": 22
       },
       "datasource": {
         "type": "frser-sqlite-datasource",
@@ -417,13 +417,13 @@
     {
       "id": 7,
       "type": "barchart",
-      "title": "交通方式",
-      "description": "只统计真正在移动的段 —— 原地不动的整段会被 dawarich 标成 📍，collect_phone.py 会把它们排除掉。",
+      "title": "交通方式（Dawarich 推断，非实测）",
+      "description": "⚠️ 这些模式**不是我们测出来的**：collect_phone.py 只是把 Dawarich /tracks 返回的 mode_timeline 里的 emoji 翻译成名字。Dawarich 那一层按 GPS 点的速度和加速度**推断**，在地铁里必然出错 —— 地下没有 GPS，点稀疏又漂移，实测一段纯地铁通勤被判成了 driving + walking + cycling 三段。所以这张图只说明「Dawarich 这么认为」，不代表事实。要知道真实路线，看上面的地图。",
       "gridPos": {
         "h": 10,
         "w": 10,
         "x": 14,
-        "y": 12
+        "y": 22
       },
       "datasource": {
         "type": "frser-sqlite-datasource",
@@ -477,6 +477,245 @@
           }
         },
         "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "type": "geomap",
+      "title": "地点地图（最近一天轨迹 + 近 30 天停留）",
+      "description": "折线是手机上报的**原始 GPS 轨迹**（每天一条 location/track_path 事件，存在 meta_json.path 里，最多 500 个点）。底图用 OpenStreetMap 的公开瓦片：我们的坐标是 WGS-84，和高德/百度的 GCJ-02 差着约 500 米，换成国内底图点会整体偏移。⚠️ 底图必须写**显式 XYZ 地址**，不能用面板里那个内置的「OpenStreetMap」选项 ——新版 Grafana 内置底图走的是 Stadia，没 key 会满屏「API KEY REQUIRED」水印。⚠️ 瓦片是浏览器直接去公网取的，断网/被墙时地图是空的，但面板不会报错。",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "rawQueryText": "SELECT json_extract(meta_json,'$.lat') AS lat, json_extract(meta_json,'$.lon') AS lon, value_text AS place, ROUND(value_num,0) AS minutes FROM events WHERE domain='location' AND metric='visit' AND day_local >= date('now','+8 hours','-30 days') ORDER BY ts_utc DESC",
+          "queryType": "table"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "rawQueryText": "SELECT CAST(json_extract(p.value,'$[0]') AS REAL) AS lat, CAST(json_extract(p.value,'$[1]') AS REAL) AS lon FROM events e, json_each(json_extract(e.meta_json,'$.path')) p WHERE e.domain='location' AND e.metric='track_path' AND e.day_local = (SELECT MAX(day_local) FROM events WHERE metric='track_path') ORDER BY p.key",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "view": {
+          "id": "fit",
+          "lat": 31.236,
+          "lon": 121.291,
+          "zoom": 10
+        },
+        "basemap": {
+          "type": "xyz",
+          "name": "OpenStreetMap",
+          "url": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+          "attribution": "© OpenStreetMap contributors"
+        },
+        "layers": [
+          {
+            "type": "markers",
+            "name": "停留点",
+            "filterData": {
+              "id": "byRefId",
+              "options": "A"
+            },
+            "location": {
+              "mode": "coords",
+              "latitude": "lat",
+              "longitude": "lon",
+              "geohash": "",
+              "lookup": ""
+            },
+            "tooltip": true,
+            "config": {
+              "showLegend": true
+            }
+          },
+          {
+            "type": "route",
+            "name": "轨迹",
+            "filterData": {
+              "id": "byRefId",
+              "options": "B"
+            },
+            "location": {
+              "mode": "coords",
+              "latitude": "lat",
+              "longitude": "lon",
+              "geohash": "",
+              "lookup": ""
+            },
+            "arrow": 1,
+            "config": {
+              "style": {
+                "color": {
+                  "fixed": "dark-blue"
+                },
+                "lineWidth": 2,
+                "opacity": 0.85
+              }
+            }
+          }
+        ],
+        "controls": {
+          "showZoom": true,
+          "showAttribution": true,
+          "showScale": false,
+          "showDebug": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "交通段明细（含当时手机前台应用）",
+      "description": "每一段 Dawarich 判定的「移动」，加上那个时间段手机前台开着什么应用。用途很具体：判断某个模式判得对不对。比如它说 driving，但那一栏写着 Shanghai Metro，那显然是地铁不是开车。⚠️ 手机事件是 2026-10-14 傍晚才接进来的，之前的时间段这一列会是空的。",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "rawQueryText": "SELECT datetime(t.ts_utc,'+8 hours') AS '开始(本地)', datetime(json_extract(t.meta_json,'$.end_utc'),'+8 hours') AS '结束(本地)', ROUND(t.value_num,1) AS '时长', t.value_text AS 'Dawarich 判定', (SELECT group_concat(DISTINCT p.value_text) FROM events p  WHERE p.domain='phone' AND p.metric='app_switch'  AND p.ts_utc >= t.ts_utc AND p.ts_utc <= json_extract(t.meta_json,'$.end_utc')) AS '该时段手机前台应用', t.day_local AS '日期' FROM events t WHERE t.domain='location' AND t.metric='transport' ORDER BY t.ts_utc DESC LIMIT 100",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false,
+          "fields": ""
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true,
+            "inspect": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "开始(本地)"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 160
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "结束(本地)"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 160
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "时长"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "m"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              },
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Dawarich 判定"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 130
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "该时段手机前台应用"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 320
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "日期"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          }
+        ]
       }
     }
   ]

@@ -351,6 +351,56 @@ def post_blocks(payload: BlocksIn) -> dict[str, Any]:
         return {"inserted": conn.total_changes - before, "deleted": deleted}
 
 
+class BlackholeRangesIn(BaseModel):
+    day: str                          # YYYY-MM-DD（本地日）
+    ranges: list[list[str]]           # [[start_utc, end_utc], ...] ISO8601 UTC
+
+
+@app.post("/blocks/mark-blackhole", dependencies=[Depends(auth)])
+def mark_blackhole(payload: BlackholeRangesIn) -> dict[str, Any]:
+    """把「时间黑洞」标记回写到 blocks 表。
+
+    ⚠️ 为什么需要单独一个端点，而不是让 normalize 直接写：
+       黑洞是**语义判断** —— 「这段时间你事后想不起来、也不觉得值」。
+       规则引擎判不出来（normalize 只按应用/标题的关键词标），
+       真正准的是 AI 读完一天活动之后的判断。
+       但 AI 的输出落在**日记正文**（Markdown），写不进数据库，
+       而 Grafana 读的是数据库 —— 于是这条链路原来是断的：
+       AI 在日记里标了 `[blackhole:: true]`，面板上一个都不显示。
+       （链路上游还有史实：blocks.blackhole 在本次改动之前**没有任何代码
+         把它设成 True**，normalize 的默认值 False 就是它唯一的值。）
+
+    ⚠️ 为什么用「时间重叠」而不是 ID 一一对应：
+       AI 会把相邻的小块合并成 6–18 个大块（提示词明确要求），
+       它写出的时间段和数据库里的块**不是一一对应的**。
+       重叠是唯一可行的对齐方式 —— 只要沾上就算。
+
+    ⚠️ 顺序前提：`POST /blocks` 是「按天删旧再插」，**会清掉已有的黑洞标记**。
+       所以回写必须发生在 normalize 之后（流水线顺序本来就是
+       collect → normalize → journal，正好满足）。
+    """
+    if not payload.ranges:
+        return {"marked": 0}
+
+    marked = 0
+    with closing(db()) as conn:
+        for rng in payload.ranges:
+            if len(rng) != 2:
+                continue
+            start, end = rng[0], rng[1]
+            if not start or not end or start >= end:
+                continue
+            # ISO8601 字符串是定长可比的，直接比字面量，不用转时间类型。
+            cur = conn.execute(
+                """UPDATE blocks SET blackhole = 1
+                   WHERE day_local = ? AND start_utc < ? AND end_utc > ?""",
+                (payload.day, end, start),
+            )
+            marked += cur.rowcount
+        conn.commit()
+    return {"marked": marked}
+
+
 @app.get("/blocks", dependencies=[Depends(auth)])
 def get_blocks(
     day: Annotated[str | None, Query()] = None,

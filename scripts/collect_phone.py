@@ -504,6 +504,69 @@ def collect_points_summary(
     ]
 
 
+# 折线最多保留多少个点。
+# 上千个点塞进 meta_json 只让事件表变胖，而地图上肉眼分得出的拐点远没这么多。
+# 500 个点画一条通勤路线绰绰有余（像素级已经比屏幕还密）。
+TRACK_PATH_MAX_POINTS = 500
+
+
+def _downsample(
+    pts: list[tuple[float, float, float]], limit: int
+) -> list[tuple[float, float, float]]:
+    """等间隔抽样到 ``limit`` 个点，**首尾必留**。
+
+    首尾不能丢：折线的两端就是「从哪走、到哪」，抽掉了路线会被截短。
+    所以按 (n-1)/(limit-1) 的步长取点，下标 0 和 n-1 一定在里面。
+    """
+    n = len(pts)
+    if n <= limit:
+        return pts
+    step = (n - 1) / (limit - 1)
+    return [pts[i] for i in sorted({int(round(k * step)) for k in range(limit)})]
+
+
+def collect_track_path(day: Day, pts: list[tuple[float, float, float]]) -> list[Event]:
+    """原始轨迹点 → **一条折线事件**，给地图面板画路线。
+
+    为什么是「一条事件 + meta 里放数组」而不是「一个点一行」：
+    一天最多 1440 个点，按点存就是一天上千行，一年多出几十万行，
+    而地图要的只是**一条连续的线**。折线放进 meta_json，
+    Grafana 那边用 ``json_each()`` 展开成 (lat, lon) 两列就行
+    （SQLite 的 JSON1 在本项目里已经到处在用，json_extract 不是新依赖）。
+
+    ⚠️ 坐标留 5 位小数（约 1 米）。再多只是让 JSON 变长 ——
+    地图面板的缩放级别根本看不出第 6 位。
+
+    ⚠️ 这条事件**不参与日记**：它只有几何，没有语义。
+    日记要的「今天跑了多远」已经在 tracked_points 的 span_km 里。
+    """
+    if not pts:
+        return []
+
+    keep = _downsample(pts, TRACK_PATH_MAX_POINTS)
+    print(f"  OK  Track path: {len(keep)} of {len(pts)} points kept for the map")
+
+    return [
+        Event(
+            ts_utc=day.start_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            domain="location",
+            metric="track_path",
+            value_num=len(keep),
+            value_text="",
+            source="dawarich",
+            meta={
+                # GeoJSON 是 [lon, lat]，这里按**地图面板要的**顺序存成 [lat, lon]。
+                # 不跟 GeoJSON 对齐是有意的：面板 SQL 里再多做一次下标交换
+                # 是纯噪音，而且极容易写反。
+                "path": [[round(p[1], 5), round(p[2], 5)] for p in keep],
+                "n_raw": len(pts),
+                "first_point_utc": _ts_to_iso(pts[0][0]),
+                "last_point_utc": _ts_to_iso(pts[-1][0]),
+            },
+        )
+    ]
+
+
 def _ts_to_iso(ts: Any) -> str | None:
     """unix 秒 → ISO8601 UTC。"""
     if not isinstance(ts, (int, float)):
@@ -573,6 +636,7 @@ def main() -> None:
     events += visits
     events += collect_tracks(day)
     events += collect_points_summary(day, pts, stays)
+    events += collect_track_path(day, pts)
     events += collect_daily_stats(day)
     pull_phone_events(day)  # 只打印统计
 

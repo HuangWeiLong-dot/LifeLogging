@@ -1,0 +1,652 @@
+{
+  "uid": "lifelogging-health",
+  "title": "生命记录 · 健康与运动",
+  "description": "Gadgetbridge 导出的手表数据。⚠️ **只有戴表的日子有数**，没戴表的日子在图上就是断的 —— 那不是「那天没动」，是那天没数据。日汇总走 health/*，单次锻炼走 fitness/workout。",
+  "tags": [
+    "lifelogging"
+  ],
+  "timezone": "Asia/Shanghai",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5m",
+  "time": {
+    "from": "now-90d",
+    "to": "now"
+  },
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "今日步数",
+      "description": "当天累计（手表会随时间是往上走的，取当天最后一条）。",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "rawQueryText": "SELECT COALESCE(SUM(value_num),0) AS n FROM events WHERE domain='health' AND metric='steps' AND day_local = date('now','+8 hours')",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "今日平均心率",
+      "description": "全天均值（手表按若干分钟采样一次再平均）。",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "rawQueryText": "SELECT ROUND(MAX(CASE WHEN metric='heart_rate_avg' THEN value_num END),0) AS v FROM events WHERE domain='health' AND day_local = date('now','+8 hours')",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "今日最低心率",
+      "description": "静息偏低的那个数。",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "rawQueryText": "SELECT ROUND(MAX(CASE WHEN metric='heart_rate_min' THEN value_num END),0) AS v FROM events WHERE domain='health' AND day_local = date('now','+8 hours')",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "VO2max（最近一次）",
+      "description": "最大摄氧量。手表不是每天都算，所以这里取最近一次，不一定属于今天。",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "rawQueryText": "SELECT ROUND(value_num,1) AS v FROM events WHERE domain='health' AND metric='vo2max' ORDER BY day_local DESC LIMIT 1",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 1
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "每日步数（近 90 天）",
+      "description": "断掉的那几天是没戴表，不是 0 步。",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "timeColumns": [
+            "time"
+          ],
+          "rawQueryText": "SELECT strftime('%Y-%m-%dT%H:%M:%S+08:00', day_local) AS time, MAX(value_num) AS '步数' FROM events WHERE domain='health' AND metric='steps' AND day_local >= date('now','+8 hours','-90 days') GROUP BY day_local ORDER BY day_local",
+          "queryType": "time series"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 0,
+            "fillOpacity": 80,
+            "barAlignment": 0,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "scaleDistribution": {
+              "type": "linear"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "每日心率（近 90 天）",
+      "description": "均值看整体状态，最低值看恢复 —— 两者一起掉下去通常意味着没睡好或者病了。",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "timeColumns": [
+            "time"
+          ],
+          "rawQueryText": "SELECT strftime('%Y-%m-%dT%H:%M:%S+08:00', day_local) AS time, ROUND(MAX(CASE WHEN metric='heart_rate_avg' THEN value_num END),0) AS '平均', ROUND(MAX(CASE WHEN metric='heart_rate_min' THEN value_num END),0) AS '最低' FROM events WHERE domain='health' AND day_local >= date('now','+8 hours','-90 days') GROUP BY day_local ORDER BY day_local",
+          "queryType": "time series"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "barAlignment": 0,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "scaleDistribution": {
+              "type": "linear"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "每日跑步距离（近 90 天）",
+      "description": "配速没有画在这里：它和距离的单位不同，放一张图上只能骗眼睛。配速看下面「单次锻炼明细」那一列。",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "timeColumns": [
+            "time"
+          ],
+          "rawQueryText": "SELECT strftime('%Y-%m-%dT%H:%M:%S+08:00', day_local) AS time, ROUND(SUM(CASE WHEN metric='run_km' THEN value_num END),2) AS '距离(km)' FROM events WHERE domain='health' AND day_local >= date('now','+8 hours','-90 days') GROUP BY day_local ORDER BY day_local",
+          "queryType": "time series"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "km",
+          "decimals": 2,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 0,
+            "fillOpacity": 80,
+            "barAlignment": 0,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "scaleDistribution": {
+              "type": "linear"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "单次锻炼明细",
+      "description": "fitness/workout：每次锻炼一条，细节全在 meta_json 里，这里展开成人看得懂的列。⚠️ 步数/心率那些是**日汇总**，这里是**单次**，两者刻意分开存。",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "rawQueryText": "SELECT day_local AS '日期', datetime(ts_utc,'+8 hours') AS '开始', value_text AS '类型', ROUND(value_num,0) AS '时长', ROUND(json_extract(meta_json,'$.distance_km'),2) AS '距离', ROUND(json_extract(meta_json,'$.pace_s_per_km')/60.0,2) AS '配速', json_extract(meta_json,'$.avg_hr') AS '均心率', json_extract(meta_json,'$.max_hr') AS '最大心率', json_extract(meta_json,'$.calories') AS '卡路里', json_extract(meta_json,'$.ascent_m') AS '爬升', json_extract(meta_json,'$.training_effect') AS '训练效果', json_extract(meta_json,'$.recovery_hours') AS '恢复' FROM events WHERE domain='fitness' AND metric='workout' ORDER BY ts_utc DESC LIMIT 200",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false,
+          "fields": ""
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true,
+            "inspect": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "日期"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "开始"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "类型"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "时长"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "m"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.width",
+                "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "距离"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "km"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "custom.width",
+                "value": 75
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "配速"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "m"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "均心率"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 75
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "最大心率"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 85
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "卡路里"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 75
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "爬升"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "训练效果"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 85
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "恢复"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 70
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

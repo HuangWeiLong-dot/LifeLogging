@@ -1,0 +1,448 @@
+{
+  "uid": "lifelogging-phone",
+  "title": "生命记录 · 手机使用",
+  "description": "Tasker → 服务器中继 → events 表的 phone 事件（解锁 / 切应用 / 屏幕亮灭）。⚠️ 应用时长是**推导**出来的（相邻两次切换的时间差，再裁掉灭屏时段），不是手机上报的 —— 推导逻辑在 normalize.py 的 summarize_phone()。",
+  "tags": [
+    "lifelogging"
+  ],
+  "timezone": "Asia/Shanghai",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5m",
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "今日解锁",
+      "description": "屏幕解锁次数。手机在口袋里放着时不会增加。",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "rawQueryText": "SELECT COUNT(*) AS n FROM events WHERE domain='phone' AND metric='unlock' AND day_local = date('now','+8 hours')",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "今日切应用",
+      "description": "应用切换次数。一次「打开微信看一下再回桌面」大约是 2 次。",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "rawQueryText": "SELECT COUNT(*) AS n FROM events WHERE domain='phone' AND metric='app_switch' AND day_local = date('now','+8 hours')",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "今日亮屏",
+      "description": "收到的「屏幕亮」事件数。⚠️ 只有配了 Tasker Display 事件才有，没有的话这里一直是 0，不代表没在用手机。",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "rawQueryText": "SELECT COUNT(*) AS n FROM events WHERE domain='phone' AND metric='screen_on' AND day_local = date('now','+8 hours')",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "近 30 天日均解锁",
+      "description": "有数据的天数才算分母，不是 30 天 —— 手机没上报的日子不该把平均值拉低。",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "rawQueryText": "SELECT ROUND(COUNT(*) * 1.0 / COUNT(DISTINCT day_local), 1) AS n FROM events WHERE domain='phone' AND metric='unlock' AND day_local >= date('now','+8 hours','-30 days')",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 1
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "每日解锁与切应用（近 30 天）",
+      "description": "两根柱子量的是不同的东西，所以**不堆叠**：堆起来的总和没有含义。",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "timeColumns": [
+            "time"
+          ],
+          "rawQueryText": "SELECT strftime('%Y-%m-%dT%H:%M:%S+08:00', day_local) AS time, SUM(CASE WHEN metric='unlock' THEN 1 ELSE 0 END) AS '解锁', SUM(CASE WHEN metric='app_switch' THEN 1 ELSE 0 END) AS '切应用' FROM events WHERE domain='phone' AND day_local >= date('now','+8 hours','-30 days') GROUP BY day_local ORDER BY day_local",
+          "queryType": "time series"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 0,
+            "fillOpacity": 80,
+            "barAlignment": 0,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "scaleDistribution": {
+              "type": "linear"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "barchart",
+      "title": "手机应用 Top 15（近 30 天，按切换次数）",
+      "description": "次数 ≠ 时长。切得最勤的往往是最碎的（桌面、通知、输入法），待得最久的反而切换少。要看时长用 normalize.py 的 summarize_phone()。包名→人话的映射和 normalize.py:PHONE_APPS 是**同一套**，改了一边记得改另一边。",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "rawQueryText": "SELECT CASE value_text\n           WHEN 'com.tencent.mm'      THEN 'WeChat'\n           WHEN 'com.miui.home'       THEN 'Launcher'\n           WHEN 'net.dinglisch.android.taskerm' THEN 'Tasker'\n           WHEN 'nodomain.freeyourgadget.gadgetbridge' THEN 'Gadgetbridge'\n           WHEN 'com.taobao.taobao'   THEN 'Taobao'\n           WHEN 'com.taobao.idlefish' THEN 'Xianyu'\n           WHEN 'com.jingdong.app.mall' THEN 'JD'\n           WHEN 'com.app.shanghai.metro' THEN 'Shanghai Metro'\n           WHEN 'com.deepseek.chat'   THEN 'DeepSeek'\n           WHEN 'com.alibaba.aliyun'  THEN 'Alibaba Cloud'\n           WHEN 'app.hiddify.com'     THEN 'Hiddify'\n           WHEN 'com.tailscale.ipn'   THEN 'Tailscale'\n           WHEN 'org.fdroid.fdroid'   THEN 'F-Droid'\n           WHEN 'bin.mt.plus'         THEN 'MT Manager'\n           WHEN 'mark.via'            THEN 'Via (browser)'\n           WHEN 'com.android.camera'  THEN 'Camera'\n           WHEN 'com.miui.gallery'    THEN 'Gallery'\n           WHEN 'com.android.settings' THEN 'Settings'\n           WHEN 'com.android.vending' THEN 'Play Store'\n           WHEN 'com.android.fileexplorer' THEN 'Files'\n           WHEN 'com.google.android.documentsui' THEN 'Files (picker)'\n           WHEN 'com.android.photopicker' THEN 'Photo picker'\n           WHEN 'com.android.permissioncontroller' THEN 'Permission dialog'\n           WHEN 'com.android.intentresolver' THEN 'Share dialog'\n           WHEN 'com.miui.packageinstaller' THEN 'Package installer'\n           WHEN 'com.android.companiondevicemanager' THEN 'Device manager'\n           WHEN 'com.miui.securitycenter' THEN 'Security'\n           WHEN 'com.miui.securitycore' THEN 'Security'\n           ELSE value_text END AS '应用', COUNT(*) AS '次数' FROM events WHERE domain='phone' AND metric='app_switch' AND day_local >= date('now','+8 hours','-30 days') AND value_text NOT LIKE '%APPNAME%' GROUP BY value_text ORDER BY 2 DESC LIMIT 15",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "xTickLabelRotation": 0,
+        "showValue": "auto",
+        "stacking": "none",
+        "legend": {
+          "showLegend": false,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 0,
+            "fillOpacity": 85,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "最近的手机事件",
+      "description": "原始事件流。⚠️ '(Tasker 变量没展开)' 那几条是上报时 %APPNAME 没被替换掉，不是解析问题 —— 见本目录 README 的「已知数据缺陷」。",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "rawQueryText": "SELECT datetime(ts_utc,'+8 hours') AS '时间(本地)', day_local AS '日期', CASE metric WHEN 'unlock' THEN '解锁' WHEN 'screen_on' THEN '亮屏' WHEN 'screen_off' THEN '灭屏' WHEN 'app_switch' THEN '切应用' ELSE metric END AS '事件', CASE WHEN value_text IS NULL OR value_text = '' THEN '' WHEN value_text LIKE '%APPNAME%' THEN '(Tasker 变量没展开)' ELSE value_text END AS '应用' FROM events WHERE domain='phone' ORDER BY ts_utc DESC LIMIT 150",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false,
+          "fields": ""
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true,
+            "inspect": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "时间(本地)"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 160
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "日期"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "事件"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

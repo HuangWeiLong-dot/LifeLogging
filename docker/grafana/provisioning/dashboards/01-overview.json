@@ -1,7 +1,7 @@
 {
   "uid": "lifelogging-overview",
   "title": "生命记录 · 概览",
-  "description": "今天怎么样 + 最近 90 天的趋势。数据来自 state/events.db 的 blocks 和 events 两张表。",
+  "description": "今天怎么样 + 最近 90 天的趋势。数据来自 state/events.db 的 blocks 和 events 两张表。⚠️ 「今日应用时长 / 今日浏览器」来自 collect_desktop.py 写的事件，而「今日记录时长」来自 normalize.py 直接读 ActivityWatch —— 两者是两条独立的路径，流水线还没跑完的那半天里，前者会是 0 而后者已经有数。",
   "tags": [
     "lifelogging"
   ],
@@ -93,7 +93,7 @@
       "id": 2,
       "type": "stat",
       "title": "今日时间黑洞",
-      "description": "被标记为 blackhole 的时间块。这个数越接近 0 越好。",
+      "description": "被标记为 blackhole 的时间块。这个数越接近 0 越好。两个来源：normalize.py 按 config.yaml 的 blackhole 关键词判（应用/URL/窗口标题），以及 AI 读完一天后在日记里标 [blackhole:: true] 的那些块回写回来。都判不出来就是 0 —— 那是实话，不是面板坏了。",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -265,7 +265,7 @@
         "h": 9,
         "w": 14,
         "x": 0,
-        "y": 4
+        "y": 8
       },
       "datasource": {
         "type": "frser-sqlite-datasource",
@@ -337,7 +337,7 @@
         "h": 9,
         "w": 10,
         "x": 14,
-        "y": 4
+        "y": 8
       },
       "datasource": {
         "type": "frser-sqlite-datasource",
@@ -407,7 +407,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 13
+        "y": 17
       },
       "datasource": {
         "type": "frser-sqlite-datasource",
@@ -479,7 +479,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 13
+        "y": 17
       },
       "datasource": {
         "type": "frser-sqlite-datasource",
@@ -536,6 +536,341 @@
             },
             "thresholdsStyle": {
               "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "今日步数",
+      "description": "手表当天的累计步数。没戴表就是 0 —— 那不是「没走路」，是没有数据。",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 4
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "rawQueryText": "SELECT COALESCE(SUM(value_num),0) AS n FROM events WHERE domain='health' AND metric='steps' AND day_local = date('now','+8 hours')",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "今日心率",
+      "description": "全天平均心率（不是静息的）。",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 4
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "rawQueryText": "SELECT ROUND(MAX(CASE WHEN metric='heart_rate_avg' THEN value_num END),0) AS v FROM events WHERE domain='health' AND day_local = date('now','+8 hours')",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "今日手机解锁",
+      "description": "手机解锁次数 —— 这是唯一能反映「手机用了多少」的现成数字。",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 4
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "rawQueryText": "SELECT COUNT(*) AS n FROM events WHERE domain='phone' AND metric='unlock' AND day_local = date('now','+8 hours')",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "今日本流水线花费（元）",
+      "description": "⚠️ 这个数**只统计本流水线自己**的 LLM 调用（每晚写日记那几次），实测只占你当天 AI 总支出的 1% 左右 —— 你白天用 Claude Code 花掉的钱走的是同一把 key、同一个余额，但完全不经过我们的台账。要看真实花费，去「生命记录 · AI 用量」那个仪表盘。",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 4
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "rawQueryText": "SELECT ROUND(COALESCE(SUM(value_num),0),4) AS c FROM events WHERE domain='ai' AND metric='daily_cost' AND day_local = date('now','+8 hours')",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 4
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "每日本流水线花费（近 30 天，元）",
+      "description": "只统计本流水线自己的调用。想看当天真实支出（含 Claude Code 等所有工具），见「生命记录 · AI 用量」仪表盘 —— 两者差两个数量级，都对，问题不同而已。",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 25
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "timeColumns": [
+            "time"
+          ],
+          "rawQueryText": "SELECT strftime('%Y-%m-%dT%H:%M:%S+08:00', day_local) AS time, ROUND(SUM(value_num),4) AS '花费' FROM events WHERE domain='ai' AND metric='daily_cost' AND day_local >= date('now','+8 hours','-30 days') GROUP BY day_local ORDER BY day_local",
+          "queryType": "time series"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 4,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 0,
+            "fillOpacity": 80,
+            "barAlignment": 0,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "scaleDistribution": {
+              "type": "linear"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "每日本流水线 Token（近 30 天）",
+      "description": "花费几乎完全由**输出** token 决定：输入有自动前缀缓存兜着（命中价只有未命中的 1/50），而输出是实打实按整价计的。这三段堆起来就是当天的总吞吐。⚠️ 「输出」里大部分是推理 token —— 中文日记那种长输出，两者会一起涨。",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 25
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "lifelogging-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "lifelogging-sqlite"
+          },
+          "rawQuery": true,
+          "timeColumns": [
+            "time"
+          ],
+          "rawQueryText": "SELECT strftime('%Y-%m-%dT%H:%M:%S+08:00', day_local) AS time, MAX(CAST(json_extract(meta_json,'$.cache_hit') AS INTEGER)) AS '缓存命中', MAX(CAST(json_extract(meta_json,'$.cache_miss') AS INTEGER)) AS '缓存未命中', MAX(CAST(json_extract(meta_json,'$.output') AS INTEGER)) AS '输出' FROM events WHERE domain='ai' AND metric='daily_cost' AND day_local >= date('now','+8 hours','-30 days') GROUP BY day_local ORDER BY day_local",
+          "queryType": "time series"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 0,
+            "fillOpacity": 80,
+            "barAlignment": 0,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "scaleDistribution": {
+              "type": "linear"
             }
           }
         },

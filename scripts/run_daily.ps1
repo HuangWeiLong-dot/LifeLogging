@@ -292,6 +292,27 @@ foreach ($d in $targets) {
     }
 }
 
+# ── 每日花费写进事件表（Grafana 的「AI 花费」面板读它）──────────────
+#
+# 每次调用的花费原本只记在 state/cost_ledger.jsonl，而 Grafana 挂的是
+# state/events.db —— JSONL 那边它一个字都读不到。所以那条链路是断的，
+# 面板上的「每日 AI 花费」永远是空的。
+# 这里把台账**按天合计**写成 ai/daily_cost 事件补上。
+#
+# 放在日循环**外面**：它一次重写台账里的每一天（--days 90），
+# 处理 3 天补齐也只需要跑一次。
+Invoke-Step "cost-events" "scripts\cost_guard.py" @("emit-events", "--days", "90") | Out-Null
+
+# ── AI 用量（Claude Code + DeepSeek 平台账单 + 余额）────────────────
+#
+# 台账只管本流水线自己那点调用（一天约 ¥0.02）。真正花掉的钱在 Claude Code
+# 那边 —— 同一个 key、同一个余额，但它不往我们的台账写任何东西。
+# 这一步把三方数据补齐，让「今日 AI 花费」不再只显示 1% 的支出。
+#
+# 拿不到 userToken 时会优雅降级：仍然写 Claude Code 的分布和余额快照，
+# 只是没有精确金额。
+Invoke-Step "ai-usage" "scripts\collect_ai_usage.py" @("--days", "3") | Out-Null
+
 # ── 每周日核对成本 ──────────────────────────────────────────────────
 if ((Get-Date).DayOfWeek -eq "Sunday") {
     Invoke-Step "cost-reconcile" "scripts\reconcile_cost.py" @("--days", "7", "--write-vault") | Out-Null
