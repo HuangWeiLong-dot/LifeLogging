@@ -77,6 +77,7 @@ LifeLogging/
 │   ├── 05-Journal/
 │   ├── 06-AI-Sessions/
 │   ├── 07-Reviews/
+│   ├── 08-Projects/                   ← 项目结构拆解图（Excalidraw + PNG，按需创建）
 │   └── 99-Templates/                  ← 日记模板 + 4 个 Dataview 面板
 ├── middleware/
 │   ├── events_api.py            ← 统一事件表（FastAPI + SQLite）
