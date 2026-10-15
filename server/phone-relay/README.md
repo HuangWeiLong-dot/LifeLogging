@@ -129,6 +129,46 @@ sudo sed -i '/selftest/d' /var/lib/lifelogging/phone-2026-10-14.jsonl
 
 ---
 
+## 升级已有的部署
+
+⚠️ **升级和初次部署不是一回事。** 最容易踩的坑是把文件拷到了 systemd
+**不看**的地方 —— 服务重启成功、`/health` 也一切正常，但跑的还是旧代码。
+（实测踩过：`scp -r server/phone-relay/ 服务器:/opt/lifelogging/` 会把整个
+目录拷进去，落成 `/opt/lifelogging/phone-relay/phone_relay.py`。）
+
+systemd 只认这一个路径，先用 `systemctl cat lifelogging-relay | grep ExecStart`
+确认：**`/opt/lifelogging/phone_relay.py`**。所以升级是三步：
+
+```bash
+# 1. 本机：先传到 /tmp，不要直接往 /opt 里拷
+scp server/phone-relay/phone_relay.py 你@服务器:/tmp/
+
+# 2. 服务器：覆盖到 systemd 认的那个路径
+sudo cp /tmp/phone_relay.py /opt/lifelogging/phone_relay.py
+
+# 3. 重启
+sudo systemctl restart lifelogging-relay
+systemctl status lifelogging-relay --no-pager | head -5
+```
+
+**怎么确认新的真的生效了？** 别只看 `/health` —— 新旧版本的 `/health` 长得
+一模一样，它证明不了任何事。挑一个**只有新版才有**的路由去打：
+
+```bash
+curl -H "X-API-Key: $KEY" http://<服务器>:8788/ask/pending
+# 新版：返回一个数字（0 也正常）
+# 旧版：{"error": "not found"}
+```
+
+怀疑没拷对时：
+
+```bash
+ls -la /opt/lifelogging/
+grep -c "ask/pending" /opt/lifelogging/phone_relay.py   # 新版这里应该是 1
+```
+
+---
+
 ## 让笔记本电脑来拉
 
 编辑 `config/config.yaml`：
