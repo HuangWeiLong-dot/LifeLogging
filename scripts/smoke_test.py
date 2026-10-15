@@ -913,6 +913,65 @@ check("answer encoding round-trips / no path escape / HTML escaped / safe task m
       t_questions)
 
 
+# ── 7d-3. 日记中继 ──────────────────────────────────────────────────
+print("\n[21] Journal relay")
+
+
+def t_journal_relay():
+    """锁住「服务器调 AI 写正文、笔记本组装进 vault」这条链的两个约定。
+
+    ⚠️ 这里最危险的是**终版保护**：终版输入包一旦被非终版盖掉，服务器就再也
+       不会写那天的日记，而两边都不会报错。笔记本每 2 小时推一次非终版，
+       顺序一乱就中招。
+    """
+    import importlib.util
+    import json
+    import tempfile
+
+    path = (Path(__file__).resolve().parent.parent
+            / "server" / "phone-relay" / "phone_relay.py")
+    spec = importlib.util.spec_from_file_location("phone_relay_j", path)
+    pr = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pr)
+
+    # 日期形状不对不能拼出文件路径
+    assert pr.journal_path("input", "../../etc/passwd") is None
+    assert pr.journal_path("input", "") is None
+    assert pr.journal_path("bogus", "2026-10-14") is None      # kind 白名单
+    assert pr.journal_path("output", "2026-10-14") is not None
+
+    with tempfile.TemporaryDirectory() as td:
+        pr.DATA_DIR = Path(td)
+
+        # 1. 终版保护：非终版盖不掉终版
+        dest = pr.journal_path("input", "2026-10-14")
+        pr._write_json(dest, {"day": "2026-10-14", "final": True, "timeline": {}})
+        assert pr.final_bundle_wins(dest, {"final": False}), "非终版必须被挡"
+        assert not pr.final_bundle_wins(dest, {"final": True}), "终版可以覆盖终版"
+        # 还没有终版时，非终版应该正常写进去（否则当天的刷新会全被丢）
+        other = pr.journal_path("input", "2026-10-15")
+        assert not pr.final_bundle_wins(other, {"final": False})
+        # 旧文件读不出来时不能拿它挡新的 —— 否则一次写坏就永久卡死
+        dest.write_text("{ broken", encoding="utf-8")
+        assert not pr.final_bundle_wins(dest, {"final": False})
+
+        # 2. 存取往返
+        out = pr.journal_path("output", "2026-10-14")
+        pr._write_json(out, {"day": "2026-10-14", "body": "## Time Log\n",
+                             "stats": {"cost": 0.04}})
+        back = json.loads(out.read_text(encoding="utf-8"))
+        assert back["body"] == "## Time Log\n" and back["stats"]["cost"] == 0.04, back
+
+    # 3. 笔记本那侧：pulled 标记必须按 run_id 判等，不能只看「文件在不在」。
+    #    否则服务器重生成一版，本机不会去取新的。
+    import pull_journal_output as pjo
+    assert hasattr(pjo, "pull_one"), "pull 的按天逻辑要能单独调用"
+
+
+check("journal relay: final-bundle protection / path escape / round-trip",
+      t_journal_relay)
+
+
 # ── 7e. Gadgetbridge 表选择 ────────────────────────────────────────
 print("\n[16] Gadgetbridge table selection")
 

@@ -1,0 +1,31 @@
+# 每 15 分钟拉一次 close_day.py。
+#
+# **为什么是高频轮询而不是「凌晨 4:05 定点跑一次」**
+#
+#   本来打算定点。写的时候发现定点不对：ActivityWatch 保留完整历史，所以
+#   「读 D 那天的 AW」在任何时候读到的都是完整的一天 —— 但笔记本只在开机时
+#   才把 timeline 推上来。如果它 18:00 就关机了，4:05 时服务器手里只有它
+#   18:00 那次推送的版本，据此写出来的日记会缺掉 18:00 之后的部分。
+#
+#   所以真正该等的不是时钟，是**笔记本把那天标成「终版」**（见
+#   scripts/push_journal_input.py 的 final 字段）。而这个脚本是幂等的：
+#   扫描、发现「有终版输入、还没生成输出」的那天就生成，否则什么都不做。
+#   高频轮询让「笔记本刚推完」到「日记生成好」之间的延迟只有几分钟，
+#   同时又天然兜住了「笔记本关机错过某个时刻」的情况 —— 它下次开机一推，
+#   15 分钟内就会被捡起来。
+#
+# OnBootSec 让开机后也会跑一次：机器重启过的话，欠着的那些天要补上。
+
+[Unit]
+Description=LifeLogging - run close-day every 15 minutes
+Requires=lifelogging-close-day.service
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+# 精确到分钟：日志里好看，也避免每次开机都卡在同一个秒
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

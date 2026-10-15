@@ -1,0 +1,43 @@
+# LifeLogging —— 服务器侧「关账 + 写日记」
+#
+# 跟 phone-relay 同一个部署形状，但有两点不同：
+#   · 它**需要第三方依赖**（httpx / PyYAML / …），所以要一个 venv；
+#     中继是纯标准库所以不用。
+#   · 它是 oneshot + 由 timer 每 15 分钟拉一次，不是常驻进程。
+#
+# 部署步骤见同目录的 README.md。
+
+[Unit]
+Description=LifeLogging - generate the day's journal on the server
+After=network-online.target tailscaled.service lifelogging-relay.service
+Wants=network-online.target
+# 它要 POST 到本机的中继去存结果，所以得等中继起来
+Requires=lifelogging-relay.service
+
+[Service]
+Type=oneshot
+User=lifelogging
+Group=lifelogging
+WorkingDirectory=/opt/lifelogging
+
+# DEEPSEEK_API_KEY 和口径参数放这里。**不要写进这个文件** —— 它是要进 git 的。
+EnvironmentFile=/etc/lifelogging/close-day.env
+
+ExecStart=/opt/lifelogging/venv/bin/python /opt/lifelogging/close_day.py --days 3
+
+# 扫描 3 天、每次最多一次 LLM 调用，正常几秒到一分钟。给足余量但别无限挂。
+TimeoutStartSec=300
+
+# 和 phone_relay 同一套加固
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+# 它要写成本台账（state_dir 在服务器上指到这里）
+ReadWritePaths=/var/lib/lifelogging

@@ -42,6 +42,20 @@
     ⚠️ 中继**没有**、也不打算有任何「服务器 → 手机」的推送。手机永远是发起方。
        所以「早上问你」是手机定时来取，不是服务器推过去。
 
+**日记管线也借它中转**（2026-10-15 加）
+
+    日记的 AI 那一步挪到了服务器上跑，好让一天在固定时刻（凌晨 4 点）结算，
+    而不是等笔记本什么时候开机。但 vault 在笔记本上 —— 所以这里放**中间产物**，
+    不放成品：
+
+      POST /journal/inputs   笔记本推「日记输入」：timeline + 遗留任务 + 任务表
+      POST /journal/output   服务器（close_day.py）把写好的正文存回来
+      GET  /journal/output   笔记本取回正文，自己在 vault 里组装成最终日记
+
+    ⚠️ **这样切是为了让服务器不需要看见 vault。** vault 的读写全在笔记本上，
+       服务器只回一段正文和一份用量统计 —— 不用做双向同步，也就不会有
+       「两边同时写同一个库」那种冲突。
+
 **部署**：见同目录的 README.md。
 """
 
@@ -301,19 +315,51 @@ def questions_path(day: str) -> Path | None:
     return DATA_DIR / f"questions-{day}.json"
 
 
-def save_questions(day: str, payload: dict) -> tuple[bool, str]:
-    """原子写入当天的问题。同 save_upload：先写 .tmp 再 replace。"""
-    dest = questions_path(day)
-    if dest is None:
-        return False, "day must be YYYY-MM-DD"
+def _write_json(dest: Path, payload: dict) -> str:
+    """原子写一个 JSON 文件。同 save_upload：先写 .tmp 再 replace。"""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    tmp = dest.with_suffix(".json.tmp")
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
     with _write_lock:
         with tmp.open("wb") as f:
             f.write(data)
         os.replace(tmp, dest)
-    return True, f"{len(data)} bytes"
+    return f"{len(data)} bytes"
+
+
+def save_questions(day: str, payload: dict) -> tuple[bool, str]:
+    """原子写入当天的问题。"""
+    dest = questions_path(day)
+    if dest is None:
+        return False, "day must be YYYY-MM-DD"
+    return True, _write_json(dest, payload)
+
+
+def final_bundle_wins(dest: Path, incoming: dict) -> bool:
+    """该不该保留已存的那份**终版**输入包？True = 保留（丢掉这次推来的）。
+
+    ⚠️ 笔记本每 2 小时的刷新推的是「当天还没过完」的版本；终版是在那天结束之后
+       才推的。如果顺序颠倒（手动补跑、某个延迟的刷新），一次非终版推送会把终版
+       盖掉，服务器就再也不会写那天的日记 —— 而**两边都不会报错**。
+    """
+    if incoming.get("final") or not dest.exists():
+        return False
+    try:
+        old = json.loads(dest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False                      # 旧的读不出来就别拿它挡新的
+    return bool(old.get("final"))
+
+
+def journal_path(kind: str, day: str) -> Path | None:
+    """日记管线的中转文件。kind 是 'input' 或 'output'。
+
+    服务器只在这里放**中间产物** —— 真正的 vault 写入在笔记本上。
+    这样服务器就不需要看见 vault，也就不需要同步它。
+    """
+    if kind not in ("input", "output") or not _DAY_RE.match(day or ""):
+        return None
+    return DATA_DIR / f"journal-{kind}-{day}.json"
 
 
 def load_latest_questions() -> dict | None:
@@ -664,6 +710,46 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
+        if u.path == "/journal/inputs":
+            # close_day.py 用它取笔记本攒好的输入包。
+            # 走 HTTP 而不是直接读文件：这样 close_day 不必和中继共享数据目录的
+            # 读权限，两个服务可以各用各的用户、各守各的目录。
+            if not self._authed():
+                return
+            day = (parse_qs(u.query).get("day") or [""])[0]
+            p = journal_path("input", day)
+            if p is None:
+                self._send(400, {"error": "?day=YYYY-MM-DD is required"})
+                return
+            if not p.exists():
+                self._send(404, {"error": f"no journal input for {day}"})
+                return
+            try:
+                self._send(200, json.loads(p.read_text(encoding="utf-8")))
+            except (OSError, json.JSONDecodeError) as e:
+                self._send(500, {"error": f"stored input is unreadable: {e}"})
+            return
+
+        if u.path == "/journal/output":
+            # 笔记本取「服务器生成好的日记正文」。没生成就是 404 ——
+            # 这是**正常状态**（笔记本醒得比 04:05 早，或者那天没有输入包），
+            # 调用方应当安静跳过而不是报错。
+            if not self._authed():
+                return
+            day = (parse_qs(u.query).get("day") or [""])[0]
+            p = journal_path("output", day)
+            if p is None:
+                self._send(400, {"error": "?day=YYYY-MM-DD is required"})
+                return
+            if not p.exists():
+                self._send(404, {"error": f"no journal output for {day} yet"})
+                return
+            try:
+                self._send(200, json.loads(p.read_text(encoding="utf-8")))
+            except (OSError, json.JSONDecodeError) as e:
+                self._send(500, {"error": f"stored output is unreadable: {e}"})
+            return
+
         self._send(404, {"error": "not found"})
 
     def do_POST(self) -> None:                # noqa: N802
@@ -687,6 +773,48 @@ class Handler(BaseHTTPRequestHandler):
                 extract_upload(body, self.headers.get("Content-Type") or ""),
             )
             self._send(200 if ok else 400, {"ok": ok, "detail": detail})
+            return
+
+        if u.path == "/journal/inputs":
+            # 笔记本把它攒好的「日记输入」推上来：当天的 timeline、昨天遗留的
+            # 未完成任务、任务表的 open 项。服务器凭这个就能在凌晨自己写完日记，
+            # **不需要看见 vault**。
+            if not self._authed():
+                return
+            payload, err = self._json_body()
+            if err:
+                self._send(400, {"error": err})
+                return
+            dest = journal_path("input", str(payload.get("day") or ""))
+            if dest is None:
+                self._send(400, {"error": "day must be YYYY-MM-DD"})
+                return
+            if not isinstance(payload.get("timeline"), dict):
+                self._send(400, {"error": "timeline must be an object"})
+                return
+            if final_bundle_wins(dest, payload):
+                self._send(200, {"ok": True, "detail": "kept the existing final bundle"})
+                return
+            self._send(200, {"ok": True, "detail": _write_json(dest, payload)})
+            return
+
+        if u.path == "/journal/output":
+            # close_day.py 生成完正文后存回来。走 HTTP 而不是直接写文件，
+            # 是为了让中继单独拥有它的数据目录 —— 两个服务不必共享写权限。
+            if not self._authed():
+                return
+            payload, err = self._json_body()
+            if err:
+                self._send(400, {"error": err})
+                return
+            dest = journal_path("output", str(payload.get("day") or ""))
+            if dest is None:
+                self._send(400, {"error": "day must be YYYY-MM-DD"})
+                return
+            if not str(payload.get("body") or "").strip():
+                self._send(400, {"error": "body must be a non-empty string"})
+                return
+            self._send(200, {"ok": True, "detail": _write_json(dest, payload)})
             return
 
         if u.path == "/questions":

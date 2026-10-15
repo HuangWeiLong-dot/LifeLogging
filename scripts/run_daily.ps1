@@ -164,19 +164,19 @@ function Invoke-OneDay($d) {
     # 2. 归一化
     $normalized = Invoke-Step "normalize" "scripts\normalize.py" @("--date", $ds)
 
-    # 3. 生成日记
-    if ($SkipAI) {
-        Write-Log "   SKIP AI（-SkipAI）"
-        return $true
-    }
-    if (-not $normalized) {
-        Write-Log "   SKIP journal -- normalize failed, no journal generated"
-        return $false
+    # 3. 把「写日记需要的一切」推给服务器。
+    #
+    # ⚠️ 这一步**和调不调 AI 无关**（-SkipAI / -Refresh 时都要做）。服务器那边是
+    #    独立的定时任务，靠这个输入包决定写不写日记 —— 本机做不做 AI 是另一回事。
+    #    而且 `-Refresh`（每 2 小时）推的正是当天唯一的那份「非终版」数据。
+    if ($normalized -and -not $DryRun) {
+        Invoke-Step "push-input" "scripts\push_journal_input.py" @("--date", $ds) | Out-Null
     }
 
-    $genArgs = @("--date", $ds)
-    if ($DryRun) { $genArgs += "--dry-run" }
-    return (Invoke-Step "journal" "scripts\generate_journal.py" $genArgs)
+    # ⚠️ 「取日记」**不在这里**，见日循环之后那一段。把那一步放进来的话：
+    #    取不到时它会退出码 0（「服务器还没生成」是正常状态），于是这一天被判定
+    #    成功、水位线前进 —— 而那份几小时后才生成的日记再也没人去取。
+    return $normalized
 }
 
 # ── 补齐环境变量 ────────────────────────────────────────────────────
@@ -366,6 +366,24 @@ foreach ($d in $targets) {
     } else {
         $failDays += $d.ToString("yyyy-MM-dd")
     }
+}
+
+# ── 取回服务器写好的日记 ────────────────────────────────────────────
+#
+# 放在日循环**外面**，而且往前扫几天，有两个理由：
+#
+#   1. AI 那一步搬到服务器上了（scripts/close_day.py），它什么时候生成不受本机
+#      控制 —— 本机完全可能醒得比它早。
+#   2. 水位线管的是「采集有没有做完」，**不是**「AI 日记有没有写好」。把两者绑在
+#      一起，取不到时就只能二选一：要么谎报成功（那份日记永远丢了），要么谎报
+#      失败（每天早上报红，很快你就不看了）。
+#
+# 所以这里和 cost-events / questions 一样尽力而为。脚本自身幂等
+# （state/journal-pulled-<day>.txt 记着已经组装过哪一版），重复运行不会重复写。
+# ⚠️ 这一步**不受 -SkipAI 影响** —— `-SkipAI` 的意思是「别花 AI 的钱」，而取回
+#    一份已经生成好的正文一分钱不花。挡住它只会让 更新数据.cmd 永远拿不到日记。
+if (-not $DryRun) {
+    Invoke-Step "journal-pull" "scripts\pull_journal_output.py" @("--days", "3") | Out-Null
 }
 
 # ── 每日提问：生成新的 + 回收答回来的 ───────────────────────────────

@@ -18,9 +18,9 @@
 └──────────────────────────┬──────────────────────────────┘
                            ↓
 ┌─ 理解层 ────────────────────────────────────────────────┐
-│ 每晚 23:00  AI Agent（Anthropic API）                     │
-│   拉取当天原始数据 → 柳比歇夫分类 → 生成 Markdown 日记       │
-│   cost_guard 预检预算 → 记账 → 与厂商账单对账               │
+│ 写日记：**在服务器上**（24 小时开着，不再等笔记本开机）                       │
+│   服务器每 15 分钟 close_day.py：有「终版输入」的那天       │
+│     → 调 AI 写正文 → 存回中继。本机开机时取回、组装进 vault        │
 └──────────────────────────┬──────────────────────────────┘
                            ↓
 ┌─ 存储层 ────────────────────────────────────────────────┐
@@ -87,7 +87,10 @@ LifeLogging/
 │   ├── collect_phone.py         ← Dawarich → 事件表（手机位置）
 │   ├── collect_phone_events.py  ← 服务器中继 → 事件表（手机使用：解锁/切应用）
 │   ├── normalize.py             ← 原始数据 → 柳比歇夫分类
-│   ├── generate_journal.py      ← 夜间 AI 生成日记
+│   ├── generate_journal.py      ← 日记的提示词 / 校验 / 组装（AI 调用在服务器上）
+│   ├── push_journal_input.py    ← 把「写日记需要的一切」推给服务器
+│   ├── pull_journal_output.py   ← 取回服务器写好的正文，组装进 vault
+│   ├── close_day.py             ← 服务器上跑：关账 + 调 AI 写正文（见 server/close-day/）
 │   ├── generate_questions.py    ← 次日要问的问题（拿昨天日记里的话堵今天）
 │   ├── apply_answers.py         ← 手机上答的「做了/没做」→ 勾掉 Tasks.md
 │   ├── cost_guard.py            ← 预算硬封顶 + 每日花费写进事件表
@@ -97,7 +100,8 @@ LifeLogging/
 │   ├── setup_scheduler.ps1      ← 注册 Windows 计划任务
 │   └── check_ps1.ps1            ← .ps1 语法预检（改完脚本先跑它）
 ├── server/
-│   └── phone-relay/             ← Linux 服务器：手机使用事件中继 + 每日提问（单文件，无依赖）
+│   ├── phone-relay/             ← Linux 服务器：手机使用事件中继 + 每日提问 + 日记中转（单文件，无依赖）
+│   └── close-day/               ← Linux 服务器：关账 + 调 AI 写日记正文（systemd timer）
 ├── docker/
 │   ├── dawarich/                ← Linux 服务器：位置后端
 │   ├── grafana/                 ← 可视化：6 个仪表盘，直接读 state/events.db
