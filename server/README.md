@@ -55,7 +55,7 @@ git -C /opt/lifelogging/repo rev-parse --short HEAD
 
 > ⚠️ **服务器上的 `config/config.yaml` 和笔记本那份不一样。** 至少三处要改：
 > `vault_path`（服务器上没有 vault）、`state_dir`（指到 `/var/lib/lifelogging`）、
-> `sources.phone_relay.api_base`（两个服务在同一台机器上，用 `127.0.0.1:8788`）。
+> `sources.phone_relay.api_base`（填中继**实际绑定的**地址，见下）。
 > 详见 `close-day/README.md`。
 
 ---

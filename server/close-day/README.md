@@ -51,7 +51,7 @@ state_dir: "/var/lib/lifelogging"        # 和 phone-relay 共用那个目录
 sources:
   phone_relay:
     enabled: true
-    api_base: "http://127.0.0.1:8788"
+    api_base: "http://100.127.41.49:8788"   # 中继绑的是 Tailscale 地址，不是环回
     api_key: "<和 /etc/lifelogging/relay.env 里那把一样>"
 ```
 
@@ -110,8 +110,8 @@ systemctl list-timers lifelogging-close-day.timer
 
 | 症状 | 原因 |
 |---|---|
-| 一直「nothing to do」 | 笔记本那边还没推**终版**输入包。查中继：`curl -H "X-API-Key: <key>" 'http://127.0.0.1:8788/journal/inputs?day=<日期>'`，看 `final` 是不是 `true` |
-| `relay unreachable` | 中继没在跑，或 config 里的 `phone_relay.api_base` 指错了。同一台机器应该是 `127.0.0.1:8788` |
+| 一直「nothing to do」 | 笔记本那边还没推**终版**输入包。查中继：`curl -H "X-API-Key: <key>" 'http://<中继绑定的地址>:8788/journal/inputs?day=<日期>'`，看 `final` 是不是 `true` |
+| `relay unreachable` | 中继没在跑，或 config 里的 `phone_relay.api_base` 指错了。填中继 unit 里 `RELAY_HOST` 的那个地址 |
 | `DEEPSEEK_API_KEY is not set` | `/etc/lifelogging/close-day.env` 没建好或权限不对。`systemctl show lifelogging-close-day -p EnvironmentFile` 能看到它读的是哪个文件 |
 | 日记写出来了，但笔记本没取到 | 那是笔记本那侧的事 —— `scripts/pull_journal_output.py`。它每次跑会往前扫 3 天 |
 | `❌ ... over the 60% limit` | 模型写的时间块和规则引擎对不上，**没存**。这是有意的硬闸门：宁可下次重来，也不写一份编出来的时间轴 |
