@@ -9,6 +9,13 @@
 
 各自的具体说明： [`phone-relay/README.md`](phone-relay/README.md) · [`close-day/README.md`](close-day/README.md)
 
+**手机怎么连进来** —— 这是另一个话题，而且有个绕不开的坑：
+[`cloudflare-tunnel/README.md`](cloudflare-tunnel/README.md)。
+Android 同一时刻只允许**一个** VPN 服务，所以手机上 Tailscale 和任何代理软件
+（Hiddify 等）会互相踢掉 —— 而手机那侧的采集全走 Tailscale、Tasker 又没有队列，
+开着代理的那段时间数据就是真丢了。那份文档讲的是把中继挂到 Cloudflare Tunnel
+上、用 Access 只放你自己的设备，**手机从此不需要 Tailscale**。
+
 ---
 
 ## 代码从哪来：git clone，不是 scp
