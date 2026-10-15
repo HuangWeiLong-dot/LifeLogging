@@ -109,6 +109,22 @@ sources:
     enabled: false            # 没有手环就设 false
     db_path: "C:/Users/<you>/gadgetbridge-export/gadgetbridge.db"  # 手机导出后同步过来
 
+  # ── 手机使用事件的中继（跑在 Linux 服务器上）──────────────────
+  #
+  # 链路：手机 ──随时──> 服务器中继 ──笔记本醒着时──> collect_phone_events.py
+  #
+  # ⚠️ 手机**不能**直接发给笔记本：笔记本一天只醒几小时（实测 24 小时里
+  #    只醒 3.4 小时），而 Tasker 的 HTTP 请求**没有队列** —— 电脑睡着时
+  #    那一发就直接失败，数据静默丢失。服务器 24 小时开着，所以让手机只对
+  #    它说话。跟位置数据（Dawarich）是同一套形状。
+  #
+  # ⚠️ 每日提问也走这个中继（见下面的 questions 段）。
+  #    部署：server/phone-relay/README.md
+  phone_relay:
+    enabled: false                              # 中继部署好再改 true
+    api_base: "http://REPLACE_WITH_SERVER:8788" # 填服务器的 Tailscale 内网地址
+    api_key: "REPLACE_ME"                       # /etc/lifelogging/relay.env 里那把
+
   # Apple Health —— 纯 Android 的话整块设 false，iOS 链路不再需要
   apple_health:
     enabled: false
@@ -193,6 +209,28 @@ pricing:
     cache_hit: 0.30
     cache_miss: 3.00
     output: 15.00
+
+# ── 每日提问（可选）─────────────────────────────────────────────
+#
+# 日记写完之后，再从里面提炼几条**只能用「做了 / 没做」回答**的问题，
+# 推到服务器中继上；手机早上轮询到了就弹通知，点开是个表单。
+#
+# 问题大头是**拿昨天你自己写的话堵今天** —— 日记里的
+# `### Adjustments for Tomorrow` 和挂在任务表上的 `[ ]` 就是素材。
+# 生成见 scripts/generate_questions.py，回写见 scripts/apply_answers.py。
+#
+# 链路：
+#   generate_questions.py ──> 中继 /questions ──> 手机表单
+#        ──> /answer ──> 事件表 ──> apply_answers.py 回写 04-Tasks/Tasks.md
+#
+# ⚠️ 它复用 sources.phone_relay 的连接信息，中继那边要一起部署新路由。
+#    部署步骤见 server/phone-relay/README.md 和 docs/运维手册.md。
+questions:
+  enabled: false        # 中继部署好、Tasker 配好之后再改 true
+  count: 8              # 每天最多问几条（多了就开始敷衍，反而不如少问）
+  language: "zh"        # 问题正文用什么语言；证据是原文照抄，不翻译
+  push: true            # 生成后推到中继；false 就只留在本机 state/ 下
+  max_age_days: 2       # 只对最近 N 天提问 —— 补跑历史时不生成过期问题
 
 # ── 成本控制 ──────────────────────────────────────────────
 budget:

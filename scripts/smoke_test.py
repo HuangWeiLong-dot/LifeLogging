@@ -831,6 +831,88 @@ check("relay day-bucketing matches the laptop / dedup / bad-line tolerance",
       t_phone_relay)
 
 
+# ── 7d-2. 每日提问（中继 ↔ 笔记本的约定）────────────────────────────
+print("\n[20] Daily questions")
+
+
+def t_questions():
+    """锁住「手机 → 笔记本」这条链上唯一的约定：value_text 的编码。
+
+    ⚠️ 中继把答案编成 ``<题号>|<yes|no>|<备注>``，apply_answers.py 按同样的
+       规则解。两边一旦错位，答案就变成一堆没人认得的字符串 —— **两边都不会
+       报错**，只是「勾掉任务」这件事永远不发生。这个项目栽过的静默失效里，
+       这条属于最难发现的一类。
+    """
+    import importlib.util
+    import tempfile
+
+    path = (Path(__file__).resolve().parent.parent
+            / "server" / "phone-relay" / "phone_relay.py")
+    spec = importlib.util.spec_from_file_location("phone_relay_q", path)
+    pr = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pr)
+
+    # 1. 备注里的竖线和换行不能破坏编码（用户随手打的东西什么都有）
+    evs = pr.answers_to_events([
+        {"id": "2026-10-14-aaa1", "value": "YES", "note": "提交了|带竖线\n和换行"},
+        {"id": "2026-10-14-bbb2", "value": "no"},
+        {"id": "", "value": "yes"},                    # 没题号 → 丢
+        {"id": "2026-10-14-ccc3", "value": "maybe"},   # 不是 yes/no → 丢
+        "not a dict",                                  # 丢
+    ])
+    assert len(evs) == 2, evs
+    qid, val, note = evs[0]["value_text"].split("|", 2)
+    assert (qid, val) == ("2026-10-14-aaa1", "yes"), "value 要归一成小写，题号原样保留"
+    assert "|" not in note and "\n" not in note, f"备注必须压成一行且不含竖线: {note!r}"
+    assert evs[1]["value_text"] == "2026-10-14-bbb2|no|", evs[1]["value_text"]
+    assert evs[0]["domain"] == "question" and evs[0]["metric"] == "answer"
+
+    with tempfile.TemporaryDirectory() as td:
+        pr.DATA_DIR = Path(td)
+        pr._seen.clear()
+        ok, _ = pr.save_questions("2026-10-14", {
+            "day": "2026-10-14",
+            "questions": [{"id": "2026-10-14-aaa1", "text": "做了吗？", "evidence": "原话"},
+                          {"id": "2026-10-14-bbb2", "text": "另一个？", "evidence": ""}],
+        })
+        assert ok
+        q, left = pr.pending_questions()
+        assert q and len(left) == 2, (q, left)
+
+        # 答掉一条 → 表单里只剩另一条
+        pr.append_events(pr.answers_to_events(
+            [{"id": "2026-10-14-aaa1", "value": "yes", "note": ""}]))
+        q, left = pr.pending_questions()
+        assert len(left) == 1 and left[0]["id"] == "2026-10-14-bbb2", left
+
+        # 2. 日期形状不对不能拼出文件路径（这是个对外的写端点）
+        assert pr.questions_path("../../etc/passwd") is None
+        assert pr.questions_path("") is None
+        assert pr.questions_path("2026-10-14") is not None
+        assert not pr.save_questions("not-a-day", {"day": "x", "questions": []})[0]
+
+        # 3. 页面里的题干必须转义 —— 它是要在手机浏览器里渲染的
+        page = pr.render_ask_page(
+            q, [{"id": "x<y>", "text": "<script>alert(1)</script>", "evidence": "a & b"}], "k")
+        assert "<script>alert(1)</script>" not in page, "题干必须转义"
+        assert "&lt;script&gt;" in page and "a &amp; b" in page
+
+    # 4. 笔记本那侧的解析必须和上面同源
+    from apply_answers import find_task
+    ops = ["Commit the LifeLogging repo now that the .gitignore exists",
+           "Complete the Tailscale key configuration that was started at 20:11"]
+    assert find_task(ops, ops[1]) == ops[1], "逐字照抄要能对上"
+    assert find_task(ops, "complete the tailscale key configuration, that was started at 20:11.") \
+        == ops[1], "大小写和标点差异要能容忍"
+    # ⚠️ 这条是「别把任务误标成完成」的唯一防线：公共片段太短就不许对。
+    assert find_task(ops, "Commit the repo") is None, "短片段不能乱对"
+    assert find_task(ops, "") is None, "没有 ref 就不该对"
+
+
+check("answer encoding round-trips / no path escape / HTML escaped / safe task matching",
+      t_questions)
+
+
 # ── 7e. Gadgetbridge 表选择 ────────────────────────────────────────
 print("\n[16] Gadgetbridge table selection")
 

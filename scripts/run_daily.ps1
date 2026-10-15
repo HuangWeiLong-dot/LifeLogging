@@ -368,6 +368,26 @@ foreach ($d in $targets) {
     }
 }
 
+# ── 每日提问：生成新的 + 回收答回来的 ───────────────────────────────
+#
+# 两件事都必须放在日循环**外面**，而且只针对最近的那一天：
+#   · 生成问题要花钱（一次 LLM 调用），补跑 5 天不该生成 5 份过期问题；
+#     何况中继只认**最新**那一份，生成一堆等于互相覆盖。
+#   · 回收答案只关心「刚过去的那一天问了什么」。
+if ($targets.Count -gt 0) {
+    # ⚠️ 必须 .ToString("yyyy-MM-dd")。直接把 DateTime 插进字符串会走本地化
+    #    格式（'10/14/2026 12:00:00 AM'），Python 那边 date.fromisoformat 直接炸。
+    $qDay = $targets[-1].ToString("yyyy-MM-dd")
+    if (-not $SkipAI) {
+        Invoke-Step "questions" "scripts\generate_questions.py" @("--date", $qDay) | Out-Null
+    }
+    # 问的是**前一天**的日记 —— 昨天推出去的问题，答案今早才答回来。
+    # 显式传日期，不让脚本自己去猜「昨天」：它的默认值是按日历算的，
+    # 而这里的 $targets 是水位线算出来的，两者在补跑时不是一回事。
+    $aDay = $targets[-1].AddDays(-1).ToString("yyyy-MM-dd")
+    Invoke-Step "answers" "scripts\apply_answers.py" @("--date", $aDay) | Out-Null
+}
+
 # ── 每日花费写进事件表（Grafana 的「AI 花费」面板读它）──────────────
 #
 # 每次调用的花费原本只记在 state/cost_ledger.jsonl，而 Grafana 挂的是

@@ -254,16 +254,21 @@ def write_tasks(day_iso: str, carryover: list[str]) -> Path:
     p.parent.mkdir(parents=True, exist_ok=True)
 
     existing_open: list[str] = []
+    existing_done: list[str] = []
     if p.exists():
-        in_open = False
+        section = ""
         for line in p.read_text(encoding="utf-8").splitlines():
-            if line.strip().startswith("## Open"):
-                in_open = True
+            s = line.strip()
+            if s.startswith("## "):
+                section = s
                 continue
-            if in_open and line.strip().startswith("## "):
-                break
-            if in_open and line.strip().startswith("- [ ]"):
+            # ⚠️ Done 段要**一起读回来**。这个函数是把整个文件重建一遍的，
+            #    只读 Open 的话，用户（或 apply_answers.py）勾掉、挪到 Done
+            #    的条目下次运行就没了 —— 而上面那行注释恰恰在教人往里放。
+            if section.startswith("## Open") and s.startswith("- [ ]"):
                 existing_open.append(line.rstrip())
+            elif section.startswith("## Done") and s.startswith("- "):
+                existing_done.append(line.rstrip())
 
     # 昨天没做完的，补进 Open（去重）
     merged = list(existing_open)
@@ -284,6 +289,7 @@ def write_tasks(day_iso: str, carryover: list[str]) -> Path:
         "## Done",
         "",
         "<!-- 完成的直接移到这里，或在下面手动勾掉 -->",
+        *(existing_done or []),
         "",
         "## Rolled up from journals",
         "",

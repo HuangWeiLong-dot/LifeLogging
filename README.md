@@ -88,6 +88,8 @@ LifeLogging/
 │   ├── collect_phone_events.py  ← 服务器中继 → 事件表（手机使用：解锁/切应用）
 │   ├── normalize.py             ← 原始数据 → 柳比歇夫分类
 │   ├── generate_journal.py      ← 夜间 AI 生成日记
+│   ├── generate_questions.py    ← 次日要问的问题（拿昨天日记里的话堵今天）
+│   ├── apply_answers.py         ← 手机上答的「做了/没做」→ 勾掉 Tasks.md
 │   ├── cost_guard.py            ← 预算硬封顶 + 每日花费写进事件表
 │   ├── collect_ai_usage.py      ← AI 真实花费：平台账单 + 余额 + Claude Code 分布
 │   ├── reconcile_cost.py        ← 与厂商账单对账
@@ -95,7 +97,7 @@ LifeLogging/
 │   ├── setup_scheduler.ps1      ← 注册 Windows 计划任务
 │   └── check_ps1.ps1            ← .ps1 语法预检（改完脚本先跑它）
 ├── server/
-│   └── phone-relay/             ← Linux 服务器：手机使用事件中继（单文件，无依赖）
+│   └── phone-relay/             ← Linux 服务器：手机使用事件中继 + 每日提问（单文件，无依赖）
 ├── docker/
 │   ├── dawarich/                ← Linux 服务器：位置后端
 │   ├── grafana/                 ← 可视化：6 个仪表盘，直接读 state/events.db
