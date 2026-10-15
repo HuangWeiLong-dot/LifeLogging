@@ -18,7 +18,7 @@
     "=== 各服务前置条件 ===",
     "obsidian    : Obsidian 开着 + Local REST API 插件启用",
     "sqlite      : 路径存在（ActivityWatch 的库）",
-    "events      : python -m middleware.events_api 在跑（默认 :8787）",
+    "events      : python -m middleware.events_api 在跑（默认 :18787）",
     "dawarich    : 服务器上的 Dawarich 在跑，且已拿到 API key"
   ],
 
@@ -73,7 +73,7 @@
       "command": "uvx",
       "args": ["mcp-openapi-proxy"],
       "env": {
-        "OPENAPI_SPEC_URL": "http://127.0.0.1:8787/openapi.json",
+        "OPENAPI_SPEC_URL": "http://127.0.0.1:18787/openapi.json",
         "API_KEY": "REPLACE_ME",
         "TOOL_WHITELIST": "get_events_events_get,aggregate_aggregate_get,days_days_get,health_health_get"
       }

@@ -181,7 +181,7 @@ python scripts/generate_journal.py --date today    # 生成日记
   但没在真数据上跑过。等手机上传第一个点后再确认
 - Gadgetbridge 导出的 SQLite —— 表名随手环型号变化，**第一次必须用 `--dry-run` 看它选中了哪张表**
 
-过程中实测修掉的 5 个真实缺陷（都会在 Windows 上直接导致失败）：
+过程中实测修掉的 7 个真实缺陷（1、2、5、6 是 Windows 特有的，3、4、7 是跨平台的逻辑缺陷）：
 1. `tzdata` 缺失 → Windows 无系统时区库，`Asia/Shanghai` 解析失败，整套系统起不来
 2. 控制台 GBK 编码 → 脚本里的 emoji 抛 `UnicodeEncodeError`
 3. `CostLedger.spend_on` 用 `ts_utc` 反推日期而非用写入方记录的 `day` 字段
@@ -190,6 +190,17 @@ python scripts/generate_journal.py --date today    # 生成日记
    报出指向无关行号的 `Missing closing '}'`**。三个 `.ps1` 已全部改为 UTF-8 **with BOM**。
    ⚠️ 用编辑器改这些脚本后，务必确认 BOM 还在 —— 否则又会坏掉。
    改完先跑 `powershell -NoProfile -File scripts\check_ps1.ps1` 验证。
+6. **事件表端口被系统偷走** → 8787 落在 Windows 的 TCP 保留段里（Hyper-V / WSL 每次开机
+   重新划，`netsh int ipv4 show excludedportrange protocol=tcp` 可查）。服务 bind 报
+   `WinError 10013`，但它是被隐藏窗口拉起的，报错直接被吞，日志里只剩一句
+   「did not come up within 12s」，看不出真因。现在 uvicorn 的 stderr 会落到
+   `state/logs/events_api.err.log`，端口改到动态池外的 **18787**。
+7. **流水线报成功，而库里一行都没有** → 采集脚本把「连不上事件表」当降级处理、照样
+   `exit 0`（对「手表没戴」是对的，对「落盘的地方没了」是错的），而 `Invoke-Step` 只看退出码。
+   更隐蔽的是 `normalize` 和 `journal` 都从本地 JSON 读，所以整条流水线照常走完、
+   印出 `Done -- 1 day(s) succeeded` → **水位线前进，这一天再也不会被重跑**。
+   2026-10-14 就这样被标成「已完成」过一次（它的 timeline 和日记也随之被基于降级数据重写）。
+   现在事件表起不来 → 直接 `exit 1`，不碰水位线。
 
 
 ---

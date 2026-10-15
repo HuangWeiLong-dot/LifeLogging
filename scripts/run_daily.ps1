@@ -182,9 +182,9 @@ function Ensure-EventsApi {
     #    必须绑到 Tailscale 地址上，那时候健康检查也得查同一个地址 ——
     #    绑了 100.x 之后 127.0.0.1 是连不上的，写死会让服务「起得来但判定为没起」。
     $apiHost = "127.0.0.1"
-    $port = 8787
+    $port = 18787
     try {
-        $parsed = & $Py -c "import sys;sys.path.insert(0,'scripts');from urllib.parse import urlparse;from common import load_config;u=urlparse(load_config()['sources']['events_api']['api_base']);print((u.hostname or '127.0.0.1') + ' ' + str(u.port or 8787))"
+        $parsed = & $Py -c "import sys;sys.path.insert(0,'scripts');from urllib.parse import urlparse;from common import load_config;u=urlparse(load_config()['sources']['events_api']['api_base']);print((u.hostname or '127.0.0.1') + ' ' + str(u.port or 18787))"
         if ($parsed) {
             $parts = "$parsed".Trim() -split '\s+'
             if ($parts.Count -ge 2 -and $parts[1] -match '^\d+$') {
@@ -212,30 +212,63 @@ function Ensure-EventsApi {
 
     Write-Log "   events API is down -- starting it"
 
+    # ⚠️ 一定要把 uvicorn 的输出重定向到文件。
+    #    原来用 -WindowStyle Hidden 起进程，stderr 直接丢掉 —— 服务起不来时
+    #    日志里只剩一句「did not come up within 12s」，看不出真正原因。
+    #    2026-10-15 那次就是：真因是端口被系统划进了保留段、bind 报
+    #    WinError 10013，但必须手动在前台跑一遍才能看见。别再让错误信息消失。
+    $apiOutLog = Join-Path $LogDir "events_api.out.log"
+    $apiErrLog = Join-Path $LogDir "events_api.err.log"
+
     Start-Process -FilePath $Py `
         -ArgumentList @("-m", "uvicorn", "middleware.events_api:app",
                         "--host", "$apiHost", "--port", "$port", "--log-level", "warning") `
-        -WorkingDirectory $Root -WindowStyle Hidden
+        -WorkingDirectory $Root -WindowStyle Hidden `
+        -RedirectStandardOutput $apiOutLog -RedirectStandardError $apiErrLog
 
+    # 用秒表计时而不是写死「12s」：24 次 × 500ms 只是名义值，
+    # 实际每次 Invoke-WebRequest 都可能额外阻塞，日志里的时间和代码对不上。
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
     for ($i = 0; $i -lt 24; $i++) {
         Start-Sleep -Milliseconds 500
         try {
             $r = Invoke-WebRequest -Uri $health -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
             if ($r.StatusCode -eq 200) {
-                Write-Log "   events API is up (port $port)"
+                $sw.Stop()
+                Write-Log "   events API is up (port $port, $($sw.Elapsed.TotalSeconds.ToString('0.0'))s)"
                 return $true
             }
         } catch { }
     }
+    $sw.Stop()
 
-    Write-Log "   WARN events API did not come up within 12s -- collection will fail"
+    Write-Log "   WARN events API did not come up within $($sw.Elapsed.TotalSeconds.ToString('0.0'))s on ${apiHost}:$port"
+    Write-Log "        uvicorn said (state\logs\events_api.err.log):"
+    if (Test-Path $apiErrLog) {
+        Get-Content $apiErrLog -Tail 12 -Encoding UTF8 | ForEach-Object { Write-Log "          $_" }
+    } else {
+        Write-Log "          (no log written -- the process never got far enough to log)"
+    }
     return $false
 }
 
 # 放在这里而不是日循环里 —— 「今天无事可做」的提前 exit 会跳过日循环，
 # 那样每次重开机后如果当天没数据要处理，服务就永远起不来。
 # 位置必须在函数定义之后：PowerShell 自上而下执行。
-Ensure-EventsApi | Out-Null
+#
+# 起不来就**整个 run 失败**，不要继续往下跑。
+# 采集脚本把「连不上事件表」当降级处理、照样 exit 0（那对「手表没戴」是
+# 对的，对「落盘的地方没了」是错的），于是流水线会印「Done -- succeeded」、
+# 水位线照样前进 —— 而库里一行都没有，这一天再也不会被重跑。
+# 宁可让计划任务报红，也不要静默丢一天。
+if (-not (Ensure-EventsApi)) {
+    Write-Log "BLOCKED events API is not reachable -- refusing to process any day."
+    Write-Log "        Collectors treat a missing event table as a soft failure and exit 0,"
+    Write-Log "        so the day would be reported done with nothing written, and the"
+    Write-Log "        watermark would step past it -- losing that day for good."
+    Write-Log "        state\last_processed.json was NOT touched. Fix the service, then rerun."
+    exit 1
+}
 
 # ── 决定处理哪几天 ──────────────────────────────────────────────────
 

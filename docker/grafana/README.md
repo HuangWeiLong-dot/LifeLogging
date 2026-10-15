@@ -363,7 +363,7 @@ SQLite 是「一写多读」，但读的一方需要能访问 `-wal` 和 `-shm` 
 
 如果真遇到了：
 1. 确认挂载是 `rw` 不是 `ro`（WAL 模式下只读挂载会出问题）
-2. 检查是不是有采集脚本卡住没退出：`netstat -ano | grep 8787`
+2. 检查是不是有采集脚本卡住没退出：`netstat -ano | grep 18787`
 3. 临时办法：把 `events.db` 连同 `-wal`/`-shm` 一起复制一份给 Grafana 读，
    代价是数据有延迟
 
@@ -373,7 +373,7 @@ SQLite 是「一写多读」，但读的一方需要能访问 `-wal` 和 `-shm` 
 再确认 `state/events.db` 里真的有行：
 
 ```bash
-curl -H "X-API-Key: <你的key>" "http://127.0.0.1:8787/blocks/daily?from=2026-01-01"
+curl -H "X-API-Key: <你的key>" "http://127.0.0.1:18787/blocks/daily?from=2026-01-01"
 ```
 
 如果行数明显偏少（比如一整天才 5 行），那是 `normalize.py` 的合并逻辑问题，

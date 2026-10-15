@@ -96,7 +96,12 @@ sources:
   # 本机中间件（统一事件表）
   events_api:
     enabled: true
-    api_base: "http://127.0.0.1:8787"
+    # ⚠️ 端口留在 15000 以上，别用 8787 这类低位端口。
+    #    1024–15000 是 Windows 动态端口池，Hyper-V / WSL 每次开机都会从里面
+    #    划走几段保留，你的服务就会 bind 失败（WinError 10013）——
+    #    而采集脚本会把「连不上事件表」当降级处理、照样报成功，数据静默丢失。
+    #    查当前保留段：netsh int ipv4 show excludedportrange protocol=tcp
+    api_base: "http://127.0.0.1:18787"
     api_key: "REPLACE_ME"
 
   # Gadgetbridge 导出的 SQLite（手环数据）
@@ -107,7 +112,7 @@ sources:
   # Apple Health —— 纯 Android 的话整块设 false，iOS 链路不再需要
   apple_health:
     enabled: false
-    ingest_url: "http://127.0.0.1:8787/ingest/apple-health"
+    ingest_url: "http://127.0.0.1:18787/ingest/apple-health"
     # 启用时：iPhone 装 Health Auto Export，Automations → REST API
     # 指向上面 ingest_url，加 Bearer header = events_api.api_key
 

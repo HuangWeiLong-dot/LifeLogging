@@ -6,8 +6,12 @@
   形状各异，喂给 LLM 之前必须先归一成一种，否则每天要写 N 个解析分支。
 
 运行：
-  uvicorn middleware.events_api:app --host 127.0.0.1 --port 8787
+  uvicorn middleware.events_api:app --host 127.0.0.1 --port 18787
   或  python -m middleware.events_api
+
+⚠️ 端口用 18787 而不是 8787：1024–15000 是 Windows 动态端口池，
+   Hyper-V / WSL 每次开机都可能从里面划走几段保留，服务就 bind 不上
+   （WinError 10013）。详见 config.yaml 里 events_api 那段注释。
 
 鉴权：除 /health 外全部需要 X-API-Key header。
 """
@@ -569,7 +573,7 @@ def _bind() -> tuple[str, int]:
 
         sources:
           events_api:
-            api_base: "http://100.x.y.z:8787"   # tailscale ip -4 拿到的地址
+            api_base: "http://100.x.y.z:18787"   # tailscale ip -4 拿到的地址
 
         改完两处都要跟着改（它们指向同一个服务）：
           · config.yaml 的 sources.events_api.api_base
@@ -582,11 +586,11 @@ def _bind() -> tuple[str, int]:
        这个端点收的是任意写入，占位 key 等于没有 key。
     """
     base = (CFG.get("sources", {}).get("events_api", {}).get("api_base")
-            or "http://127.0.0.1:8787")
+            or "http://127.0.0.1:18787")
     from urllib.parse import urlparse
     u = urlparse(base)
     host = u.hostname or "127.0.0.1"
-    port = u.port or 8787
+    port = u.port or 18787
     return host, port
 
 
