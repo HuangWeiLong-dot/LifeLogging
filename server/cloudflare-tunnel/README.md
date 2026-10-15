@@ -71,11 +71,22 @@ cloudflared tunnel login          # 浏览器里授权，选 liveinpassion.me
 cloudflared tunnel create lifelogging
 ```
 
-配置 `/etc/cloudflared/config.yml`：
+配置 `/etc/cloudflared/config.yml`。
 
-```yaml
-tunnel: <上一步输出的 Tunnel ID>
-credentials-file: /root/.cloudflared/<Tunnel ID>.json
+⚠️ **用一个 shell 变量，别手抄 Tunnel ID。** Tunnel ID 在这份配置里要出现**两次**
+（`tunnel:` 和 `credentials-file:`），手抄一份漏一处的话 cloudflared 起不来，
+而报错只有一句笼统的「control process exited with error code」——
+真原因要去 `journalctl -u cloudflared` 才看得到。（实测就这么栽过一次。）
+
+```bash
+# 把这里换成 `cloudflared tunnel create` 输出的那个 ID
+TUNNEL_ID=9d082d97-7ac7-4725-ab9e-492ae5a89fd6
+
+sudo mkdir -p /etc/cloudflared
+# ⚠️ 定界符 YAML **不加引号** —— 加了 $TUNNEL_ID 就不会展开
+sudo tee /etc/cloudflared/config.yml >/dev/null <<YAML
+tunnel: $TUNNEL_ID
+credentials-file: /root/.cloudflared/$TUNNEL_ID.json
 ingress:
   # ⚠️ 指中继**实际绑的地址**（Tailscale 那个），不是 127.0.0.1。
   #    中继只绑了 100.x，写 127.0.0.1 的话隧道建起来也是 502 ——
@@ -83,6 +94,11 @@ ingress:
   - hostname: relay.liveinpassion.me
     service: http://100.127.41.49:8788
   - service: http_status:404
+YAML
+
+# 先确认两件事都对上，再往下走
+sudo cat /etc/cloudflared/config.yml
+sudo ls -la /root/.cloudflared/          # 这个 json 必须存在，名字要和上面一致
 ```
 
 ```bash
