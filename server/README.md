@@ -78,7 +78,11 @@ sudoedit /opt/lifelogging/repo/config/config.yaml     # 按上面那三处改
 sudo mkdir -p /etc/lifelogging
 sudo python3 -c "import secrets;print('RELAY_API_KEY=' + secrets.token_urlsafe(32))" \
   | sudo tee /etc/lifelogging/relay.env >/dev/null
-sudo sh -c 'echo "DEEPSEEK_API_KEY=sk-你的key" >> /etc/lifelogging/close-day.env'
+sudo sh -c 'echo "DEEPSEEK_API_KEY=sk-REPLACE_ME" > /etc/lifelogging/close-day.env'
+#   ⚠️ 占位符务必用**纯 ASCII** 写。写成带中文的（比如 `sk-你的key`）就可以被
+#      原样粘进 shell —— 于是服务器上装的 literally 是那串占位符，而报错会是
+#      httpx 内部一个看不懂的 UnicodeEncodeError。实测踩过一次。
+#      换掉它：sudo sed -i 's|sk-REPLACE_ME|<真 key>|' /etc/lifelogging/close-day.env
 sudo chmod 600 /etc/lifelogging/relay.env /etc/lifelogging/close-day.env
 
 # 4. 服务

@@ -36,7 +36,15 @@ from zoneinfo import ZoneInfo
 import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import CostLedger, Event, EventsClient, header, is_peak, load_config  # noqa: E402
+from common import (  # noqa: E402
+    CostLedger,
+    Event,
+    EventsClient,
+    header,
+    is_peak,
+    load_config,
+    require_api_key,
+)
 
 CFG = load_config()
 TZ = ZoneInfo(CFG["timezone"])
@@ -283,9 +291,10 @@ def cmd_check_deepseek() -> int:
     真正的精确对账要等它在控制台出账单，人工看一眼量级是否吻合。
     """
     env = CFG["ai"]["deepseek_api_key_env"]
-    key = os.environ.get(env)
-    if not key:
-        print(f"FAIL env var {env} is not set.")
+    try:
+        key = require_api_key(env)
+    except RuntimeError as e:
+        print(f"FAIL {e}")
         return 1
 
     base = CFG["ai"]["deepseek_base"].rstrip("/")

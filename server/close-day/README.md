@@ -74,7 +74,7 @@ sudo /opt/lifelogging/venv/bin/pip install -r /opt/lifelogging/requirements.txt
 ```bash
 sudo mkdir -p /etc/lifelogging
 sudo tee /etc/lifelogging/close-day.env >/dev/null <<'EOF'
-DEEPSEEK_API_KEY=sk-你的key
+DEEPSEEK_API_KEY=sk-REPLACE_ME_WITH_YOUR_REAL_KEY
 EOF
 sudo chmod 600 /etc/lifelogging/close-day.env
 ```

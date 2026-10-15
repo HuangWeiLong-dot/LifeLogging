@@ -62,7 +62,16 @@ from zoneinfo import ZoneInfo
 import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import Day, Event, EventsClient, Usage, compute_cost, header, load_config  # noqa: E402
+from common import (  # noqa: E402
+    Day,
+    Event,
+    EventsClient,
+    Usage,
+    compute_cost,
+    header,
+    load_config,
+    require_api_key,
+)
 
 CFG = load_config()
 TZ = ZoneInfo(CFG["timezone"])
@@ -191,8 +200,12 @@ def read_platform(day: Day, token: str, days: int) -> dict[str, dict] | None:
 
 def read_balance() -> dict | None:
     env = CFG["ai"].get("deepseek_api_key_env", "DEEPSEEK_API_KEY")
-    key = os.environ.get(env)
-    if not key:
+    try:
+        key = require_api_key(env)
+    except RuntimeError as e:
+        # 余额只是附加信息（拿不到就少一个数字），不该让整个采集失败 ——
+        # 但也别静默：说清楚为什么拿不到。
+        print(f"  . balance unavailable: {e}")
         return None
     try:
         r = httpx.get(

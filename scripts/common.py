@@ -50,6 +50,46 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
         return yaml.safe_load(f)
 
 
+def require_api_key(env_name: str) -> str:
+    """读一个 API key，并且**在它明显不是 key 的时候当场报错**。
+
+    ⚠️ **为什么要专门查非 ASCII。**
+
+        HTTP 头只能是 ASCII，所以一个带中文的 key 会一路跑到 httpx 拼请求头时
+        才炸：
+
+            UnicodeEncodeError: 'ascii' codec can't encode characters
+            in position 10-11
+
+        那个「10-11」是 `"Bearer "` 之后的第三、四个字符，跟「你的 key 根本
+        没换过」这个事实看起来毫无关系 —— 报错指向的是 httpx 内部。
+
+        实测踩过：部署文档里的占位符写成了 `sk-你的key`。它带中文、**可以原样
+        粘进 shell**，于是服务器上装进去的 literally 就是那串占位符。真正该被
+        指出的是「这是个占位符」，而不是让 httpx 抛一个编码错误。
+
+    ⚠️ 占位符一律用**纯 ASCII** 写（`sk-REPLACE_ME` 而不是 `sk-你的key`）——
+        这样万一被原样粘贴，症状是一个干净的 401，而不是一个看不懂的编码异常。
+    """
+    key = os.environ.get(env_name) or ""
+    if not key:
+        raise RuntimeError(
+            f"Env var {env_name} is not set.\n"
+            f"  Windows: setx {env_name} \"sk-...\"   然后重开终端\n"
+            f"  Linux:   写进 /etc/lifelogging/*.env 并 chmod 600"
+        )
+    bad = [(i, c) for i, c in enumerate(key) if not c.isascii()]
+    if bad:
+        i, c = bad[0]
+        raise RuntimeError(
+            f"Env var {env_name} contains non-ASCII characters "
+            f"(first at index {i}: {c!r}).\n"
+            f"  A real API key is ASCII. This is almost always a placeholder "
+            f"that got pasted\n  literally (e.g. `sk-你的key`) instead of the key itself."
+        )
+    return key
+
+
 # ── 时区与日期 ──────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
@@ -534,13 +574,7 @@ class LLM:
         2. **峰谷计费**：北京时间工作日 9-12、14-18 是高峰，其余半价。
            每晚 23:00 跑流水线正好落在空闲时段，直接省一半。
         """
-        key = os.environ.get(self.cfg["ai"]["deepseek_api_key_env"])
-        if not key:
-            raise RuntimeError(
-                f"Env var {self.cfg['ai']['deepseek_api_key_env']} is not set.\n"
-                f"PowerShell, this session:  $env:{self.cfg['ai']['deepseek_api_key_env']}=\"sk-...\"\n"
-                f"Permanent (new shells): setx {self.cfg['ai']['deepseek_api_key_env']} \"sk-...\""
-            )
+        key = require_api_key(self.cfg["ai"]["deepseek_api_key_env"])
         base = self.cfg["ai"]["deepseek_base"].rstrip("/")
 
         r = httpx.post(
@@ -590,12 +624,7 @@ class LLM:
     def _anthropic(self, system: str, user: str, cache_system: bool):
         import anthropic
 
-        key = os.environ.get(self.cfg["ai"]["api_key_env"])
-        if not key:
-            raise RuntimeError(
-                f"Env var {self.cfg['ai']['api_key_env']} is not set."
-                f"PowerShell: $env:{self.cfg['ai']['api_key_env']}=\"sk-ant-...\""
-            )
+        key = require_api_key(self.cfg["ai"]["api_key_env"])
         client = anthropic.Anthropic(api_key=key)
 
         sys_blocks: list[dict[str, Any]] = [{"type": "text", "text": system}]
