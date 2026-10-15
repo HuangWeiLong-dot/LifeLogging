@@ -1,14 +1,23 @@
-﻿# Register the Windows scheduled task: run the pipeline daily at 23:00
+﻿# Register the Windows scheduled tasks
+#
+# 注册**两个**任务：
+#   LifeLogging-Daily    每日 $Time + 解锁时 —— 正式处理（含 AI 日记、推水位线）
+#   LifeLogging-Refresh  每 $RefreshHours 小时 —— 只拉今天的数据，不调 AI、不动水位线
 #
 # 以**管理员身份**运行 PowerShell：
 #   powershell -ExecutionPolicy Bypass -File scripts\setup_scheduler.ps1
 #
 # 卸载：
-#   Unregister-ScheduledTask -TaskName "LifeLogging-Daily" -Confirm:$false
+#   Unregister-ScheduledTask -TaskName "LifeLogging-Daily"   -Confirm:$false
+#   Unregister-ScheduledTask -TaskName "LifeLogging-Refresh" -Confirm:$false
 
 param(
     [string]$Time = "23:00",
-    [string]$TaskName = "LifeLogging-Daily"
+    [string]$TaskName = "LifeLogging-Daily",
+    # 定时刷新的间隔（小时）。这个任务做的是 更新数据.cmd 那件事 ——
+    # 把当天的数据拉下来让 Grafana 保持新鲜，不调 AI（所以几乎零成本）。
+    [int]$RefreshHours = 2,
+    [string]$RefreshTaskName = "LifeLogging-Refresh"
 )
 
 $ErrorActionPreference = "Stop"
@@ -164,15 +173,76 @@ if ($trigCount -lt 2) {
     exit 1
 }
 
+# ── 第二个任务：每 $RefreshHours 小时刷新「今天」 ────────────────────
+#
+# **为什么需要它**
+#
+#   LifeLogging-Daily 有个绕不过去的性质：白天它必然什么都不做。
+#   run_daily.ps1 的 `includeToday = (小时 >= 23)`,也就是**今天只在 23:00
+#   之后才被正式处理** —— 否则早上补跑会把「只用了半天数据的一天」标成
+#   已完成，那一整天就再也不会重跑。
+#
+#   于是：白天每次解锁触发的运行都印 `Nothing to do`（确实执行了，只是没
+#   事可做），而唯一会产出当天数据的 23:00 那次，又因为机器那时常常已经
+#   关机/睡眠而跑不成。净效果是**当天的数据永远不会自己出现**，想看得
+#   手动双击 更新数据.cmd。
+#
+#   这个任务就是把那次双击自动化：每 $RefreshHours 小时跑一次 `-Refresh`
+#   （即 `-Date today -SkipAI`）—— 只拉今天、写当天的时间块、不调 AI、
+#   不推进水位线。所以重复跑既不花钱也不会掩盖漏掉的天。
+#
+#   两个任务分工明确：
+#     Refresh  白天保持当天数据新鲜（幂等，随便跑）
+#     Daily    23:00/解锁 正式处理 + 生成日记 + 推进水位线
+$refreshAction = New-ScheduledTaskAction `
+    -Execute "powershell.exe" `
+    -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Script`" -Refresh" `
+    -WorkingDirectory $Root
+
+# `-Once -At 今天零点` + RepetitionInterval：这是「每隔 N 小时、无限重复」
+# 的标准写法。**不要**给 RepetitionDuration —— 省略它 Task Scheduler 才当
+# 无限重复；给一个值反而会在到期后停下。注册完下面会导出 XML 核对一次。
+$refreshTrigger = New-ScheduledTaskTrigger `
+    -Once -At (Get-Date).Date `
+    -RepetitionInterval (New-TimeSpan -Hours $RefreshHours)
+
+try {
+    Register-ScheduledTask `
+        -TaskName $RefreshTaskName `
+        -Action $refreshAction `
+        -Trigger $refreshTrigger `
+        -Settings $settings `
+        -Principal $principal `
+        -Force | Out-Null
+} catch {
+    Write-Host "FAIL could not register '$RefreshTaskName': $_" -ForegroundColor Red
+    Write-Host "     '$TaskName' is registered and working; only the periodic refresh is missing." -ForegroundColor Yellow
+    exit 1
+}
+
+# 核对重复间隔真的落进去了 —— 这个参数的失败方式是「任务注册成功但只跑一次」，
+# 不核对的话要等半天才发现它根本没重复。
+$rt = Get-ScheduledTask -TaskName $RefreshTaskName
+$rep = @($rt.Triggers)[0].Repetition
+if (-not $rep -or -not $rep.Interval) {
+    Write-Host "FAIL '$RefreshTaskName' registered but has no repetition interval." -ForegroundColor Red
+    exit 1
+}
+
 Write-Host "OK  Registered" -ForegroundColor Green
 Write-Host "    Triggers: $trigCount  (daily $Time  +  unlock, 30s delay)"
+Write-Host "    Refresh:  every $($rep.Interval) (=$RefreshHours h), task '$RefreshTaskName'"
 Write-Host
 Write-Host "Check:"
 Write-Host "  (Get-ScheduledTask -TaskName '$TaskName').Triggers"
 Write-Host "  Export-ScheduledTask -TaskName '$TaskName' | Select-String SessionState"
+Write-Host "  (Get-ScheduledTask -TaskName '$RefreshTaskName').Triggers   # 重复间隔"
 Write-Host
-Write-Host "Trigger it once to test:"
+Write-Host "Trigger them once to test:"
 Write-Host "  Start-ScheduledTask -TaskName '$TaskName'"
+Write-Host "  Start-ScheduledTask -TaskName '$RefreshTaskName'"
+Write-Host
+Write-Host "Is it actually running? Open state\last_run.md -- it lists the recent runs."
 Write-Host
 Write-Host "WARN  A missed run is caught up at the next boot OR the next unlock,"
 Write-Host "      but only within MaxBackfillDays (14) -- anything older must be filled in by hand:"

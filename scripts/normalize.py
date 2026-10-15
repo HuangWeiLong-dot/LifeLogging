@@ -653,6 +653,30 @@ PHONE_APPS = {
     "app.hiddify.com": "Hiddify",
     "com.miui.securitycenter": "Security",
     "nodomain.freeyourgadget.gadgetbridge": "Gadgetbridge",
+    # 2026-10-15 实测这台手机上出现的（同上，不是猜的）
+    "md.obsidian": "Obsidian",
+    "mark.via": "Via Browser",
+    "com.quark.browser": "Quark Browser",
+    "com.xunmeng.pinduoduo": "Pinduoduo",
+    "com.kugou.android.lite": "Kugou Lite",
+    "com.github.android": "GitHub",
+    "au.com.shiftyjelly.pocketcasts": "Pocket Casts",
+    # 没有通行英文名的，按拼音/通称写（后面注释是中文名）
+    "com.chaoxing.mobile": "Chaoxing",                          # 学习通
+    "com.max.xiaoheihe": "Xiaoheihe",                           # 小黑盒
+    "com.bf.sgs.hdexp.mi": "Sanguosha",                         # 三国杀（边锋）
+    "com.larus.nova": "Doubao",                                 # 豆包
+    "com.greenpoint.android.mc10086.activity": "China Mobile",  # 中国移动
+    # 小米 / 安卓自带
+    "com.xiaomi.market": "Mi Store",
+    "com.xiaomi.shop": "Mi Shop",
+    "com.miui.mediaeditor": "Mi Gallery Editor",
+    "com.mfashiongallery.emag": "Mi Wallpaper Carousel",
+    "com.xiaomi.gamecenter.sdk.service": "Mi Game Center",
+    "com.xiaomi.bluetooth": "Bluetooth",
+    "com.miui.securitycore": "Security Core",
+    "com.android.deskclock": "Clock",
+    "com.mendhak.gpslogger": "GPSLogger",
     # 通用 / 国际
     "com.android.chrome": "Chrome",
     "com.microsoft.emmx": "Edge",

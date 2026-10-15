@@ -26,8 +26,22 @@ param(
     [int]$NightlyHour = 23,
     [int]$MaxBackfillDays = 14,
     [switch]$SkipAI,
-    [switch]$DryRun
+    [switch]$DryRun,
+    # 定时刷新：等价于 -Date today -SkipAI，只是换个标签。
+    # 计划任务 LifeLogging-Refresh 每隔几小时跑一次这个模式，把
+    # 「双击 更新数据.cmd」自动化掉 —— 白天 Grafana 里当天的数据才是新的。
+    # 它**不调 AI、不推进水位线**，所以重复跑不花钱、也不会掩盖漏掉的天。
+    [switch]$Refresh,
+    # 跑完不弹通知（调试用；正常运行时通知是有意要留的）。
+    [switch]$NoNotify
 )
+
+# -Refresh 就是「拉今天的数据，但不做正式处理」。放在这里而不是接在
+# 参数块后面几行，是因为下面所有判断都读 $Date / $SkipAI。
+if ($Refresh) {
+    $Date = "today"
+    $SkipAI = $true
+}
 
 $ErrorActionPreference = "Continue"
 $Root = Split-Path -Parent $PSScriptRoot
@@ -59,6 +73,26 @@ function Write-Log($msg) {
     $line = "[$(Get-Date -Format 'HH:mm:ss')] $msg"
     Write-Host $line
     Add-Content -Path $LogFile -Value $line -Encoding UTF8
+}
+
+function Show-Toast($title, $body) {
+    # Windows 通知。**必须用 PowerShell 自己的 AppUserModelID** ——
+    # 随便编一个 ID 的话系统会静默丢弃：不报错、也什么都不显示，
+    # 是最容易白忙一场的坑（这个项目已经栽过好几次同类）。
+    # 整个函数包在 try 里：通知失败绝不能影响流水线本身。
+    try {
+        [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+        $tmpl = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent(
+                    [Windows.UI.Notifications.ToastTemplateType]::ToastText02)
+        $nodes = $tmpl.GetElementsByTagName("text")
+        $nodes.Item(0).AppendChild($tmpl.CreateTextNode($title)) | Out-Null
+        $nodes.Item(1).AppendChild($tmpl.CreateTextNode($body)) | Out-Null
+        $toast = [Windows.UI.Notifications.ToastNotification]::new($tmpl)
+        $appId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+        [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show($toast)
+    } catch {
+        Write-Log "   (notification unavailable: $($_.Exception.Message))"
+    }
 }
 
 function Invoke-Step($name, $script, $scriptArgs) {
@@ -267,6 +301,12 @@ if (-not (Ensure-EventsApi)) {
     Write-Log "        so the day would be reported done with nothing written, and the"
     Write-Log "        watermark would step past it -- losing that day for good."
     Write-Log "        state\last_processed.json was NOT touched. Fix the service, then rerun."
+    # 被挡住**必须**弹通知：这是最需要你知道的一种失败，
+    # 而且它的表现是「一切安静」—— 前一天那条路径就是静默丢了一整天。
+    if (-not $NoNotify) {
+        $why = Get-Content (Join-Path $LogDir "events_api.err.log") -Tail 1 -Encoding UTF8 -ErrorAction SilentlyContinue
+        Show-Toast "LifeLogging 被挡住了" "事件表连不上，今天没处理。$why"
+    }
     exit 1
 }
 
@@ -310,6 +350,9 @@ else {
     }
     Write-Log "Auto mode: $($targets.Count) day(s) to process $($fromDate.ToString('yyyy-MM-dd')) -> $($toDate.ToString('yyyy-MM-dd'))"
 }
+
+# 给「可见性」用的模式标签 —— 会写进 state\last_run.md 和系统通知。
+$modeLabel = if ($Refresh) { "定时刷新" } elseif ($manual) { "手动补跑" } else { "自动" }
 
 Write-Log ("=" * 60)
 
@@ -361,3 +404,64 @@ Write-Log "Log: $LogFile"
 Get-ChildItem $LogDir -Filter "run_*.log" |
     Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-30) } |
     Remove-Item -Force -ErrorAction SilentlyContinue
+
+# ── 可见性 ──────────────────────────────────────────────────────────
+#
+# 这个脚本平时跑在隐藏窗口里（计划任务拉起），跑完什么都不留 —— 唯一线索是
+# 去翻 state\logs\。于是「它到底跑没跑」全靠猜。
+#
+# 更要命的是**最该跑成的那次最不容易跑成**：每日 23:00 那个触发器需要机器
+# 在 23:00 开着，而这台笔记本那时多半已经关机或睡眠（WakeToRun=False，有意
+# 不唤机器）。实测 10-14 那天 22:18 就关机了，23:00 那次根本没机会跑。
+# 剩下的自动运行全是白天的解锁触发 —— 按水位线设计它们只处理到「昨天」，
+# 所以永远印 Nothing to do，看不出任何动静。
+#
+# 所以每次运行都留两样东西：
+#   · state\last_run.md —— 一页摘要 + 最近若干次运行的时间线，随时能看
+#   · 一个系统通知 —— 只在**真处理了东西**或**失败**时弹。定时刷新
+#     （每几小时一次）不弹，否则一天弹十几次就成了噪音
+if (-not $DryRun) {
+    $lastWm = Get-LastProcessed
+    $wmText = if ($lastWm) { $lastWm.ToString('yyyy-MM-dd') } else { '(未设置)' }
+    $targetText = if ($targets.Count -gt 0) {
+        ($targets | ForEach-Object { $_.ToString('yyyy-MM-dd') }) -join ', '
+    } else { '无' }
+    $resultText = if ($failDays.Count -gt 0) { "失败：$($failDays -join ', ')" } else { "$okDays 天成功" }
+
+    # 最近几次运行直接扫日志文件（文件名自带时间戳），再抓每个日志里那一行
+    # 结论。比另建状态文件可靠 —— 不会和真正发生过的运行脱节。
+    $hist = @()
+    foreach ($f in (Get-ChildItem $LogDir -Filter "run_*.log" |
+                    Sort-Object LastWriteTime -Descending | Select-Object -First 15)) {
+        $verdict = Get-Content $f.FullName -Encoding UTF8 -ErrorAction SilentlyContinue |
+                   Where-Object { $_ -match 'Done --|BLOCKED|Nothing to do' } |
+                   Select-Object -Last 1
+        if (-not $verdict) { $verdict = '(未到结论就退出)' }
+        $hist += "| $($f.LastWriteTime.ToString('MM-dd HH:mm')) | $("$verdict".Trim()) |"
+    }
+
+    $md = @(
+        "# 最后一次运行",
+        "",
+        "| 项 | 值 |",
+        "|---|---|",
+        "| 时间 | $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') |",
+        "| 模式 | $modeLabel |",
+        "| 目标 | $targetText |",
+        "| 结果 | $resultText |",
+        "| 水位线 | $wmText |",
+        "| 日志 | ``$LogFile`` |",
+        "",
+        "> 每次运行后重写。这一页只回答「跑没跑、处理了哪天」；细节翻日志。",
+        "",
+        "## 最近运行",
+        "",
+        "| 时间 | 结论 |",
+        "|---|---|"
+    ) + $hist + @("")
+    Set-Content -Path (Join-Path $Root "state\last_run.md") -Value ($md -join "`r`n") -Encoding UTF8
+
+    if ((-not $NoNotify) -and ((-not $Refresh) -or $failDays.Count -gt 0)) {
+        Show-Toast "LifeLogging · $modeLabel" "$resultText ｜ 目标 $targetText"
+    }
+}
