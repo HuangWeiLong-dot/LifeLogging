@@ -21,15 +21,19 @@ After=tailscaled.service
 [Service]
 Type=simple
 
-# 运行身份。**必须显式写** —— 不写就是以 root 跑，这是个对外的网络服务，别那样。
+# 运行身份：**root，而且显式写出来**。
 #
-# 这里给的是专用用户（更安全，推荐）。不想多建一个用户、就用你自己跑，装之前执行：
-#   sudo sed -i "s/^User=.*/User=$USER/; s/^Group=.*/Group=$(id -gn)/" /tmp/lifelogging-relay.service
+# 这台机器上没有专用服务用户，也**不打算建** —— 用户一直用 root 登录，
+# 对他来说多一个用户的隔离成本高于收益。（建议过一次，被否了。）
 #
-# ⚠️ 用自己跑的话，数据目录要归你（sudo chown 你自己 /var/lib/lifelogging），
-#    否则下面 ProtectSystem=strict + ReadWritePaths 放行了、文件权限还是写不进去。
-User=lifelogging
-Group=lifelogging
+# 显式写 root 而不是省略：省略也等于 root，但读这份文件的人看不出来，
+# 出问题时也少一个可以改的旋钮。
+#
+# 所以加固的重心放在**即使用 root 也生效**的那些指令上 —— 下面那组
+# ProtectSystem / ProtectHome / CapabilityBoundingSet= / ReadWritePaths
+# 就是干这个的：绑成 root 也进不了 /root，也只能写 /var/lib/lifelogging。
+User=root
+Group=root
 
 # ⚠️ 只绑 Tailscale 地址。写 0.0.0.0 会把公网和局域网一起开出去 ——
 #    这是个人生命记录，不该有对外入口。

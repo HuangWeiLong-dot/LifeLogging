@@ -34,16 +34,18 @@ sudo git clone https://github.com/HuangWeiLong-dot/LifeLogging.git /opt/lifelogg
 
 中继本身是**纯标准库**的，不需要 venv。
 
-### 2. 目录和用户
+### 2. 数据目录
 
 ```bash
-sudo mkdir -p /var/lib/lifelogging     # 数据目录
-sudo useradd -r -s /usr/sbin/nologin lifelogging    # 专用用户（推荐）
-sudo chown -R lifelogging:lifelogging /var/lib/lifelogging
+sudo mkdir -p /var/lib/lifelogging
 ```
 
-> 用专用用户更安全。不想多建用户就用你自己 —— 但那样 unit 里的
-> `User=`/`Group=` 要跟着改，而且 `ProtectHome` 之类的加固会形同虚设。
+**不用建专用用户。** 这台机器上一直用 root 跑，而 unit 里已经写了
+`User=root`。加固放在 `ProtectSystem=strict` / `ProtectHome=yes` /
+`CapabilityBoundingSet=` / `ReadWritePaths=/var/lib/lifelogging` 上 ——
+这些**即使以 root 运行也生效**：绑成 root 也进不了 `/root`，也只能写那一个目录。
+
+（unit 里 `User=` 是显式写的，不是省略。省略也等于 root，但读的人看不出来。）
 
 ### 3. 生成密钥
 

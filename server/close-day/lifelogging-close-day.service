@@ -16,8 +16,10 @@ Requires=lifelogging-relay.service
 
 [Service]
 Type=oneshot
-User=lifelogging
-Group=lifelogging
+# 运行身份：root，显式写出（理由见 phone-relay 那个 unit —— 这台机器上不建
+# 专用服务用户）。加固靠下面那组 ProtectSystem / CapabilityBoundingSet。
+User=root
+Group=root
 WorkingDirectory=/opt/lifelogging/repo
 
 # DEEPSEEK_API_KEY 和口径参数放这里。**不要写进这个文件** —— 它是要进 git 的。
