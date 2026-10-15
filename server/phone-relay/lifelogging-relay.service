@@ -39,7 +39,9 @@ Environment=RELAY_DATA_DIR=/var/lib/lifelogging
 Environment=RELAY_TZ=Asia/Shanghai
 EnvironmentFile=/etc/lifelogging/relay.env
 
-ExecStart=/usr/bin/python3 /opt/lifelogging/phone_relay.py
+# 代码是 git clone 到 /opt/lifelogging/repo 的（见 server/README.md），
+# 所以这里指向 checkout 里的路径 —— 升级就是 git pull，不用再手工 scp。
+ExecStart=/usr/bin/python3 /opt/lifelogging/repo/server/phone-relay/phone_relay.py
 
 Restart=always
 RestartSec=3

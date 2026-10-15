@@ -18,15 +18,15 @@ Requires=lifelogging-relay.service
 Type=oneshot
 User=lifelogging
 Group=lifelogging
-WorkingDirectory=/opt/lifelogging
+WorkingDirectory=/opt/lifelogging/repo
 
 # DEEPSEEK_API_KEY 和口径参数放这里。**不要写进这个文件** —— 它是要进 git 的。
 EnvironmentFile=/etc/lifelogging/close-day.env
 
-# ⚠️ 是 scripts/close_day.py，不是 /opt/lifelogging/close_day.py。
-#    close_day.py 从 generate_journal.py / common.py 里 import，所以必须和它们
-#    待在同一个目录里 —— 整个 scripts/ 是一起拷过去的。
-ExecStart=/opt/lifelogging/venv/bin/python /opt/lifelogging/scripts/close_day.py --days 3
+# ⚠️ 是 repo/scripts/close_day.py，不是 repo/close_day.py。
+#    close_day.py 从 generate_journal.py / common.py 里 import（提示词和校验
+#    逻辑是共用的，不复制一份），所以它必须和那些文件待在同一个目录里。
+ExecStart=/opt/lifelogging/venv/bin/python /opt/lifelogging/repo/scripts/close_day.py --days 3
 
 # 扫描 3 天、每次最多一次 LLM 调用，正常几秒到一分钟。给足余量但别无限挂。
 TimeoutStartSec=300

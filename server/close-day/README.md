@@ -22,30 +22,17 @@
 服务器上应该已经在跑 `phone-relay`（见 `../phone-relay/README.md`）。
 本服务依赖它：结果是通过 `POST /journal/output` 存回去的。
 
-### 1. 传代码
+### 1. 代码
 
 `close_day.py` 会 import `scripts/` 下的模块（复用 `generate_journal.py` 的
-提示词和校验，**不复制一份** —— 提示词一漂移日记质量就悄悄变了），所以要把
-整个 `scripts/` 和一份服务器用的 `config/` 传上去。
+提示词和校验，**不复制一份** —— 提示词一漂移日记质量就悄悄变了），所以整个
+仓库都要在服务器上。**用 git clone，别手工拷**：
 
 ```bash
-# 在本机仓库根目录
-rsync -av --exclude '.venv' --exclude 'state' --exclude 'vault' --exclude '.git' \
-      ./ 你@服务器:/tmp/lifelogging/
-
-# 在服务器
-sudo mkdir -p /opt/lifelogging
-sudo cp -r /tmp/lifelogging/scripts /tmp/lifelogging/config /opt/lifelogging/
-sudo cp /tmp/lifelogging/requirements.txt /opt/lifelogging/
+sudo git clone https://github.com/HuangWeiLong-dot/LifeLogging.git /opt/lifelogging/repo
 ```
 
-> ⚠️ **整个 `scripts/` 一起拷，`close_day.py` 不能单独放。** 它要从
-> `generate_journal.py` / `common.py` 里 import —— 提示词和校验逻辑是**共用**
-> 的，只传一个文件会让两边悄悄漂移。unit 里的 `ExecStart` 也相应指向
-> `/opt/lifelogging/scripts/close_day.py`。
-
-> ⚠️ **别把本机的 `config/config.yaml` 直接搬过去** —— 里面的 `state_dir`、
-> `vault_path` 是写死的 Windows 路径。见下一步。
+完整布局和首次部署见 [`../README.md`](../README.md)。
 
 ### 2. 服务器用的 config.yaml
 
@@ -131,14 +118,13 @@ systemctl list-timers lifelogging-close-day.timer
 
 ## 升级
 
-和 phone-relay 一样，**升级的坑是拷到了 systemd 不看的地方**。只改了这个
-服务的话：
-
 ```bash
-scp scripts/close_day.py 你@服务器:/tmp/
-sudo cp /tmp/close_day.py /opt/lifelogging/scripts/close_day.py
-sudo systemctl restart lifelogging-close-day.timer   # 下一轮就会用新的
+sudo /opt/lifelogging/repo/server/deploy.sh
 ```
 
-改动涉及 `generate_journal.py` / `common.py` 等共用模块时，要把 `scripts/`
-整个重传 —— 提示词和校验逻辑是**共用**的，只传一个文件会让两边漂移。
+close_day 是 oneshot，**不用重启** —— 每次运行都重新读源码，下一个 15 分钟的
+tick 自然用上新版本。
+
+> 改到 `generate_journal.py` / `common.py` 这类共用模块时也必须走这条路 ——
+> 提示词和校验逻辑是两边共用的，只更新一个文件会让它们漂移。
+

@@ -23,36 +23,27 @@
 
 ## 部署
 
-### 1. 传文件
+### 1. 代码
+
+**用 git clone，别手工拷** —— 布局和理由见 [`../README.md`](../README.md)：
 
 ```bash
-scp server/phone-relay/phone_relay.py 你@服务器:/tmp/
-scp server/phone-relay/lifelogging-relay.service 你@服务器:/tmp/
+sudo mkdir -p /opt/lifelogging
+sudo git clone https://github.com/HuangWeiLong-dot/LifeLogging.git /opt/lifelogging/repo
 ```
 
-### 2. 建目录、装脚本
+中继本身是**纯标准库**的，不需要 venv。
+
+### 2. 目录和用户
 
 ```bash
-ssh 你@服务器
-sudo mkdir -p /opt/lifelogging /var/lib/lifelogging /etc/lifelogging
-sudo cp /tmp/phone_relay.py /opt/lifelogging/
-```
-
-**接下来决定用哪个身份跑**，二选一：
-
-```bash
-# A. 专用用户（更安全，推荐）
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin lifelogging
+sudo mkdir -p /var/lib/lifelogging     # 数据目录
+sudo useradd -r -s /usr/sbin/nologin lifelogging    # 专用用户（推荐）
 sudo chown -R lifelogging:lifelogging /var/lib/lifelogging
-
-# B. 就用你自己（少建一个用户）
-sudo chown -R "$USER" /var/lib/lifelogging
 ```
 
-> ⚠️ 数据目录的属主必须和下面 systemd 单元里的 `User=` 一致。
-> 不一致的表现是服务起来了、`/health` 也通，但一写事件就
-> `500 write failed: Permission denied` —— 因为 `ProtectSystem=strict`
-> 已经把系统目录设成只读，`ReadWritePaths` 只放行了路径，没放行文件权限。
+> 用专用用户更安全。不想多建用户就用你自己 —— 但那样 unit 里的
+> `User=`/`Group=` 要跟着改，而且 `ProtectHome` 之类的加固会形同虚设。
 
 ### 3. 生成密钥
 
@@ -129,43 +120,24 @@ sudo sed -i '/selftest/d' /var/lib/lifelogging/phone-2026-10-14.jsonl
 
 ---
 
-## 升级已有的部署
+## 升级
 
-⚠️ **升级和初次部署不是一回事。** 最容易踩的坑是把文件拷到了 systemd
-**不看**的地方 —— 服务重启成功、`/health` 也一切正常，但跑的还是旧代码。
-（实测踩过：`scp -r server/phone-relay/ 服务器:/opt/lifelogging/` 会把整个
-目录拷进去，落成 `/opt/lifelogging/phone-relay/phone_relay.py`。）
-
-systemd 只认这一个路径，先用 `systemctl cat lifelogging-relay | grep ExecStart`
-确认：**`/opt/lifelogging/phone_relay.py`**。所以升级是三步：
+代码是 git clone 到 `/opt/lifelogging/repo` 的，升级就是：
 
 ```bash
-# 1. 本机：先传到 /tmp，不要直接往 /opt 里拷
-scp server/phone-relay/phone_relay.py 你@服务器:/tmp/
-
-# 2. 服务器：覆盖到 systemd 认的那个路径
-sudo cp /tmp/phone_relay.py /opt/lifelogging/phone_relay.py
-
-# 3. 重启
-sudo systemctl restart lifelogging-relay
-systemctl status lifelogging-relay --no-pager | head -5
+sudo /opt/lifelogging/repo/server/deploy.sh
 ```
 
-**怎么确认新的真的生效了？** 别只看 `/health` —— 新旧版本的 `/health` 长得
-一模一样，它证明不了任何事。挑一个**只有新版才有**的路由去打：
+它快进到 `origin/master`、按改动范围决定要不要重启中继，并且会告诉你
+这次更新了哪些 commit。细节见 [`../README.md`](../README.md)。
 
-```bash
-curl -H "X-API-Key: $KEY" http://<服务器>:8788/ask/pending
-# 新版：返回一个数字（0 也正常）
-# 旧版：{"error": "not found"}
-```
-
-怀疑没拷对时：
-
-```bash
-ls -la /opt/lifelogging/
-grep -c "ask/pending" /opt/lifelogging/phone_relay.py   # 新版是 3（说明 + 注释 + 路由），旧版是 0
-```
+> ⚠️ **确认新版真的生效了，别只看 `/health`** —— 新旧版本的 `/health` 长得
+> 一模一样。挑一个只有新版才有的路由去打：
+>
+> ```bash
+> curl -H "X-API-Key: $KEY" http://<服务器>:8788/ask/pending
+> # 新版：一个数字（0 也正常）    旧版：{"error": "not found"}
+> ```
 
 ---
 

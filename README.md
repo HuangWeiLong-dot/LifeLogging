@@ -100,9 +100,11 @@ LifeLogging/
 │   ├── run_daily.ps1            ← 每日流水线（供计划任务调用）
 │   ├── setup_scheduler.ps1      ← 注册 Windows 计划任务
 │   └── check_ps1.ps1            ← .ps1 语法预检（改完脚本先跑它）
-├── server/
-│   ├── phone-relay/             ← Linux 服务器：手机使用事件中继 + 每日提问 + 日记中转（单文件，无依赖）
-│   └── close-day/               ← Linux 服务器：关账 + 调 AI 写日记正文（systemd timer）
+├── server/                      ← Linux 服务器：代码是 git clone 到 /opt/lifelogging/repo
+│   ├── README.md                ← ★ 服务器侧总说明（布局 / 首次部署 / 升级）
+│   ├── deploy.sh                ← 升级就一条命令：快进 + 按需重启
+│   ├── phone-relay/             ← 手机使用事件中继 + 每日提问 + 日记中转（单文件，无依赖）
+│   └── close-day/               ← 关账 + 调 AI 写日记正文（systemd timer）
 ├── docker/
 │   ├── dawarich/                ← Linux 服务器：位置后端
 │   ├── grafana/                 ← 可视化：6 个仪表盘，直接读 state/events.db
