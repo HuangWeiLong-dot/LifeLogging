@@ -628,7 +628,12 @@ class Handler(BaseHTTPRequestHandler):
             qday = str(q.get("day") or "")
             marker = DATA_DIR / f"questions-{qday}.seen"
             if (parse_qs(u.query).get("again") or [""])[0] == "1":
+                # 只**清**标记，不在这里重新标记 —— 否则 `?again=1` 和普通读取
+                # 完全一样，都会消耗掉当天的提醒，那就没法「看一眼还剩几条」
+                # 了。清完就直接返回：下一次普通的轮询会照常提醒并标记。
                 marker.unlink(missing_ok=True)
+                self._send_text(200, str(len(left)))
+                return
             if marker.exists():
                 # 已经提醒过一次了。**读一次就标记** —— 这样 Tasker 每 30 分钟
                 # 轮询也不会重复弹通知，而手机侧不需要保存任何状态。

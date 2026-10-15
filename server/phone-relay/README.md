@@ -164,7 +164,7 @@ curl -H "X-API-Key: $KEY" http://<服务器>:8788/ask/pending
 
 ```bash
 ls -la /opt/lifelogging/
-grep -c "ask/pending" /opt/lifelogging/phone_relay.py   # 新版这里应该是 1
+grep -c "ask/pending" /opt/lifelogging/phone_relay.py   # 新版是 3（说明 + 注释 + 路由），旧版是 0
 ```
 
 ---
@@ -319,7 +319,8 @@ Tasker 收得到 HTTP 响应体，但**不会解析 JSON** —— 那要挂 Java
 
 > ✅ **读一次就标记。** `/ask/pending` 第一次返回条数，之后一律返回 `0` ——
 > 所以每 30 分钟轮询不会把同一个通知弹十遍，而手机侧**不需要保存任何状态**。
-> 想让它重新提醒一次：`GET /ask/pending?again=1`。
+> 想让它重新提醒：`GET /ask/pending?again=1` —— 它只**清**标记、自己不算一次
+> 读取，所以你能看到还剩几条，而手机下次轮询照样会提醒。
 
 > ⚠️ **`/ask` 是在浏览器里打开的，key 只能走查询参数。**
 > 普通导航请求没法带自定义请求头。代价是这把 key 会进手机的浏览器历史 ——
