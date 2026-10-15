@@ -36,7 +36,13 @@ rsync -av --exclude '.venv' --exclude 'state' --exclude 'vault' --exclude '.git'
 # 在服务器
 sudo mkdir -p /opt/lifelogging
 sudo cp -r /tmp/lifelogging/scripts /tmp/lifelogging/config /opt/lifelogging/
+sudo cp /tmp/lifelogging/requirements.txt /opt/lifelogging/
 ```
+
+> ⚠️ **整个 `scripts/` 一起拷，`close_day.py` 不能单独放。** 它要从
+> `generate_journal.py` / `common.py` 里 import —— 提示词和校验逻辑是**共用**
+> 的，只传一个文件会让两边悄悄漂移。unit 里的 `ExecStart` 也相应指向
+> `/opt/lifelogging/scripts/close_day.py`。
 
 > ⚠️ **别把本机的 `config/config.yaml` 直接搬过去** —— 里面的 `state_dir`、
 > `vault_path` 是写死的 Windows 路径。见下一步。
