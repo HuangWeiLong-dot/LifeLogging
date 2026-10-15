@@ -65,44 +65,64 @@ STATE = Path(CFG["state_dir"])
 H_ADJUST = "### Adjustments for Tomorrow"   # 和 generate_journal.py 里的一致
 
 SYSTEM_PROMPT = """You write the small batch of check-in questions that a person \
-will answer on their phone tomorrow morning about the day that just ended.
+answers on their phone in the morning, about the day that just ended.
 
-The point is ACCOUNTABILITY, not journalling. The most valuable question is one \
-that holds up something they themselves wrote or committed to and asks whether it \
-happened. A generic prompt like "how do you feel about today?" is worthless here.
+The point is ACCOUNTABILITY plus TRACKING, not journalling.
 
-Rules:
-- Every question MUST be answerable with "yes" or "no". Never ask an open-ended \
-or multi-part question, and never ask for a number or a list.
-- Ground each question in one specific piece of evidence and quote it: a line from \
-their own "Adjustments for Tomorrow", an item that has been carried over from an \
-earlier day, or a number from the recorded data that sits oddly next to what they \
-wrote. The evidence field is what you saw; the text field is the question.
-- Prefer the things they said they would do over things you noticed yourself. \
-At most two questions may come from the data alone.
+There are exactly two kinds, and the caller tells you how many of each to write:
+
+- kind="commitment" - hold up something they themselves wrote or committed to, and \
+ask whether it happened. This is the sharper kind: the source line comes from their \
+own "Adjustments for Tomorrow", from an open task that has been carried over, or \
+from a place where the recorded data contradicts what they claim they want.
+
+- kind="routine" - a standing question about ONE dimension the automatic record \
+cannot see: energy, mood, sleep quality, whether they actually rested, whether they \
+ate properly, who they spent time with, what they learned, whether anything \
+long-postponed got touched. Anchor it in something concrete from the data (a \
+number, a timestamp, a conspicuous absence) so it is answerable and comparable \
+from day to day. "Did you feel good today?" is worthless - too vague to answer \
+honestly and impossible to compare across days.
+
+Hard rules for the question text:
+- Every question MUST be answerable with "yes" or "no". One clause, ONE thing. \
+Never ask for a number, a list, or an explanation.
+- NEVER use a time word - no 今天 / 昨天 / today / yesterday. The reader opens this \
+the morning after, so any such word is either wrong or ambiguous and the whole \
+batch reads as nonsense. Name the concrete event, time or number instead: \
+"the 20:11 Tailscale key", "14:00-18:00", "the 426 app switches".
+- Phrase it POSITIVELY, so that "yes / 做了" means the thing they wanted to happen \
+happened. Never ask "did you avoid doing X" or "did you manage not to X" - a yes/no \
+button cannot represent a negative question, and the answer becomes meaningless.
+- Be precise rather than general. Quote the specific number, time or phrase you are \
+basing it on. "Commit the repo in the first 15 minutes of the session" beats \
+"work on the repo"; "a stretch over 90 minutes with no app switch" beats \
+"stay focused".
 - Do not moralise, do not congratulate, do not explain why the question matters. \
 Ask the question and stop.
-- If a commitment has already been carried over more than once, say so in the \
-question ("this has now slipped three days") - that is the whole point.
-- Write the question and the evidence in __LANG_NAME__. Keep proper nouns, \
-app names and file paths as they are.
+- If a commitment has already been carried over more than once, say how many days \
+it has slipped - that is the whole point.
+- Write the question and the evidence in __LANG_NAME__. Keep proper nouns, app \
+names, file paths and numbers as they are.
 
 The "ref" field is machine-read, so it has its own rules:
-- If the question is about one of the "Open tasks" or "Adjustments" bullets, copy \
-that line into "ref" CHARACTER FOR CHARACTER, exactly as it appears above. It will \
-be matched against the task list to tick the item off, so a paraphrase breaks it.
-- If the question comes from the recorded data alone, set "ref" to an empty string.
+- kind="commitment": if the question is about one of the "Open tasks" or \
+"Adjustments" bullets, copy that line into "ref" CHARACTER FOR CHARACTER exactly as \
+it appears above. It gets matched against the task list to tick the item off, so a \
+paraphrase silently breaks it.
+- kind="commitment" based on the data alone, and every kind="routine": empty string.
 
 Output ONLY a JSON array, no prose and no code fences:
 
 [
-  {"text": "<the yes/no question>",
+  {"kind": "commitment" | "routine",
+   "text": "<the yes/no question>",
    "evidence": "<the specific thing you are basing it on>",
-   "ref": "<the verbatim source line, or empty string>"}
+   "ref": "<verbatim source line, or empty string>"}
 ]
 
-Output at most __MAX__ items, best first. Fewer is fine - padding with weak \
-questions wastes their time and makes the whole thing ignorable."""
+Order them strongest first within each kind. Do not pad a kind with weak questions \
+to hit the quota - if you cannot find four honest routine questions, write three."""
 
 
 def read_journal_section(day: Day, heading: str) -> list[str]:
@@ -202,7 +222,7 @@ def data_digest(day: Day) -> str:
 
 
 def build_user_prompt(day: Day, adjustments: list[str], tasks: list[str],
-                      digest: str, count: int) -> str:
+                      digest: str, n_commit: int, n_routine: int) -> str:
     def bullets(items: list[str]) -> str:
         return "\n".join(f"- {x}" for x in items) if items else "(none)"
 
@@ -222,17 +242,21 @@ def build_user_prompt(day: Day, adjustments: list[str], tasks: list[str],
 
 ---
 
-Write at most {count} yes/no check-in questions for the morning after this day."""
+Write {n_commit} questions of kind "commitment" and {n_routine} of kind "routine", \
+for the morning after this day. Every one must be answerable with "yes" or "no"."""
 
 
-def parse_questions(raw: str, day: Day, count: int) -> list[dict]:
-    """从模型输出里抠出问题数组。
+def parse_questions(raw: str, day: Day, n_commit: int,
+                    n_routine: int) -> list[dict]:
+    """从模型输出里抠出问题数组，按 kind 分别限数。
 
     模型有时会包一层 ```json 围栏、有时会在前后加一句寒暄，所以不能直接
     json.loads —— 退回到「取第一个 [ 到最后一个 ]」。
 
     ⚠️ 题号是**本地**算的（正文的 hash），不是模型给的。
        让模型保持 id 稳定是不现实的，而 apply_answers 要靠它把答案对回问题。
+    ⚠️ 按 kind 分别限数而不是总共限数：不然模型多吐几条问责、就把常规类挤没了，
+       而这两类是要按配额来的。
     """
     text = raw.strip()
     text = re.sub(r"^```(?:json)?\s*\n", "", text)
@@ -247,21 +271,25 @@ def parse_questions(raw: str, day: Day, count: int) -> list[dict]:
     if not isinstance(data, list):
         raise ValueError("model output is not a JSON array")
 
+    limits = {"commitment": n_commit, "routine": n_routine}
+    seen = {"commitment": 0, "routine": 0}
     out: list[dict] = []
     for item in data:
         if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "").strip().lower()
+        if kind not in limits or seen[kind] >= limits[kind]:
             continue
         q = " ".join(str(item.get("text") or "").split())
         if not q:
             continue
         ev = " ".join(str(item.get("evidence") or "").split())
         ref = " ".join(str(item.get("ref") or "").split())
+        seen[kind] += 1
         # 题号里带日期，这样答案落到别的天也能对回来（见中继的 answered_ids）
         digest = hashlib.sha1(q.encode("utf-8")).hexdigest()[:8]
-        out.append({"id": f"{day.iso}-{digest}", "text": q,
+        out.append({"id": f"{day.iso}-{digest}", "kind": kind, "text": q,
                     "evidence": ev, "ref": ref})
-        if len(out) >= count:
-            break
     return out
 
 
@@ -318,22 +346,25 @@ def main() -> None:
         print(f"-> {day.iso} is more than {max_age} day(s) old; no questions generated")
         return
 
-    count = int(qcfg.get("count", 8))
+    n_commit = int(qcfg.get("commitment", 7))
+    n_routine = int(qcfg.get("routine", 5))
 
     adjustments = read_journal_section(day, H_ADJUST)
     tasks = read_open_tasks()
-    if not adjustments and not tasks:
+    # 常规类是从**数据**里出的，不依赖日记里的承诺或任务表 —— 所以只有两类
+    # 素材全空、且常规配额也是 0 的时候才真的没得问。
+    if not adjustments and not tasks and n_routine <= 0:
         print("-> nothing to ask about (no journal adjustments, no open tasks)")
         return
     print(f"-> Material: {len(adjustments)} adjustment(s), {len(tasks)} open task(s)")
+    print(f"-> Quota: {n_commit} commitment + {n_routine} routine")
 
     digest = data_digest(day)
     lang = str(qcfg.get("language", "zh")).lower()
-    system = (SYSTEM_PROMPT
-              .replace("__MAX__", str(count))
-              .replace("__LANG_NAME__", "Chinese (简体中文)" if lang.startswith("zh")
-                       else "English"))
-    user = build_user_prompt(day, adjustments, tasks, digest, count)
+    system = SYSTEM_PROMPT.replace(
+        "__LANG_NAME__",
+        "Chinese (简体中文)" if lang.startswith("zh") else "English")
+    user = build_user_prompt(day, adjustments, tasks, digest, n_commit, n_routine)
 
     ledger = CostLedger(CFG["budget"]["ledger_path"])
     llm = LLM(cfg=CFG, ledger=ledger)
@@ -349,7 +380,7 @@ def main() -> None:
         sys.exit(1)
 
     try:
-        items = parse_questions(raw, day, count)
+        items = parse_questions(raw, day, n_commit, n_routine)
     except (ValueError, json.JSONDecodeError) as e:
         print(f"❌ could not parse the model output: {e}")
         print(f"   first 300 chars: {raw[:300]!r}")
@@ -359,10 +390,13 @@ def main() -> None:
         print("❌ the model returned no usable questions")
         sys.exit(1)
 
-    for i, it in enumerate(items, 1):
-        print(f"  {i}. {it['text']}")
-        if it["evidence"]:
-            print(f"     └ {it['evidence']}")
+    for kind, label in (("commitment", "问责"), ("routine", "常规")):
+        group = [x for x in items if x["kind"] == kind]
+        print(f"  ── {label}（{len(group)} 条）")
+        for it in group:
+            print(f"     {it['text']}")
+            if it["evidence"]:
+                print(f"       └ {it['evidence']}")
 
     payload = {
         "day": day.iso,

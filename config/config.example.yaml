@@ -227,7 +227,9 @@ pricing:
 #    部署步骤见 server/phone-relay/README.md 和 docs/运维手册.md。
 questions:
   enabled: false        # 中继部署好、Tasker 配好之后再改 true
-  count: 8              # 每天最多问几条（多了就开始敷衍，反而不如少问）
+  # 两类分开配额，都要。「问责」拿你自己写的话堵你；「常规」问数据看不见的维度。
+  commitment: 7         # 问责类：昨天的承诺 / 挂着的任务 / 数据自相矛盾处
+  routine: 5            # 常规类：精力、睡眠、专注、身体、社交……只有你知道的那些
   language: "zh"        # 问题正文用什么语言；证据是原文照抄，不翻译
   push: true            # 生成后推到中继；false 就只留在本机 state/ 下
   max_age_days: 2       # 只对最近 N 天提问 —— 补跑历史时不生成过期问题
