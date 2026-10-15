@@ -349,6 +349,23 @@ def main() -> None:
     n_commit = int(qcfg.get("commitment", 7))
     n_routine = int(qcfg.get("routine", 5))
 
+    # ⚠️ **日记不存在就直接不生成。**
+    #
+    # 这个机器人的前提是「拿你昨天自己写的话堵你」，而那句话在日记的
+    # `### Adjustments for Tomorrow` 里。没有日记就只能拿任务表那几条凑数 ——
+    # 生成出来的东西看着像模像样，其实全是没有上下文的疑问句。
+    #
+    # 什么时候会撞上：日记是**服务器**写的（close_day 每 15 分钟扫一次），
+    # 而「取日记」和「生成提问」在流水线的同一次运行里。这次运行刚推上去的
+    # 终版输入，服务器还没把它变成日记。以前这里会照常生成并**推上去**，
+    # 把第二天早上手机看到的那批顶掉，要等下一次运行才自愈成好的。
+    # 宁可不生成 —— 少问一天，也好过问一堆凑数的。
+    journal = VAULT / "05-Journal" / f"{day.iso}.md"
+    if not journal.exists():
+        print(f"-> {day.iso} 的日记还没生成（{journal.name} 不在）")
+        print("   提问要靠它里面的 Adjustments，所以这次跳过；下次运行会再试")
+        return
+
     adjustments = read_journal_section(day, H_ADJUST)
     tasks = read_open_tasks()
     # 常规类是从**数据**里出的，不依赖日记里的承诺或任务表 —— 所以只有两类
