@@ -128,11 +128,58 @@ Policy：`Allow`，Include → **Emails** → 你的邮箱。
 
 ### 3b. 手机上的 Tasker 怎么认证
 
-Tasker 走不了浏览器的登录流程，要用 **Service Token**：
+Tasker 走不了浏览器的登录流程（它没法收邮件验证码），要用 **Service Token**。
 
-Zero Trust → Access → Service Auth → **Create Service Token**，拿到
-`Client ID` / `Client Secret`（**只显示一次**）。然后在上面那条 Policy 里
-再加一条 Include → **Service Token** → 选刚建的这个。
+**① 建 token**
+
+Zero Trust → **Access** → **Service Auth** → **Service Tokens** →
+**Create Service Token**
+
+- Name：`Tasker (phone)`
+- Duration：**留空**（永不过期）。填了的话到期那天手机的采集会**静默全停** ——
+  表现是 Tasker 拿到 302，而它不会告诉你为什么。
+
+> ⚠️ **Client Secret 只在生成时显示一次**，关掉就再也看不到（只能重新生成）。
+> 当场两样都复制走。
+
+**② 把它加进那条 Policy —— 注意是「新增一条」，不是改原来那条**
+
+Application → Edit → Policies → **Add a policy**：
+
+| 字段 | 值 |
+|---|---|
+| Action | **Service Auth** |
+| Include | **Service Token** → 选刚建的那个 |
+
+> ⚠️ Action 要选 **Service Auth**，不是 Allow。这是 Cloudflare 对机器身份的
+> 专门动作；选 Allow + Include Service Token 在多数情况下也能过，但那不是文档
+> 里的做法，出问题时不好查。
+>
+> 原来那条 `Allow + Emails` **留着** —— 它管的是你在手机浏览器里打开表单。
+> 两条 Policy 是「或」的关系：邮箱进来是给人，token 进来是给 Tasker。
+
+**③ Tasker 里带上**
+
+每个 HTTP Request 动作的 Headers 加两行（和现在的 `X-API-Key:` 同一格式）：
+
+```
+CF-Access-Client-Id:<Client ID>
+CF-Access-Client-Secret:<Client Secret>
+```
+
+> 这两个值是凭证 —— 只放在 Tasker 里，别贴到聊天/笔记里。
+
+**④ 先单独验一下 Access 这一层**（`/health` 不需要 API key，所以它测的就是
+Access 本身干净不干净）
+
+```bash
+# 不带 token → 应该被拦（302 到登录页）
+curl -sS -o /dev/null -w "%{http_code}
+" https://relay.liveinpassion.me/health
+
+# 带 token → 应该 200 并返回中继的 JSON
+curl -sS -H "CF-Access-Client-Id: <id>" -H "CF-Access-Client-Secret: <secret>"      https://relay.liveinpassion.me/health
+```
 
 Tasker 里**每一个** HTTP Request 动作都要加这两个 header：
 
