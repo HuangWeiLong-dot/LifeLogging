@@ -859,14 +859,18 @@ def t_questions():
         {"id": "2026-10-14-aaa1", "value": "YES", "note": "提交了|带竖线\n和换行"},
         {"id": "2026-10-14-bbb2", "value": "no"},
         {"id": "", "value": "yes"},                    # 没题号 → 丢
-        {"id": "2026-10-14-ccc3", "value": "maybe"},   # 不是 yes/no → 丢
+        {"id": "2026-10-14-ccc3", "value": "HalfDone"},  # 选择题的选项原文 → 收下
+        {"id": "2026-10-14-ddd4", "value": "   "},     # 空值 → 丢
         "not a dict",                                  # 丢
     ])
-    assert len(evs) == 2, evs
+    assert len(evs) == 3, evs
     qid, val, note = evs[0]["value_text"].split("|", 2)
-    assert (qid, val) == ("2026-10-14-aaa1", "yes"), "value 要归一成小写，题号原样保留"
+    assert (qid, val) == ("2026-10-14-aaa1", "yes"), "yes/no 要归一成小写，题号原样保留"
     assert "|" not in note and "\n" not in note, f"备注必须压成一行且不含竖线: {note!r}"
     assert evs[1]["value_text"] == "2026-10-14-bbb2|no|", evs[1]["value_text"]
+    # ⚠️ 选项原文**不能**被 lower 掉 —— 回写时要拿它和问题文件里的选项逐字对上，
+    #    大小写一变就匹配不到，那条「做到了」就不会勾。
+    assert evs[2]["value_text"] == "2026-10-14-ccc3|HalfDone|", evs[2]["value_text"]
     assert evs[0]["domain"] == "question" and evs[0]["metric"] == "answer"
 
     with tempfile.TemporaryDirectory() as td:
@@ -1030,6 +1034,86 @@ def t_ledger_merge():
 
 check("ledger merge: idempotent / chain stays intact / spend adds up",
       t_ledger_merge)
+
+
+# ── 7d-5. 作答形态 ─────────────────────────────────────────────────
+print("\n[23] Answer formats")
+
+
+def t_answer_formats():
+    """三种作答形态：解析 → 渲染 → 回写，「算不算做到了」三处必须同一套约定。
+
+    ⚠️ 错位的表现特别难查：题照样问出来了、手机照样答了、中继照样存了 ——
+       只是「做到了」永远勾不掉任务，而且谁都不报错。
+    """
+    import importlib.util
+
+    from apply_answers import answered_done
+    from common import Day
+    from generate_questions import parse_options, parse_questions
+
+    # ── 解析：选项规范化 ──
+    opts = parse_options([
+        {"label": "  整条做完了 ", "done": True},
+        {"label": "做了一半", "done": True},        # 第二个 done 不算
+        {"label": ""},                              # 空标签丢
+        "只写了字符串",                              # 非 dict 也认
+    ])
+    assert [o["label"] for o in opts] == ["整条做完了", "做了一半", "只写了字符串"], opts
+    assert [o["done"] for o in opts] == [True, False, False], "done 只认第一个"
+    assert parse_options("nope") == []
+
+    # ── 解析：format 的降级与约束 ──
+    day = Day.parse("2026-10-14", ZoneInfo(CFG["timezone"]))
+    raw = json.dumps([
+        {"kind": "commitment", "format": "choice", "text": "Q1", "ref": "t1",
+         "options": [{"label": "a", "done": True}, {"label": "b"}]},       # 只有 2 个
+        {"kind": "commitment", "format": "text", "text": "Q2", "ref": "不该有"},
+        {"kind": "routine", "format": "bogus", "text": "Q3"},
+    ])
+    by_text = {i["text"]: i for i in parse_questions(raw, day, 5, 5)}
+    assert by_text["Q1"]["format"] == "yes_no", "选项不足 3 个要降级"
+    assert by_text["Q1"]["options"] == []
+    assert by_text["Q2"]["format"] == "text" and by_text["Q2"]["ref"] == "", \
+        "文字题勾不了任务，ref 必须清空"
+    assert by_text["Q3"]["format"] == "yes_no", "认不出的 format 一律当二值"
+
+    # ── 回写：「算不算做到了」 ──
+    assert answered_done({"format": "yes_no"}, "yes")
+    assert not answered_done({"format": "yes_no"}, "no")
+    assert answered_done({}, "YES"), "缺 format 的老数据要当 yes_no 处理"
+
+    ch = {"format": "choice",
+          "options": [{"label": "整条做完了", "done": True},
+                      {"label": "做了一半", "done": False}]}
+    assert answered_done(ch, "整条做完了")
+    assert not answered_done(ch, "做了一半")
+    assert not answered_done(ch, "没见过的选项"), "对不上就别猜"
+    assert not answered_done({"format": "text"}, "随便写了点什么")
+
+    # ── 渲染：三种形态都要出得来 ──
+    path = (Path(__file__).resolve().parent.parent
+            / "server" / "phone-relay" / "phone_relay.py")
+    spec = importlib.util.spec_from_file_location("phone_relay_f", path)
+    pr = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pr)
+
+    page = pr.render_ask_page({"day": "2026-10-14"}, [
+        {"id": "q1", "text": "二值题", "format": "yes_no"},
+        {"id": "q2", "text": "选择题", "format": "choice",
+         "options": [{"label": "整条做完了", "done": True},
+                     {"label": "做了一半"}, {"label": "压根没碰"}]},
+        {"id": "q3", "text": "文字题", "format": "text"},
+    ], "k")
+    for f in ("yes_no", "choice", "text"):
+        assert f'data-format="{f}"' in page, f"{f} 没渲染出来"
+    assert 'data-v="整条做完了"' in page, "选项要变成按钮"
+    assert 'data-v="yes"' in page, "二值题的两个按钮还在"
+    assert 'class="x"' in page, "文字题要有输入框"
+
+
+check("answer formats: parse / render / what-counts-as-done stay in sync",
+      t_answer_formats)
 
 
 # ── 7e. Gadgetbridge 表选择 ────────────────────────────────────────

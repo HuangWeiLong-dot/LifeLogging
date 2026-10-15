@@ -306,6 +306,7 @@ def save_upload(name: str, body: bytes) -> tuple[bool, str]:
 #   phone-<day>.jsonl       答案就混在手机事件里（domain=question）
 _DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 MAX_NOTE = 500
+MAX_VALUE = 120      # 选项原文比 yes/no 长，但也不该无限长
 
 
 def questions_path(day: str) -> Path | None:
@@ -429,17 +430,21 @@ def answers_to_events(answers: list) -> list[dict]:
         if not isinstance(a, dict):
             continue
         qid = str(a.get("id") or "").strip()
-        val = str(a.get("value") or "").strip().lower()
-        if not qid or val not in ("yes", "no"):
+        # ⚠️ value **不再限定 yes/no**。二值题还是 yes/no，但选择题的值是选项
+        #    原文、文字题是自由输入。统一压成一行、竖线换成斜杠（value_text
+        #    用竖线分段），再限长。
+        #    只有严格是 yes/no 的才归一成小写 —— 别把选项原文也 lower 掉，
+        #    那样回写的时候就跟问题文件里那条选项对不上了。
+        raw = " ".join(str(a.get("value") or "").replace("|", "/").split())
+        val = raw.lower() if raw.lower() in ("yes", "no") else raw[:MAX_VALUE]
+        if not qid or not val:
             continue
-        # 备注压成一行，并把竖线换成斜杠 —— value_text 用竖线分段，
-        # 让备注里的竖线或换行混进去会把编码弄坏。
         note = " ".join(str(a.get("note") or "").replace("|", "/").split())
         events.append({
             "ts": now,
             "domain": "question",
             "metric": "answer",
-            # 形状：<题号>|<yes|no>|<备注>。题号里自带提问日期（<day>-<hash>），
+            # 形状：<题号>|<答案>|<备注>。题号里自带提问日期（<day>-<hash>），
             # 所以不用再单独存 day。答案落的是**作答那天**，不伪造成提问那天
             # —— 见 answered_ids() 的注释。
             "value_text": f"{qid}|{val}|{note[:MAX_NOTE]}",
@@ -483,6 +488,11 @@ _ASK_PAGE = """<!doctype html>
              color: inherit; font: inherit; }
  .r button[aria-pressed="true"] { background: #2f7d32; color: #fff; border-color: #2f7d32; }
  .r button.no[aria-pressed="true"] { background: #8a3b3b; border-color: #8a3b3b; }
+ .r.wrap { flex-wrap: wrap; }
+ .r.wrap button { flex: 1 1 45%; text-align: center; }
+ .x { width: 100%; box-sizing: border-box; padding: .6rem; font: inherit;
+      border-radius: .5rem; border: 1px solid rgba(128,128,128,.5);
+      background: transparent; color: inherit; resize: vertical; }
  .n { width: 100%; box-sizing: border-box; padding: .5rem; font: inherit;
       border-radius: .5rem; border: 1px solid rgba(128,128,128,.5);
       background: transparent; color: inherit; }
@@ -509,28 +519,36 @@ document.querySelectorAll('.q').forEach(function (li) {
   });
 });
 document.getElementById('send').addEventListener('click', function () {
-  var answers = [];
+  var picked = [];
   document.querySelectorAll('.q').forEach(function (li) {
-    var picked = li.querySelector('.r button[aria-pressed="true"]');
-    if (!picked) { return; }
-    answers.push({ id: li.dataset.id, value: picked.dataset.v,
-                   note: li.querySelector('.n').value.trim() });
+    var fmt = li.dataset.format, value = '';
+    if (fmt === 'text') {
+      var box = li.querySelector('.x');
+      value = box ? box.value.trim() : '';
+    } else {
+      var b = li.querySelector('.r button[aria-pressed="true"]');
+      if (!b) { return; }
+      value = b.dataset.v;
+    }
+    if (!value) { return; }                 // 没作答的（含文字题留空）不提交，下次还会问
+    var n = li.querySelector('.n');
+    picked.push({ li: li, a: { id: li.dataset.id, value: value,
+                               note: n ? n.value.trim() : '' } });
   });
   var msg = document.getElementById('msg');
-  if (!answers.length) { msg.textContent = '还没有作答。'; return; }
+  if (!picked.length) { msg.textContent = '还没有作答。'; return; }
   msg.textContent = '提交中…';
   fetch('/answer', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-API-Key': KEY },
-    body: JSON.stringify({ day: QDAY, answers: answers })
+    body: JSON.stringify({ day: QDAY,
+                           answers: picked.map(function (p) { return p.a; }) })
   }).then(function (r) {
     return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; });
   }).then(function (res) {
     if (!res.ok) { msg.textContent = '失败：' + (res.j.error || res.status); return; }
     msg.textContent = '已提交 ' + res.j.inserted + ' 条，可以关掉了。';
-    document.querySelectorAll('.q').forEach(function (li) {
-      if (li.querySelector('.r button[aria-pressed="true"]')) { li.remove(); }
-    });
+    picked.forEach(function (p) { p.li.remove(); });
   }).catch(function (e) { msg.textContent = '失败：' + e; });
 });
 </script>
@@ -539,22 +557,52 @@ document.getElementById('send').addEventListener('click', function () {
 
 
 def render_ask_page(q: dict, items: list[dict], key: str) -> str:
-    """把问题渲染成一个自包含的表单页（无外部资源，手机浏览器直接打开）。"""
+    """把问题渲染成一个自包含的表单页（无外部资源，手机浏览器直接打开）。
+
+    三种作答形态（由生成问题那一步决定，见 generate_questions.py）：
+
+      yes_no  两个按钮
+      choice  模型按题生成的 3-5 个选项，单选
+      text    一个输入框，自行输入
+
+    ⚠️ 形态认不出来的一律当 yes_no 渲染 —— 宁可少一个变量，也不要渲染出一个
+       选项是空的单选组。
+    """
     chunks = []
     for it in items:
         qid = html.escape(str(it.get("id") or ""), quote=True)
         text = html.escape(str(it.get("text") or ""))
         ev = html.escape(str(it.get("evidence") or ""))
         ev_html = f'<p class="e">{ev}</p>' if ev else ""
+
+        fmt = str(it.get("format") or "yes_no")
+        opts = [o for o in (it.get("options") or []) if isinstance(o, dict)]
+        if fmt == "choice" and len(opts) < 2:
+            fmt = "yes_no"
+
+        if fmt == "text":
+            body = (f'<textarea class="x" rows="3" placeholder="写点什么" '
+                    f'maxlength="{MAX_NOTE}"></textarea>')
+        elif fmt == "choice":
+            body = '<div class="r wrap">' + "".join(
+                f'<button type="button" data-v="{html.escape(str(o.get("label") or ""), quote=True)}">'
+                f'{html.escape(str(o.get("label") or ""))}</button>'
+                for o in opts
+            ) + "</div>"
+        else:
+            fmt = "yes_no"
+            body = ('<div class="r">'
+                    '<button type="button" data-v="yes">做了</button>'
+                    '<button type="button" class="no" data-v="no">没做</button>'
+                    "</div>")
+            # 二值题给个备注框；选择题和文字题不需要（它们的答案本身就有内容）
+        if fmt == "yes_no":
+            body += (f'<input class="n" type="text" placeholder="备注（可选）" '
+                     f'maxlength="{MAX_NOTE}">')
+
         chunks.append(
-            f'<li class="q" data-id="{qid}">'
-            f'<p class="t">{text}</p>{ev_html}'
-            '<div class="r">'
-            '<button type="button" data-v="yes">做了</button>'
-            '<button type="button" class="no" data-v="no">没做</button>'
-            '</div>'
-            f'<input class="n" type="text" placeholder="备注（可选）" maxlength="{MAX_NOTE}">'
-            "</li>"
+            f'<li class="q" data-id="{qid}" data-format="{fmt}">'
+            f'<p class="t">{text}</p>{ev_html}{body}</li>'
         )
     qday = str(q.get("day") or "")
     return (_ASK_PAGE

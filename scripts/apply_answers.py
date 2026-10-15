@@ -58,6 +58,27 @@ def _norm(s: str) -> str:
     return re.sub(r"[\s。．.,，;；:：!？?!]+", " ", s).strip()
 
 
+def answered_done(q: dict, value: str) -> bool:
+    """这条答案算不算「做到了」—— 决定要不要把任务勾掉。
+
+    三种形态各有各的判法：
+      yes_no  看是不是 yes
+      choice  看选中的**那个选项**有没有被标成 done（生成问题那一步标好的）
+      text    永远不算 —— 文字题压根没有「完成」这个概念，它的 ref 必须是空的
+
+    ⚠️ 默认当 yes_no：问题文件里没有 format 字段的（比如老数据）仍然是二值。
+    """
+    fmt = str(q.get("format") or "yes_no").strip().lower()
+    if fmt == "text":
+        return False
+    if fmt == "choice":
+        for o in (q.get("options") or []):
+            if isinstance(o, dict) and str(o.get("label") or "") == value:
+                return bool(o.get("done"))
+        return False          # 选中的选项对不上任何一条 —— 别猜，就当没完成
+    return value.strip().lower() == "yes"
+
+
 def find_task(open_items: list[str], ref: str) -> str | None:
     """把问题依据的那一行对回任务表里的某条。
 
@@ -209,9 +230,9 @@ def main() -> None:
     for qid, (val, note, _ts) in sorted(answers.items(), key=lambda kv: kv[1][2]):
         q = by_id.get(qid) or {}
         text = q.get("text") or f"(题号 {qid} 不在本地问题文件里 —— 可能是别的机器生成的)"
-        mark = "做了" if val == "yes" else "没做"
+        mark = {"yes": "做了", "no": "没做"}.get(val.strip().lower(), val)
         print(f"  [{mark}] {text}" + (f"\n         备注：{note}" if note else ""))
-        if val != "yes":
+        if not answered_done(q, val):
             continue
         ref = q.get("ref") or ""
         if not ref:

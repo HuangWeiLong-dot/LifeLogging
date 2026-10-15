@@ -85,15 +85,14 @@ from day to day. "Did you feel good today?" is worthless - too vague to answer \
 honestly and impossible to compare across days.
 
 Hard rules for the question text:
-- Every question MUST be answerable with "yes" or "no". One clause, ONE thing. \
-Never ask for a number, a list, or an explanation.
+- ONE thing per question. Never bundle two questions into one, and never ask for a \
+list.
 - NEVER use a time word - no 今天 / 昨天 / today / yesterday. The reader opens this \
 the morning after, so any such word is either wrong or ambiguous and the whole \
 batch reads as nonsense. Name the concrete event, time or number instead: \
 "the 20:11 Tailscale key", "14:00-18:00", "the 426 app switches".
-- Phrase it POSITIVELY, so that "yes / 做了" means the thing they wanted to happen \
-happened. Never ask "did you avoid doing X" or "did you manage not to X" - a yes/no \
-button cannot represent a negative question, and the answer becomes meaningless.
+- Phrase it POSITIVELY, so that the "it happened" answer means the thing they wanted \
+happened. Never ask "did you avoid doing X" or "did you manage not to X".
 - Be precise rather than general. Quote the specific number, time or phrase you are \
 basing it on. "Commit the repo in the first 15 minutes of the session" beats \
 "work on the repo"; "a stretch over 90 minutes with no app switch" beats \
@@ -102,8 +101,49 @@ basing it on. "Commit the repo in the first 15 minutes of the session" beats \
 Ask the question and stop.
 - If a commitment has already been carried over more than once, say how many days \
 it has slipped - that is the whole point.
-- Write the question and the evidence in __LANG_NAME__. Keep proper nouns, app \
-names, file paths and numbers as they are.
+- Write the question, the evidence and any options in __LANG_NAME__. Keep proper \
+nouns, app names, file paths and numbers as they are.
+
+Choosing the answer format. **THIS IS AS IMPORTANT AS THE QUESTION ITSELF, AND A \
+BATCH WHERE EVERY QUESTION IS yes_no HAS FAILED THIS INSTRUCTION.** Before you \
+output anything, go through your list and ask of each one: "is a binary really the \
+honest answer here, or am I about to make them tell me a lie because the buttons \
+left them no choice?"
+
+- format="yes_no" - it really is binary and nothing is lost by forcing it. Two \
+buttons.
+    Example: "20:11 开始的那次 Tailscale key 配置，节点最后上线了吗？"
+
+- format="choice" - the honest answer has 3 to 5 natural, mutually exclusive values \
+and a binary throws away the interesting part. **Write the options yourself**, in \
+the same language as the question, short (2-8 characters where you can). Mark \
+EXACTLY ONE of them "done": true - the one that means it actually happened, i.e. \
+what would tick the task off. All the others "done": false. If none of your options \
+means "it happened", mark none.
+    Example question: "14:00-18:00 的微信免打扰，做到什么程度？"
+    Example options: 整段都做到了 (done: true) / 只做到一部分 (done: false) / \
+基本没做到 (done: false)
+    ⚠️ Only mark an option "done": true when the question has a non-empty "ref" - \
+i.e. when there is actually a task to tick off. A routine question grounded in the \
+data has no task behind it, so every one of its options is "done": false.
+
+- format="text" - the question where any short option would be a lie: what you want \
+to remember from the day, what was actually on your mind, what got in the way. No \
+options at all. At most ONE per batch.
+
+The question TEXT must match the format. A "choice" question asks for a degree or a \
+kind ("做到什么程度", "是什么原因"), not "有没有". An all-"yes_no"-phrased batch \
+cannot be answered any other way, so the phrasing is where this decision is actually \
+made.
+
+Rough target for a batch of twelve: about half "choice", at least one "text", the \
+rest "yes_no". If you produced twelve "yes_no", you did not follow this - go back \
+and look for the questions whose real answer has a middle.
+
+Rules that follow from the formats:
+- If "ref" is non-empty (the question is about a specific task) the format MUST be \
+"yes_no" or "choice" - a "text" answer can never tick a task off. format="text" \
+always has an empty "ref".
 
 The "ref" field is machine-read, so it has its own rules:
 - kind="commitment": if the question is about one of the "Open tasks" or \
@@ -116,10 +156,15 @@ Output ONLY a JSON array, no prose and no code fences:
 
 [
   {"kind": "commitment" | "routine",
-   "text": "<the yes/no question>",
+   "format": "yes_no" | "choice" | "text",
+   "text": "<the question>",
    "evidence": "<the specific thing you are basing it on>",
-   "ref": "<verbatim source line, or empty string>"}
+   "ref": "<verbatim source line, or empty string>",
+   "options": [{"label": "<short>", "done": true}, {"label": "<short>", "done": false}]}
 ]
+
+"options" is REQUIRED for format="choice" (3-5 of them, at most one "done": true) and \
+MUST be absent or empty for the other two formats.
 
 Order them strongest first within each kind. Do not pad a kind with weak questions \
 to hit the quota - if you cannot find four honest routine questions, write three."""
@@ -246,6 +291,40 @@ Write {n_commit} questions of kind "commitment" and {n_routine} of kind "routine
 for the morning after this day. Every one must be answerable with "yes" or "no"."""
 
 
+FORMATS = ("yes_no", "choice", "text")
+MIN_OPTIONS = 3
+MAX_OPTIONS = 5
+MAX_LABEL = 40
+
+
+def parse_options(raw) -> list[dict]:
+    """规范化 choice 的选项。认不出来就返回空 —— 调用方会把它降级成 yes_no。
+
+    ⚠️ `done` 只认**第一个**。模型偶尔会给两个选项都标 done（它觉得「做了一半」
+       也算完成），那样两行都能勾任务，回写就随机了。
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    done_taken = False
+    for o in raw:
+        if isinstance(o, dict):
+            label = " ".join(str(o.get("label") or "").split())
+            done = bool(o.get("done"))
+        else:
+            label = " ".join(str(o or "").split())
+            done = False
+        if not label:
+            continue
+        if done and done_taken:
+            done = False
+        done_taken = done_taken or done
+        out.append({"label": label[:MAX_LABEL], "done": done})
+        if len(out) >= MAX_OPTIONS:
+            break
+    return out
+
+
 def parse_questions(raw: str, day: Day, n_commit: int,
                     n_routine: int) -> list[dict]:
     """从模型输出里抠出问题数组，按 kind 分别限数。
@@ -285,11 +364,23 @@ def parse_questions(raw: str, day: Day, n_commit: int,
             continue
         ev = " ".join(str(item.get("evidence") or "").split())
         ref = " ".join(str(item.get("ref") or "").split())
+
+        fmt = str(item.get("format") or "").strip().lower()
+        if fmt not in FORMATS:
+            fmt = "yes_no"            # 认不出来的一律当二值，最保守
+        opts = parse_options(item.get("options")) if fmt == "choice" else []
+        if fmt == "choice" and len(opts) < MIN_OPTIONS:
+            # 选项太少就不成其为选择题。降级成二值 ——
+            # 宁可少一个变量，也别把「两个选项的单选」渲染出来。
+            fmt, opts = "yes_no", []
+        if fmt == "text":
+            ref = ""                  # 文字题勾不了任务，ref 必须空
+
         seen[kind] += 1
         # 题号里带日期，这样答案落到别的天也能对回来（见中继的 answered_ids）
         digest = hashlib.sha1(q.encode("utf-8")).hexdigest()[:8]
-        out.append({"id": f"{day.iso}-{digest}", "kind": kind, "text": q,
-                    "evidence": ev, "ref": ref})
+        out.append({"id": f"{day.iso}-{digest}", "kind": kind, "format": fmt,
+                    "text": q, "evidence": ev, "ref": ref, "options": opts})
     return out
 
 
@@ -411,9 +502,15 @@ def main() -> None:
         group = [x for x in items if x["kind"] == kind]
         print(f"  ── {label}（{len(group)} 条）")
         for it in group:
-            print(f"     {it['text']}")
+            fmt = it["format"]
+            tag = {"yes_no": "[二值]", "choice": "[选择]", "text": "[文字]"}[fmt]
+            print(f"     {tag} {it['text']}")
             if it["evidence"]:
-                print(f"       └ {it['evidence']}")
+                print(f"           └ {it['evidence']}")
+            for o in it.get("options") or []:
+                # 只有带 ref 的题才真能勾任务 —— 常规题就算标了 done 也无处可勾
+                tick = o["done"] and bool(it.get("ref"))
+                print(f"           · {o['label']}" + ("   ← 选中会勾掉任务" if tick else ""))
 
     payload = {
         "day": day.iso,
