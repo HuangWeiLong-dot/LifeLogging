@@ -39,7 +39,14 @@ close_day ──http://127.0.0.1:8788（同机）
 
 ## 前置
 
-- 域名在 Cloudflare 上（`liveinpassion.me` 就是，而且你已经在用 Access）
+- 域名在 Cloudflare 上 —— 本例用 `relay.liveinpassion.me`
+
+> 📌 **`liveinpassion.me` 是另一个项目的域名，这个子域是刻意挂在它下面的。**
+> 技术上不会互相影响：**Cloudflare Access 的策略是按 hostname 隔离的**，
+> `relay.liveinpassion.me` 和那个项目的 `cms.liveinpassion.me` 各自一套规则、
+> 各自一条 DNS 记录。共用的只是 Cloudflare 账号本身。
+> 如果哪天想把这两套彻底分开，换一个域名只需要改本文档里的 hostname ——
+> 服务器上没有任何东西写死它。
 - 服务器上能 sudo
 - **tailscaled 在跑**（中继绑的是 100.x 地址）
 
