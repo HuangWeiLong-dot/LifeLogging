@@ -50,3 +50,9 @@ FxLifeSheet/
 
 # Claude Code 自己的目录，里面有 worktree，提交进去是一团乱麻
 .claude/
+
+# agent-canvas：给 AI 画 Excalidraw 图的 skill，用 `npx skills add` 装在项目里。
+# 是**工具**不是这个项目的一部分，所以不进仓库。
+# 想连它一起提交：删掉下面两行，然后 git add .agents skills-lock.json
+.agents/
+skills-lock.json
