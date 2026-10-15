@@ -193,6 +193,46 @@ def generate(day: Day, bundle: dict, dry_run: bool) -> bool:
 _RELAY: tuple[str, str] = ("", "")
 
 
+def push_ledger() -> None:
+    """把服务器这份成本台账整份推回中继。
+
+    **为什么必须推。** 服务器上花的钱记在**服务器的**台账里（`state_dir` 指到
+    `/var/lib/lifelogging`），而 Grafana 的「今日 AI 花费」面板读的是笔记本
+    事件表里的 `ai/daily_cost` —— 那个数是从笔记本自己的台账算出来的。
+    两边一分开，日记那笔钱就从面板上消失了，而且不会有任何提示。
+
+    推失败只警告、不影响生成：日记本身没问题，别因为一个统计面板把正事拦住。
+    """
+    base, key = _RELAY
+    if not base:
+        return
+    path = CFG["budget"]["ledger_path"]
+    try:
+        entries = CostLedger(path).entries()
+    except Exception as e:  # noqa: BLE001
+        print(f"  ⚠️  could not read the ledger at {path}: {e}")
+        return
+    if not entries:
+        return
+    try:
+        r = httpx.post(
+            f"{base}/ledger",
+            headers={"X-API-Key": key},
+            json={
+                "entries": entries,
+                "pushed_at": datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"),
+            },
+            timeout=30.0,
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"  ⚠️  could not push the ledger: {e}")
+        return
+    if r.status_code != 200:
+        print(f"  ⚠️  relay rejected the ledger ({r.status_code}): {r.text[:200]}")
+        return
+    print(f"  OK  ledger pushed ({len(entries)} entries)")
+
+
 def main() -> None:
     global _RELAY
 
@@ -237,6 +277,10 @@ def main() -> None:
             done += 1
 
     print(f"-> done: {done} day(s)" if done else "-> nothing to do")
+
+    # 每次都推 —— 哪怕这次没生成日记。生成和推台账是两件事：万一上次推失败了，
+    # 这次还能补上。
+    push_ledger()
 
 
 if __name__ == "__main__":

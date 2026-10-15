@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -925,7 +927,6 @@ def t_journal_relay():
        顺序一乱就中招。
     """
     import importlib.util
-    import json
     import tempfile
 
     path = (Path(__file__).resolve().parent.parent
@@ -970,6 +971,65 @@ def t_journal_relay():
 
 check("journal relay: final-bundle protection / path escape / round-trip",
       t_journal_relay)
+
+
+# ── 7d-4. 台账合并 ─────────────────────────────────────────────────
+print("\n[22] Ledger merge")
+
+
+def t_ledger_merge():
+    """锁住「服务器台账 → 本机台账」的合并：幂等、且**不能把哈希链拼断**。
+
+    ⚠️ 这是整份代码里唯一会把两条哈希链接到一起的地方。接错了，
+       `reconcile_cost.py` 的完整性校验会开始报「台账被人改过或丢过行」——
+       而那个报错看起来像篡改，会把人引向完全错误的方向。
+
+    ⚠️ 判重必须用**内容指纹**（不含 chain）。chain 依赖它前面是谁，同一条记录
+       在服务器台账和本机台账里必然不同 —— 拿它判重永远判不出来。
+    """
+    import tempfile
+    from datetime import date
+
+    from common import GENESIS, CostLedger
+    from merge_ledger import merge_into
+
+    tz = ZoneInfo(CFG["timezone"])
+    with tempfile.TemporaryDirectory() as td:
+        led = CostLedger(Path(td) / "ledger.jsonl")
+        led.append({"day": "2026-10-13", "stage": "journal", "cost": 0.05,
+                    "currency": "CNY", "run_id": "local-1"})
+
+        remote = [
+            {"day": "2026-10-14", "stage": "journal", "cost": 0.0433,
+             "currency": "CNY", "run_id": "srv-1",
+             "ts_utc": "2026-10-15T14:48:00Z", "chain": "DEADBEEF"},
+            # 远端列表**自己内部**重复 —— 也只该合并一次
+            {"day": "2026-10-14", "stage": "journal", "cost": 0.0433,
+             "currency": "CNY", "run_id": "srv-1",
+             "ts_utc": "2026-10-15T14:48:00Z", "chain": "CAFEBABE"},
+            "not a dict",          # 脏数据不许让整次合并失败
+        ]
+        assert len(merge_into(led, remote)) == 1, "远端内部的重复必须只合并一次"
+        assert merge_into(led, remote) == [], "重复合并必须是幂等的"
+        assert len(led.entries()) == 2, led.entries()
+
+        # 本机那条链必须仍然自洽（复刻 CostLedger.append 的算法）
+        prev = GENESIS
+        for e in led.entries():
+            payload = json.dumps({k: v for k, v in e.items() if k != "chain"},
+                                 ensure_ascii=False, sort_keys=True)
+            want = hashlib.sha256((prev + payload).encode("utf-8")).hexdigest()
+            assert e.get("chain") == want, "合并把本机的哈希链打断了"
+            prev = e["chain"]
+        # 服务器那条 chain 不能沿用 —— 它依赖服务器台账里它前面是谁
+        assert all(e["chain"] not in ("DEADBEEF", "CAFEBABE") for e in led.entries())
+
+        assert abs(led.spend_on(date(2026, 10, 14), tz) - 0.0433) < 1e-9, \
+            "合并进来的花费必须能被 spend_on 算到"
+
+
+check("ledger merge: idempotent / chain stays intact / spend adds up",
+      t_ledger_merge)
 
 
 # ── 7e. Gadgetbridge 表选择 ────────────────────────────────────────

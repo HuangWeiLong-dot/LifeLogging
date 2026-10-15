@@ -384,6 +384,14 @@ foreach ($d in $targets) {
 #    一份已经生成好的正文一分钱不花。挡住它只会让 更新数据.cmd 永远拿不到日记。
 if (-not $DryRun) {
     Invoke-Step "journal-pull" "scripts\pull_journal_output.py" @("--days", "3") | Out-Null
+
+    # 服务器上花的 AI 钱也要并进本机台账。
+    #
+    # ⚠️ 不做这一步的话，Grafana 的「今日 AI 花费」会**少掉日记那笔** ——
+    #    面板读的是本机事件表里的 ai/daily_cost，而那个数是从本机台账算的，
+    #    而日记现在花的是服务器的钱。两边都不会报错，只是数字小了。
+    #    同样不受 -SkipAI 影响（合并不花 AI 的钱）。
+    Invoke-Step "ledger-merge" "scripts\merge_ledger.py" @() | Out-Null
 }
 
 # ── 每日提问：生成新的 + 回收答回来的 ───────────────────────────────

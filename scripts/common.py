@@ -240,6 +240,23 @@ class EventsClient:
 GENESIS = "genesis"
 
 
+def ledger_fingerprint(entry: dict[str, Any]) -> str:
+    """一条台账记录的**内容**指纹（不含 chain）。
+
+    用来判重：同一个 LLM 调用在服务器和笔记本两边算出来的是同一个指纹。
+
+    ⚠️ 为什么不把 `chain` 算进去：那是链式哈希，依赖它前面是谁 —— 同一条记录
+       在服务器台账和在笔记本台账里必然不同。合并时是逐条重新 `append()` 进
+       本机台账（chain 由本机重算），内容没变，所以指纹必须只覆盖内容。
+    """
+    payload = json.dumps(
+        {k: v for k, v in entry.items() if k != "chain"},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 class CostLedger:
     """追加式 JSONL 台账。每行一次 LLM 调用。
 
@@ -326,6 +343,10 @@ class CostLedger:
             if day == want:
                 total += float(e.get("cost", 0.0))
         return total
+
+    def fingerprints(self) -> set[str]:
+        """现有记录的指纹集合。合并远端台账时用来判重。"""
+        return {ledger_fingerprint(e) for e in self.entries()}
 
     def currency(self) -> str:
         """台账里用的币种（取自最近一条记录）。预算和上限都以它为准。"""

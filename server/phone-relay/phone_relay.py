@@ -351,6 +351,28 @@ def final_bundle_wins(dest: Path, incoming: dict) -> bool:
     return bool(old.get("final"))
 
 
+LEDGER_NAME = "ledger.json"
+
+
+def ledger_path() -> Path:
+    """服务器那份成本台账的中转文件。
+
+    服务器上跑的 AI（目前只有 close_day 写日记）花掉的钱记在**服务器的**台账里，
+    而 Grafana 的面板读的是笔记本事件表里的 `ai/daily_cost` —— 那条链是从笔记本
+    自己的台账算的。两边一分开，日记那笔钱就从面板上消失了。
+
+    所以服务器把它那份台账推到这里，笔记本取回去合并进自己的台账。
+    """
+    return DATA_DIR / LEDGER_NAME
+
+
+def save_ledger(payload: dict) -> tuple[bool, str]:
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        return False, "entries must be a list"
+    return True, _write_json(ledger_path(), payload)
+
+
 def journal_path(kind: str, day: str) -> Path | None:
     """日记管线的中转文件。kind 是 'input' 或 'output'。
 
@@ -710,6 +732,20 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
+        if u.path == "/ledger":
+            # 笔记本取回服务器那份台账，合并进自己的。
+            if not self._authed():
+                return
+            p = ledger_path()
+            if not p.exists():
+                self._send(404, {"error": "no ledger pushed yet"})
+                return
+            try:
+                self._send(200, json.loads(p.read_text(encoding="utf-8")))
+            except (OSError, json.JSONDecodeError) as e:
+                self._send(500, {"error": f"stored ledger is unreadable: {e}"})
+            return
+
         if u.path == "/journal/inputs":
             # close_day.py 用它取笔记本攒好的输入包。
             # 走 HTTP 而不是直接读文件：这样 close_day 不必和中继共享数据目录的
@@ -815,6 +851,20 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, {"error": "body must be a non-empty string"})
                 return
             self._send(200, {"ok": True, "detail": _write_json(dest, payload)})
+            return
+
+        if u.path == "/ledger":
+            # close_day.py 每次跑完把它那份台账推上来（整份覆盖，不是追加）。
+            # 台账很小（一次调用一行），整份覆盖最省事，也不会有「推到一半」的
+            # 状态 —— 要么是旧的完整版，要么是新的完整版。
+            if not self._authed():
+                return
+            payload, err = self._json_body()
+            if err:
+                self._send(400, {"error": err})
+                return
+            ok, detail = save_ledger(payload)
+            self._send(200 if ok else 400, {"ok": ok, "detail": detail})
             return
 
         if u.path == "/questions":
