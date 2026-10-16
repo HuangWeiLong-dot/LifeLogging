@@ -93,6 +93,8 @@ LifeLogging/
 │   ├── pull_journal_output.py   ← 取回服务器写好的正文，组装进 vault
 │   ├── close_day.py             ← 服务器上跑：关账 + 调 AI 写正文（见 server/close-day/）
 │   ├── generate_questions.py    ← 次日要问的问题（拿昨天日记里的话堵今天）
+│   ├── live_questions.py        ← 服务器上跑：白天按当天行踪/手机实时问几句
+│   ├── push_desktop.py          ← 每 10 分钟把「电脑上今天到目前」推给服务器
 │   ├── apply_answers.py         ← 手机上答的「做了/没做」→ 勾掉 Tasks.md
 │   ├── cost_guard.py            ← 预算硬封顶 + 每日花费写进事件表
 │   ├── collect_ai_usage.py      ← AI 真实花费：平台账单 + 余额 + Claude Code 分布
@@ -104,7 +106,8 @@ LifeLogging/
 │   ├── README.md                ← ★ 服务器侧总说明（布局 / 首次部署 / 升级）
 │   ├── deploy.sh                ← 升级就一条命令：快进 + 按需重启
 │   ├── phone-relay/             ← 手机使用事件中继 + 每日提问 + 日记中转（单文件，无依赖）
-│   └── close-day/               ← 关账 + 调 AI 写日记正文（systemd timer）
+│   ├── close-day/               ← 关账 + 调 AI 写日记正文（systemd timer）
+│   └── feishu-bot/              ← 可选：飞书机器人，每日提问的收发通道（长连接出站，不开端口）
 ├── docker/
 │   ├── dawarich/                ← Linux 服务器：位置后端
 │   ├── grafana/                 ← 可视化：6 个仪表盘，直接读 state/events.db
@@ -150,6 +153,7 @@ python scripts/generate_journal.py --date today    # 生成日记
 |---|---|---|
 | `LifeLogging-Refresh` | 每 2 小时 | 只拉今天。**不调 AI、不推进水位线** —— 重复跑不花钱，也不会掩盖漏掉的天 |
 | `LifeLogging-Daily` | 每日 23:00 + 每次解锁 | 正式处理：补跑漏掉的天、生成日记、推进水位线 |
+| `LifeLogging-Desktop` | 每 10 分钟 | 把「电脑上今天到目前」推给服务器，好让机器人能在笔记本睡着后还答得出电脑的事 |
 
 两个任务都跑在隐藏窗口里，看不见。**想知道它到底跑没跑，打开
 `state/last_run.md`** —— 里面有本次运行的摘要和最近 15 次运行的时间线。

@@ -1,0 +1,31 @@
+# 每 30 分钟拉一次 live_questions.py。
+#
+# **为什么不是定点**
+#
+#   要问的那件事（在某地待了很久、手机很久没解锁）是**慢慢浮现**的，不是一个
+#   确定时刻到了才成立。定点跑要么太早（那件事还没成型），要么太晚（人已经
+#   忘了当时在干嘛）。轮询 + 「同一条规则当天只发一次」的记法，正好是
+#   「一成型就问」。
+#
+#   脚本自己还有个白天窗口（08:00–22:00），窗口外直接静默退出、**不算失败** ——
+#   夜里那次本来就该没事做。
+#
+# 30 分钟的依据：要触发的条件最小也是 90 分钟级别的，比 30 分钟密没有意义；
+# 再疏的话「刚发生」就变成「一小时前」了，问出来的效果差很多。
+#
+# OnBootSec 让开机后也跑一次：机器重启过的话，当天已问过的记录还在
+# （/var/lib/lifelogging/live-asked-<day>.json），不会重复问。
+
+[Unit]
+Description=LifeLogging - run live questions every 30 minutes
+Requires=lifelogging-live-questions.service
+
+[Timer]
+OnBootSec=12min
+OnUnitActiveSec=30min
+# 精确到分钟：日志里好看，也避免每次开机都卡在同一个秒
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

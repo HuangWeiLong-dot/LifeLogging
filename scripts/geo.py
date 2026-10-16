@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import math
+import os
 import sys
 import zipfile
 from pathlib import Path
@@ -29,7 +30,15 @@ from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+# 数据表放哪。默认是仓库里的 data/（笔记本上就是这个）。
+#
+# ⚠️ **服务器上必须指走。** 那边的服务受 systemd 的 ProtectSystem=strict 约束，
+#    仓库目录整个是只读的 —— 用默认值的话 ensure_dataset() 连 mkdir 都会失败，
+#    而失败是**静默**的：_describe() 会退回坐标，于是机器人报出来的是
+#    「(39.9042,116.4074)」而不是地名，看着像坏了但没有任何报错。
+#    服务器侧的 unit 会把它指到 /var/lib/lifelogging/geo。
+DATA_DIR = Path(os.environ.get("LIFELOGGING_DATA_DIR")
+                or (Path(__file__).resolve().parent.parent / "data"))
 
 # admin1 代码 → 上级行政区名。GeoNames 的地点表里 admin1 是数字代码
 # （中国是 "23" 这种），没有这张表就写不出「青浦, 上海」这种带上级的描述。

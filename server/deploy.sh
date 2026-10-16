@@ -28,6 +28,7 @@ set -euo pipefail
 REPO="${REPO:-/opt/lifelogging/repo}"
 BRANCH="${BRANCH:-master}"
 RELAY_UNIT="lifelogging-relay"
+FEISHU_BOT_UNIT="lifelogging-feishu-bot"
 CLOSE_DAY_TIMER="lifelogging-close-day.timer"
 
 die() { echo "FAIL $*" >&2; exit 1; }
@@ -68,10 +69,44 @@ if echo "$changed" | grep -q '^server/phone-relay/'; then
     echo "-> 重启了 $RELAY_UNIT"
 fi
 
-# close_day 是 oneshot —— 每次运行都重新读一遍源码，不需要重启，
-# 下一个 15 分钟的 tick 自然会用上新版本。
+# 飞书机器人也是常驻进程（长连接要一直挂着），代码换了同样得重启。
+#
+# ⚠️ 首次部署时这个 unit 还没装 —— 而新目录 deploy.sh 本来是完全认不出来的
+#    （下面这段就是补上这个缺口）。所以必须先判断 unit 存不存在：裸
+#    `systemctl restart` 在 unit 不存在时会返回非零，而脚本开着 `set -e`，
+#    于是**整次部署会在这里中止**，后面该重启的中继也不重启了。
+if echo "$changed" | grep -q '^server/feishu-bot/'; then
+    if [ -f "/etc/systemd/system/${FEISHU_BOT_UNIT}.service" ]; then
+        systemctl restart "$FEISHU_BOT_UNIT"
+        echo "-> 重启了 $FEISHU_BOT_UNIT"
+    else
+        echo "-> $FEISHU_BOT_UNIT 还没装过，跳过。首次安装见 server/feishu-bot/README.md"
+    fi
+fi
+
+# ⚠️ 这里**不装依赖**。如果这次更新往 requirements.txt 里加了包（比如 lark-oapi），
+#    git pull 不会把它装进 venv，机器人会在 Restart=always 下无限 ImportError 重启。
+#    加了依赖的更新，部署完要补一句：
+#      sudo /opt/lifelogging/venv/bin/pip install -r /opt/lifelogging/repo/requirements.txt
+
+# close_day / live_questions 都是 oneshot —— 每次运行都重新读一遍源码，
+# 不需要重启，下一个 tick 自然会用上新版本。
 if echo "$changed" | grep -qE '^(scripts/|server/close-day/)'; then
     echo "-> close-day 下次运行会自己用上新代码（oneshot，不用重启）"
+fi
+if echo "$changed" | grep -q '^scripts/live_questions\.py'; then
+    echo "-> live-questions 下次 tick 会自己用上新代码（oneshot，不用重启）"
+fi
+
+# ⚠️ 但 **unit/timer 文件本身**改了不一样：deploy.sh 只做 git pull，
+#    不会把 /etc/systemd/system/ 里那份换掉。改了 unit 就要手工重装：
+#      sudo cp /opt/lifelogging/repo/server/feishu-bot/lifelogging-*.{service,timer} \
+#              /etc/systemd/system/ && sudo systemctl daemon-reload
+if echo "$changed" | grep -qE '^server/(feishu-bot|close-day)/.*\.(service|timer)$'; then
+    echo "-> ⚠️  有 unit/timer 文件改动，但它们**不会**自动生效。手工重装："
+    echo "       sudo cp /opt/lifelogging/repo/server/feishu-bot/lifelogging-*.{service,timer} /etc/systemd/system/"
+    echo "       sudo cp /opt/lifelogging/repo/server/close-day/lifelogging-*.{service,timer} /etc/systemd/system/"
+    echo "       sudo systemctl daemon-reload"
 fi
 
 echo "-> 完成。服务器现在跑的是 $(git rev-parse --short HEAD)"

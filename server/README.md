@@ -6,8 +6,15 @@
 |---|---|---|
 | `lifelogging-relay` | 中继：手机上报入口 + 每日提问 + 日记中转 | 常驻（systemd service） |
 | `lifelogging-close-day` | 关账 + 调 AI 写日记正文 | 定时（systemd timer，每 15 分钟） |
+| `lifelogging-feishu-bot` | 飞书机器人：每日提问的收发通道（**可选**） | 常驻（systemd service） |
+| `lifelogging-live-questions` | 白天根据当天数据生成「实时提问」（**可选**，随飞书机器人一起） | 定时（systemd timer，每 30 分钟） |
 
-各自的具体说明： [`phone-relay/README.md`](phone-relay/README.md) · [`close-day/README.md`](close-day/README.md)
+各自的具体说明： [`phone-relay/README.md`](phone-relay/README.md) · [`close-day/README.md`](close-day/README.md) · [`feishu-bot/README.md`](feishu-bot/README.md)
+
+> **飞书机器人是可选的**，不装的话原来那套（Tasker 轮询 + `/ask` 表单）照常工作。
+> 它是 2026-10-16 加的，为的是换一条**能主动推送**的通道 —— 原来的链路必须靠
+> 手机定时来取，而手机侧那套 Tasker 配置（HTTP + Cloudflare 服务令牌 + 轮询）
+> 是整个项目里最容易静默失败的一环。为什么没做成 QQ，见那份 README 的开头。
 
 **手机怎么连进来** —— 这是另一个话题，而且有个绕不开的坑：
 [`cloudflare-tunnel/README.md`](cloudflare-tunnel/README.md)。
@@ -104,6 +111,32 @@ sudo systemctl enable --now lifelogging-relay lifelogging-close-day.timer
 > 中继的 unit 里 `RELAY_HOST` 默认是 `127.0.0.1`，**要改成 Tailscale 地址**
 > 手机才连得上。见 `phone-relay/README.md` 第 4 步。**别写 `0.0.0.0`。**
 
+### 可选：飞书机器人
+
+不想装就跳过 —— 原来那套（Tasker 轮询 + `/ask` 表单）不受影响。
+想装的话它有额外的前置条件（要在飞书开放平台建自建应用），**完整步骤见
+[`feishu-bot/README.md`](feishu-bot/README.md)**，服务器侧只是多装一个 unit：
+
+```bash
+# ⚠️ 它需要 lark-oapi，而上面第 2 步装依赖时可能还没有这个包。
+sudo /opt/lifelogging/venv/bin/pip install -r /opt/lifelogging/repo/requirements.txt
+
+sudo tee /etc/lifelogging/feishu-bot.env >/dev/null <<'EOF'
+FEISHU_APP_ID=cli_REPLACE_ME
+FEISHU_APP_SECRET=REPLACE_ME
+FEISHU_OWNER_OPEN_ID=
+EOF
+sudo chmod 600 /etc/lifelogging/feishu-bot.env
+
+sudo cp /opt/lifelogging/repo/server/feishu-bot/lifelogging-feishu-bot.service \
+        /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now lifelogging-feishu-bot
+```
+
+> ⚠️ `FEISHU_OWNER_OPEN_ID` **先留空**，等机器人连上长连接、你给它发过一句话
+> 之后，从日志里把你的 `ou_…` 抄出来再填。理由见那份 README 第 4 步。
+
 ## 更新
 
 ```bash
@@ -111,8 +144,18 @@ sudo /opt/lifelogging/repo/server/deploy.sh
 ```
 
 它做三件事：快进到 `origin/master`、打印这次更新了哪些 commit、按改动范围决定
-要不要重启中继。工作区有被改过的**被跟踪**文件时会拒绝合并并让你先处理 ——
-那种情况该由人看，不该脚本自作主张。
+要不要重启常驻服务（中继、飞书机器人）。工作区有被改过的**被跟踪**文件时会拒绝
+合并并让你先处理 —— 那种情况该由人看，不该脚本自作主张。
+
+⚠️ **它不装依赖。** 如果这次更新动了 `requirements.txt`（比如加了 `lark-oapi`），
+`git pull` 不会把它装进 venv —— 而飞书机器人开着 `Restart=always`，于是会
+**无限 ImportError 重启**，`systemctl status` 还显示 "active (running)"，
+看着像一切正常。这种更新要补一句：
+
+```bash
+sudo /opt/lifelogging/venv/bin/pip install -r /opt/lifelogging/repo/requirements.txt
+sudo systemctl restart lifelogging-feishu-bot
+```
 
 **close_day 不用重启**：它是 oneshot，每次运行都重新读源码，下一个 15 分钟的
 tick 自然用上新版本。

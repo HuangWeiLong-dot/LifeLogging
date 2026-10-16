@@ -7,6 +7,14 @@ httpx>=0.27
 PyYAML>=6.0
 anthropic>=0.40
 
+# ⚠️ 只有**服务器**上的飞书机器人用得到（server/feishu-bot/）。
+# 笔记本装不装都行 —— 这份 requirements 两边共用，多装一个不影响。
+# 但反过来要注意：**加了这一行不等于服务器上就装好了**。
+# deploy.sh 只做 git pull + 重启，不装依赖；漏了手动 pip install 的话，
+# 机器人会在 Restart=always 下无限 ImportError 重启，看着像"一直在跑"。
+#   sudo /opt/lifelogging/venv/bin/pip install -r /opt/lifelogging/repo/requirements.txt
+lark-oapi>=1.7.5
+
 # ⚠️ Windows 必装：Windows 不带系统时区数据库，
 # 没有这个包，zoneinfo.ZoneInfo("Asia/Shanghai") 会直接抛
 # ZoneInfoNotFoundError，整套系统起不来。

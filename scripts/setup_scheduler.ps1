@@ -1,8 +1,9 @@
 ﻿# Register the Windows scheduled tasks
 #
-# 注册**两个**任务：
+# 注册**三个**任务：
 #   LifeLogging-Daily    每日 $Time + 解锁时 —— 正式处理（含 AI 日记、推水位线）
 #   LifeLogging-Refresh  每 $RefreshHours 小时 —— 只拉今天的数据，不调 AI、不动水位线
+#   LifeLogging-Desktop  每 $DesktopMinutes 分钟 —— 把「电脑上今天到目前」推给服务器
 #
 # 以**管理员身份**运行 PowerShell：
 #   powershell -ExecutionPolicy Bypass -File scripts\setup_scheduler.ps1
@@ -10,6 +11,7 @@
 # 卸载：
 #   Unregister-ScheduledTask -TaskName "LifeLogging-Daily"   -Confirm:$false
 #   Unregister-ScheduledTask -TaskName "LifeLogging-Refresh" -Confirm:$false
+#   Unregister-ScheduledTask -TaskName "LifeLogging-Desktop" -Confirm:$false
 
 param(
     [string]$Time = "23:00",
@@ -17,7 +19,13 @@ param(
     # 定时刷新的间隔（小时）。这个任务做的是 更新数据.cmd 那件事 ——
     # 把当天的数据拉下来让 Grafana 保持新鲜，不调 AI（所以几乎零成本）。
     [int]$RefreshHours = 2,
-    [string]$RefreshTaskName = "LifeLogging-Refresh"
+    [string]$RefreshTaskName = "LifeLogging-Refresh",
+    # 电脑活动快照的间隔（分钟）。见 scripts/push_desktop.py ——
+    # 让飞书机器人在笔记本睡着之后还能答「电脑上最后在干什么」。
+    # 10 分钟是个折中：更密没有意义（人不会每 3 分钟换一件事），
+    # 更疏则笔记本一睡，最后那份快照就偏得很远。
+    [int]$DesktopMinutes = 10,
+    [string]$DesktopTaskName = "LifeLogging-Desktop"
 )
 
 $ErrorActionPreference = "Stop"
@@ -39,6 +47,11 @@ if ($isAdmin) {
 
 $Root = Split-Path -Parent $PSScriptRoot
 $Script = Join-Path $Root "scripts\run_daily.ps1"
+# 推送脚本直接用 venv 的 python 跑（不走 run_daily.ps1 —— 那个是「按天」的
+# 流水线，带水位线和 -Date today 语义，塞进一个每 10 分钟的任务里不对路）。
+$Py = Join-Path $Root ".venv\Scripts\python.exe"
+if (-not (Test-Path $Py)) { $Py = "python" }
+$PushScript = Join-Path $Root "scripts\push_desktop.py"
 
 if (-not (Test-Path $Script)) {
     Write-Host "FAIL script not found: $Script" -ForegroundColor Red
@@ -229,18 +242,61 @@ if (-not $rep -or -not $rep.Interval) {
     exit 1
 }
 
+# ── 第三个任务：电脑活动快照（每 $DesktopMinutes 分钟）─────────────
+#
+# 为什么单独一个任务、不走 run_daily.ps1：
+#   run_daily 是**按天**的流水线（水位线、-Date today、补跑逻辑），
+#   而这件事是「每十分钟看一眼现在」。两者的节奏和失败方式都不一样。
+#   它本身也很轻：读一次 ActivityWatch 的本地接口 + 一个小 POST。
+$desktopAction = New-ScheduledTaskAction `
+    -Execute $Py `
+    -Argument "`"$PushScript`"" `
+    -WorkingDirectory $Root
+
+$desktopTrigger = New-ScheduledTaskTrigger `
+    -Once -At (Get-Date).Date `
+    -RepetitionInterval (New-TimeSpan -Minutes $DesktopMinutes)
+
+try {
+    Register-ScheduledTask `
+        -TaskName $DesktopTaskName `
+        -Action $desktopAction `
+        -Trigger $desktopTrigger `
+        -Settings $settings `
+        -Principal $principal `
+        -Force | Out-Null
+} catch {
+    Write-Host "FAIL could not register '$DesktopTaskName': $_" -ForegroundColor Red
+    Write-Host "     前两个任务已经注册好了，少的只是电脑活动快照。" -ForegroundColor Yellow
+    exit 1
+}
+
+# 同样核对一次 —— 这个参数的失败方式和上面那个一模一样：注册成功但只跑一次。
+$dt = Get-ScheduledTask -TaskName $DesktopTaskName
+$drep = @($dt.Triggers)[0].Repetition
+if (-not $drep -or -not $drep.Interval) {
+    Write-Host "FAIL '$DesktopTaskName' registered but has no repetition interval." -ForegroundColor Red
+    exit 1
+}
+
 Write-Host "OK  Registered" -ForegroundColor Green
 Write-Host "    Triggers: $trigCount  (daily $Time  +  unlock, 30s delay)"
 Write-Host "    Refresh:  every $($rep.Interval) (=$RefreshHours h), task '$RefreshTaskName'"
+Write-Host "    Desktop:  every $($drep.Interval) (=$DesktopMinutes min), task '$DesktopTaskName'"
 Write-Host
 Write-Host "Check:"
 Write-Host "  (Get-ScheduledTask -TaskName '$TaskName').Triggers"
 Write-Host "  Export-ScheduledTask -TaskName '$TaskName' | Select-String SessionState"
 Write-Host "  (Get-ScheduledTask -TaskName '$RefreshTaskName').Triggers   # 重复间隔"
+Write-Host "  (Get-ScheduledTask -TaskName '$DesktopTaskName').Triggers   # 重复间隔"
 Write-Host
 Write-Host "Trigger them once to test:"
 Write-Host "  Start-ScheduledTask -TaskName '$TaskName'"
 Write-Host "  Start-ScheduledTask -TaskName '$RefreshTaskName'"
+Write-Host "  Start-ScheduledTask -TaskName '$DesktopTaskName'"
+Write-Host
+Write-Host "先手动验一次电脑快照推得出去（会打印它到底推了什么）："
+Write-Host "  .venv\Scripts\python.exe scripts\push_desktop.py --dry-run"
 Write-Host
 Write-Host "Is it actually running? Open state\last_run.md -- it lists the recent runs."
 Write-Host

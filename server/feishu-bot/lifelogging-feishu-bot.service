@@ -1,0 +1,79 @@
+# LifeLogging —— 飞书机器人（每日提问的收发通道）
+#
+# 形状上和 phone-relay 一样是**常驻**进程，但有两点不同：
+#   · 它需要第三方依赖（lark-oapi / httpx），所以要 venv；
+#     中继是纯标准库所以不用。
+#   · 它的网络连接是**出站**的 —— 由它主动连飞书（wss://open.feishu.cn），
+#     不开任何监听端口，所以不需要公网入口，Cloudflare Access 那边一行都不用改。
+#
+# 部署步骤见同目录 README.md。
+
+[Unit]
+Description=LifeLogging - Feishu bot (daily questions in/out)
+After=network-online.target tailscaled.service lifelogging-relay.service
+Wants=network-online.target
+# 它要调本机的中继取题、交答案，所以得等中继起来
+Requires=lifelogging-relay.service
+
+[Service]
+Type=simple
+# 运行身份：root，显式写出（理由见 phone-relay 那个 unit —— 这台机器上不建
+# 专用服务用户）。加固靠下面那组 ProtectSystem / CapabilityBoundingSet。
+User=root
+Group=root
+WorkingDirectory=/opt/lifelogging/repo
+
+# Feishu 的 App ID / App Secret 和 OWNER_OPEN_ID 在这里。
+# **不要写进这个文件** —— 它是要进 git 的。
+EnvironmentFile=/etc/lifelogging/feishu-bot.env
+# 中继那把 key 从它自己的文件里读，而不是在 feishu-bot.env 里再抄一份 ——
+# 这样轮换密钥只需要改一处。
+EnvironmentFile=/etc/lifelogging/relay.env
+
+# ⚠️ 中继**绑的是 Tailscale 地址**（生产环境的设置），不是 127.0.0.1。
+#    不对的话这里每一次调用都失败，而现象是「机器人收得到消息、答案从来不落库」。
+#    查：systemctl show lifelogging-relay -p Environment | tr ' ' '\n' | grep RELAY_HOST
+Environment=FEISHU_RELAY_BASE=http://127.0.0.1:8788
+Environment=FEISHU_STATE_DIR=/var/lib/lifelogging
+Environment=FEISHU_TZ=Asia/Shanghai
+# ⚠️ 城市数据表（GeoNames）放哪。默认是仓库里的 data/，但下面 ProtectSystem=strict
+#    让仓库整个只读 —— 用默认值的话第一次要用地名时下载会失败，而且是**静默**
+#    退回坐标，报出来的是「(39.9042,116.4074)」这种，看着像坏了却不报错。
+Environment=LIFELOGGING_DATA_DIR=/var/lib/lifelogging/geo
+# 每天几点主动推。留空 = 不主动推，只被动应答。
+Environment=FEISHU_PUSH_AT=08:30
+
+# 模板答不了的问题要不要花钱交给模型。设 0 = 纯模板、零成本。
+# ⚠️ 每天还有一道**硬上限**（默认 10 次，见 live.py 的 LLM_DAILY_CAP），
+#    而且每次调用都走 budget 那套预检，超了当日 daily_cap 就拒答。
+Environment=FEISHU_FREEFORM_LLM=1
+# Environment=FEISHU_LLM_DAILY_CAP=10
+
+ExecStart=/opt/lifelogging/venv/bin/python /opt/lifelogging/repo/server/feishu-bot/feishu_bot.py
+
+# ⚠️ 常驻长连接，断了必须拉起来。
+#    但也要知道：Restart=always 会**掩盖** ImportError 这类启动即死的问题
+#    （无限重启，看着像"一直在跑"）。所以部署时先手工跑一次 --check，
+#    或者 journalctl -u lifelogging-feishu-bot -n 50 看有没有在刷同一个错。
+Restart=always
+RestartSec=5
+
+# 和 phone_relay / close-day 同一套加固
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+# ⚠️ 这行不能少：ProtectSystem=strict 会把整个文件系统挂成只读，
+#    而它要写会话状态 /var/lib/lifelogging/feishu-state.json。
+#    少了它的表现是「每次重启都把问过的题重问一遍」，且不报错。
+ReadWritePaths=/var/lib/lifelogging
+
+# ⚠️ **不要**加 RestrictAddressFamilies= / IPAddressAllow= / PrivateNetwork=。
+#    现有几个 unit 都没加，而且这个服务**必须**能出站连 open.feishu.cn。
+#    加上去会静默掐死长连接 —— 现象是「服务在跑、就是永远收不到消息」。

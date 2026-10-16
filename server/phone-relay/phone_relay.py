@@ -32,6 +32,7 @@
 
       POST /questions      笔记本把当天的问题推上来（JSON）
       GET  /ask/pending    手机轮询「有没有题」—— **纯文本，就一个数字**
+      GET  /questions/pending  同上，但返回**题目内容**（JSON），给飞书机器人用
       GET  /ask            手机浏览器打开的表单页（是/否 + 备注）
       POST /answer         答案落成事件，随手机事件一起被笔记本拉走
 
@@ -41,6 +42,8 @@
 
     ⚠️ 中继**没有**、也不打算有任何「服务器 → 手机」的推送。手机永远是发起方。
        所以「早上问你」是手机定时来取，不是服务器推过去。
+       （飞书那条通道不一样：机器人自己持有一条到飞书的长连接，由**它**推。
+        推的动作在 server/feishu-bot/ 里，不在中继里 —— 中继只管存取。）
 
 **日记管线也借它中转**（2026-10-15 加）
 
@@ -308,6 +311,12 @@ _DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 MAX_NOTE = 500
 MAX_VALUE = 120      # 选项原文比 yes/no 长，但也不该无限长
 
+# 实时问题（服务器白天生成的）的文件名前缀。
+# ⚠️ 单独一个常量、而不是到处写字符串字面量：`questions-*.json` 那个通配符
+#    会把 `questions-live-*.json` 一起匹配进去（见 load_latest_questions），
+#    所以「哪里要排掉它」必须一眼能对上同一个定义。
+LIVE_PREFIX = "questions-live-"
+
 
 def questions_path(day: str) -> Path | None:
     """问题文件的路径。day 形状不对就返回 None —— 这是挡路径穿越的那道门。"""
@@ -374,6 +383,40 @@ def save_ledger(payload: dict) -> tuple[bool, str]:
     return True, _write_json(ledger_path(), payload)
 
 
+DESKTOP_NAME = "desktop-latest.json"
+# 快照里最多留多少个应用。这份文件每次都被整份覆写、整份读回，
+# 无限长大的话读写都会变慢，而最有用的其实只有前几个。
+DESKTOP_MAX_APPS = 30
+
+
+def desktop_path() -> Path:
+    """笔记本高频推来的「今天到目前」快照。
+
+    **只留最新一份，不留历史。** 每 5 分钟推一次的话一天 288 份，
+    而三年前的「14:32 在写代码」没有任何人会去查 —— 完整的原始数据
+    在笔记本自己的 events.db 里，那份才是需要留的。
+    这里要的只是「笔记本睡着之后，服务器还知道最后的样子」。
+    """
+    return DATA_DIR / DESKTOP_NAME
+
+
+def save_desktop(payload: dict) -> tuple[bool, str]:
+    """校验得很松，是有意的。
+
+    ⚠️ 只查 `day` 的形状，别的字段一律放行 —— 这是**自己人**推的
+       （笔记本上带着 key），而不是对外的写端点。字段格式变了的时候，
+       宁可让机器人看见「少了某个字段」，也不要在中继这层把整份快照丢掉：
+       丢掉的表现是服务器上一片空白，比缺个字段难查得多。
+    """
+    day = str(payload.get("day") or "")
+    if not _DAY_RE.match(day):
+        return False, "day must be YYYY-MM-DD"
+    apps = payload.get("top_apps")
+    if isinstance(apps, list) and len(apps) > DESKTOP_MAX_APPS:
+        payload = dict(payload, top_apps=apps[:DESKTOP_MAX_APPS])
+    return True, _write_json(desktop_path(), payload)
+
+
 def journal_path(kind: str, day: str) -> Path | None:
     """日记管线的中转文件。kind 是 'input' 或 'output'。
 
@@ -386,11 +429,18 @@ def journal_path(kind: str, day: str) -> Path | None:
 
 
 def load_latest_questions() -> dict | None:
-    """取**最新**的一份问题。没有就返回 None。
+    """取**最新**的一份**笔记本批**的问题。没有就返回 None。
 
     取最新而不是取今天：笔记本可能昨晚生成、手机今天才来取。
     """
-    files = sorted(DATA_DIR.glob("questions-*.json"))
+    # ⚠️ 必须把实时那批**排掉**。`questions-*.json` 这个通配符同时匹配
+    #    `questions-live-2026-10-16.json` —— 而 '2' 的字典序小于 'l'，
+    #    所以按名字排序时实时文件永远排在最后，会被当成「最新那份」。
+    #    后果不是报错，而是**笔记本那批题整体消失**：机器人只会问实时题，
+    #    问责那批（拿你自己写的话堵你的那批）静默不见了。
+    #    实测踩到过 —— 并集里只剩一条。
+    files = sorted(p for p in DATA_DIR.glob("questions-*.json")
+                   if not p.name.startswith(LIVE_PREFIX))
     if not files:
         return None
     try:
@@ -453,15 +503,79 @@ def answers_to_events(answers: list) -> list[dict]:
     return events
 
 
-def pending_questions() -> tuple[dict | None, list[dict]]:
-    """返回 (最新那份问题, 其中还没答的)。"""
-    q = load_latest_questions()
-    if not q:
+def live_questions_path(day: str) -> Path | None:
+    """**实时**问题（服务器白天根据当天的位置/手机数据生成的）的路径。
+
+    ⚠️ 和笔记本那份 `questions-<day>.json` **分开存**，是有原因的，不是图省事：
+       `save_questions()` 是纯覆写、`load_latest_questions()` 取「文件名排序最后
+       一份」。白天的实时问题要是写进同一份文件，它会变成「最新那份」，
+       于是**手机早上那批题被静默顶掉**，而 `.seen` 还会把重新提醒一并挡掉 ——
+       你只会发现早上没收到提醒，且没有任何报错。
+    """
+    if not _DAY_RE.match(day or ""):
+        return None
+    return DATA_DIR / f"{LIVE_PREFIX}{day}.json"
+
+
+def save_live_questions(day: str, payload: dict) -> tuple[bool, str]:
+    dest = live_questions_path(day)
+    if dest is None:
+        return False, "day must be YYYY-MM-DD"
+    return True, _write_json(dest, payload)
+
+
+def load_latest_live_questions(within_days: int = 1) -> dict | None:
+    """最近那份实时问题。**超过 within_days 天就不要了。**
+
+    ⚠️ 这里和 `load_latest_questions()` 的取舍**故意不同**：那份无脑取最新，
+       因为「昨晚生成、今早来取」是它的正常用法。实时问题正相反 ——
+       「你 14:00 在某个地方待了两小时」隔三天再问就是纯噪音，
+       而且没人答的话它会一直挂在待答列表里。
+    """
+    files = sorted(DATA_DIR.glob(f"{LIVE_PREFIX}*.json"))
+    if not files:
+        return None
+    try:
+        payload = json.loads(files[-1].read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    day = str(payload.get("day") or "")
+    if not _DAY_RE.match(day):
+        return None
+    cutoff = (datetime.now(TZ).date() - timedelta(days=within_days)).isoformat()
+    return payload if day >= cutoff else None
+
+
+def pending_questions(include_live: bool = False) -> tuple[dict | None, list[dict]]:
+    """返回 (那份问题, 其中还没答的)。
+
+    ⚠️ `include_live` 默认 **False**，而且手机那两条路由（`/ask/pending`、`/ask`）
+       就一直用默认值。理由：实时问题是**飞书那条通道的额外来源**，混进手机流程
+       会把「今天有几条要问」的语义搅乱（手机侧还靠这个数字弹通知、写 .seen）。
+       手机的体验在这些改动里刻意**冻结不动**。
+    """
+    laptop = load_latest_questions()
+    live = load_latest_live_questions() if include_live else None
+
+    primary = laptop or live
+    if not primary:
         return None, []
+
     done = answered_ids()
-    items = [x for x in (q.get("questions") or []) if isinstance(x, dict)
-             and x.get("id") and x.get("id") not in done]
-    return q, items
+    seen: set[str] = set()
+    items: list[dict] = []
+    for payload in (laptop, live):
+        for x in ((payload or {}).get("questions") or []):
+            if not isinstance(x, dict):
+                continue
+            qid = str(x.get("id") or "")
+            if not qid or qid in done or qid in seen:
+                continue          # 已答过、或两个来源里重复的，只留一条
+            seen.add(qid)
+            items.append(x)
+    return primary, items
 
 
 # 问答页模板。用占位符 + str.replace 而不是 f-string —— 里面全是 CSS/JS 的
@@ -762,6 +876,36 @@ class Handler(BaseHTTPRequestHandler):
             self._send_text(200, str(len(left)))
             return
 
+        if u.path == "/questions/pending":
+            # 给**飞书机器人**用的 JSON 版。它要的是题目内容本身，而上面那条
+            # `/ask/pending` 只给一个数字 —— 那是给 Tasker 的（它不会解析 JSON）。
+            #
+            # ⚠️ 这里**不碰** `questions-<day>.seen`。那个标记是**手机**的提醒额度，
+            #    机器人读一次不该把手机的提醒吃掉。（反过来也一样：机器人自己
+            #    用 `feishu-state.json` 里的 `sent` 记账，两边各管各的。）
+            #
+            # ⚠️ 也**不要**在这里自己读 `questions-*.json` / `phone-*.jsonl` 去算
+            #    「哪些还没答」。那等于把 pending_questions() 抄成第二份实现，
+            #    两份会漂移，而且漂移了**两边都不报错** —— 机器人问出一道中继
+            #    认为已经答过的题，谁也不知道。
+            if not self._authed():
+                return
+            # include_live=True：飞书机器人**两批都要**（笔记本问责批 + 服务器
+            # 实时批）。手机那两条路由不传这个参数，所以它们的语义没变。
+            q, left = pending_questions(include_live=True)
+            if not q:
+                # ⚠️ 200 + 空列表，不是 404。机器人要能区分
+                #    「中继活着、只是今天还没题」和「中继挂了」。
+                #    404 会把这两种情况糊成一种。
+                self._send(200, {"day": None, "generated_at": None, "questions": []})
+                return
+            self._send(200, {
+                "day": q.get("day"),
+                "generated_at": q.get("generated_at"),
+                "questions": left,
+            })
+            return
+
         if u.path == "/ask":
             if not self._authed_query(u.query):
                 return
@@ -778,6 +922,24 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+            return
+
+        if u.path == "/desktop":
+            # 笔记本推上来的「今天到目前」快照，给飞书机器人答
+            # 「我在电脑上干什么」。见 save_desktop()。
+            #
+            # ⚠️ 没推过时返回 200 + null，不是 404 —— 机器人要能区分
+            #    「中继活着、只是笔记本还没推过」和「中继挂了」。
+            if not self._authed():
+                return
+            p = desktop_path()
+            if not p.exists():
+                self._send(200, {"snapshot": None})
+                return
+            try:
+                self._send(200, {"snapshot": json.loads(p.read_text(encoding="utf-8"))})
+            except (OSError, json.JSONDecodeError) as e:
+                self._send(500, {"error": f"stored snapshot is unreadable: {e}"})
             return
 
         if u.path == "/ledger":
@@ -930,6 +1092,38 @@ class Handler(BaseHTTPRequestHandler):
             ok, detail = save_questions(day, payload)
             self._send(200 if ok else 400,
                        {"ok": ok, "detail": detail, "count": len(qs)})
+            return
+
+        if u.path == "/questions/live":
+            # 服务器白天生成的**实时**问题。和 /questions 分开一条路由，
+            # 因为要分开存 —— 理由见 live_questions_path() 的注释（写进同一份
+            # 会静默顶掉手机早上那批题）。
+            if not self._authed():
+                return
+            payload, err = self._json_body()
+            if err:
+                self._send(400, {"error": err})
+                return
+            day = str(payload.get("day") or "")
+            qs = payload.get("questions")
+            if not isinstance(qs, list) or not qs:
+                self._send(400, {"error": "questions must be a non-empty list"})
+                return
+            ok, detail = save_live_questions(day, payload)
+            self._send(200 if ok else 400,
+                       {"ok": ok, "detail": detail, "count": len(qs)})
+            return
+
+        if u.path == "/desktop":
+            # 笔记本高频推上来的「今天到目前」快照。见 save_desktop()。
+            if not self._authed():
+                return
+            payload, err = self._json_body()
+            if err:
+                self._send(400, {"error": err})
+                return
+            ok, detail = save_desktop(payload)
+            self._send(200 if ok else 400, {"ok": ok, "detail": detail})
             return
 
         if u.path == "/answer":

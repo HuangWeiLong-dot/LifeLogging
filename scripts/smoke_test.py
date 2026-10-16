@@ -37,7 +37,15 @@ def check(name: str, fn) -> None:
         print(f"  ✅ {name}")
         PASS += 1
     except Exception as e:  # noqa: BLE001
-        print(f"  ❌ {name}\n       {type(e).__name__}: {e}")
+        # ⚠️ 带上**出错的那一行**。裸 `assert x == y` 没有消息，光看
+        #    「AssertionError: 」根本不知道是几十条断言里的哪一条 ——
+        #    实测为这个来回跑了好几轮。
+        tb = sys.exc_info()[2]
+        while tb is not None and tb.tb_next is not None:
+            tb = tb.tb_next
+        where = (f"\n       at {Path(tb.tb_frame.f_code.co_filename).name}:"
+                 f"{tb.tb_lineno}" if tb is not None else "")
+        print(f"  ❌ {name}\n       {type(e).__name__}: {e}{where}")
         FAIL += 1
 
 
@@ -919,6 +927,190 @@ check("answer encoding round-trips / no path escape / HTML escaped / safe task m
       t_questions)
 
 
+def t_live_questions():
+    """实时问题（服务器白天生成）和笔记本批**并存**，且互不遮蔽。
+
+    ⚠️ 这里锁的是一个实测踩到的静默缺陷：
+       `load_latest_questions()` 的通配符是 `questions-*.json`，而
+       `questions-live-2026-10-16.json` **也匹配**它。按文件名排序时
+       '2' < 'l'，所以实时那份永远排在最后、被当成「最新一份」。
+       后果不是报错，而是**笔记本那批题整体消失** —— 飞书机器人只会问
+       实时题，问责那批（拿你自己写的话堵你的那批）静默不见了。
+    """
+    import importlib.util
+    import tempfile
+
+    path = (Path(__file__).resolve().parent.parent
+            / "server" / "phone-relay" / "phone_relay.py")
+    spec = importlib.util.spec_from_file_location("phone_relay_lq", path)
+    pr = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pr)
+
+    with tempfile.TemporaryDirectory() as td:
+        pr.DATA_DIR = Path(td)
+        # ⚠️ 用**真实的今天**，不能写死。`answered_ids()` 是从今天往回扫 7 天，
+        #    硬编码一个日期的话，这个测试只在当天跑才是真的 —— 换一天它要么
+        #    假绿要么假红，而「过期」那条断言更是永远不成立。
+        day = datetime.now(pr.TZ).date().isoformat()
+
+        pr.save_questions(day, {"day": day, "generated_at": "x", "questions": [
+            {"id": f"{day}-lap1", "format": "yes_no", "text": "笔记本那道"}]})
+        pr.save_live_questions(day, {"day": day, "generated_at": "y", "questions": [
+            {"id": f"{day}-liv1", "format": "yes_no", "text": "实时那道"}]})
+
+        # ⚠️ 核心断言：笔记本那份仍要能被认出来
+        got = pr.load_latest_questions()
+        assert got and got["questions"][0]["id"] == f"{day}-lap1", \
+            f"实时文件把笔记本那份顶掉了：{got}"
+
+        assert pr.load_latest_live_questions()["questions"][0]["id"] == f"{day}-liv1"
+
+        # 手机那条链路：**只**看笔记本批（语义冻结）
+        _, phone = pr.pending_questions()
+        assert [q["id"] for q in phone] == [f"{day}-lap1"], phone
+
+        # 飞书那条：两批的并集
+        _, both = pr.pending_questions(include_live=True)
+        assert [q["id"] for q in both] == [f"{day}-lap1", f"{day}-liv1"], both
+
+        # 答掉一题 → 并集里就该没了（去重靠的是 answered_ids，不是文件）
+        pr.append_events([{"ts": int(datetime.now(timezone.utc).timestamp()),
+                           "domain": "question", "metric": "answer",
+                           "value_text": f"{day}-liv1|yes|", "source": "test"}])
+        _, both = pr.pending_questions(include_live=True)
+        assert [q["id"] for q in both] == [f"{day}-lap1"], both
+
+        # 实时问题**会过期**：隔了几天的实时题不该再冒出来。
+        # （笔记本那批正相反 —— 它无脑取最新，因为「昨晚生成、今早来取」是常态。）
+        # 注意：「最新一份」是按**文件名**排的，所以只写一份旧的是不够的，
+        # 得先把当天那份挪走，剩下的「最新」才是旧的那份。
+        pr.live_questions_path(day).unlink()
+        old = "2020-01-01"
+        pr.save_live_questions(old, {"day": old, "generated_at": "z", "questions": [
+            {"id": f"{old}-stale", "format": "yes_no", "text": "三天前的实时题"}]})
+        assert pr.load_latest_live_questions() is None, "隔了几天的实时题该过期"
+        _, both = pr.pending_questions(include_live=True)
+        assert all(not q["id"].endswith("-stale") for q in both), both
+        # 笔记本那批不受影响，照常还在
+        assert [q["id"] for q in both] == [f"{day}-lap1"], both
+
+        # 路径穿越那道门对实时文件同样要拦
+        assert pr.live_questions_path("../../etc/passwd") is None
+        assert not pr.save_live_questions("not-a-day", {"questions": [{}]})[0]
+
+
+check("live questions: 实时批不遮蔽笔记本批，手机链路冻结，实时题会过期",
+      t_live_questions)
+
+
+def t_live_question_rules():
+    """实时提问的规则：确定性、不勾任务、不把坐标当地名、夜里不问。"""
+    import importlib.util
+
+    lq_path = Path(__file__).resolve().parent / "live_questions.py"
+    spec = importlib.util.spec_from_file_location("live_q", lq_path)
+    lq = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lq)
+
+    DAY = "2026-10-16"
+
+    # ── 长停留 ──
+    stay = {"place": "望京, 北京朝阳", "minutes": 150.0,
+            "start": f"{DAY}T14:05:00+08:00", "end": f"{DAY}T16:35:00+08:00",
+            "is_coord": False}
+    q = lq.rule_long_stay(DAY, [stay], [])
+    assert q, "150 分钟的停留应该问一句"
+    assert "2 小时 30 分" in q["text"] and "望京" in q["text"], q["text"]
+    assert q["text"].startswith("今天 14:05–16:35"), q["text"]
+    # ⚠️ 实时题是文字题：apply_answers 对 text 永远判「没完成」，
+    #    所以它**不会去勾任何任务** —— 这正是要的，实时题只是问一句。
+    assert q["format"] == "text" and q["ref"] == ""
+    assert q["id"].startswith(f"{DAY}-"), "题号必须带日期前缀（apply_answers 靠它筛）"
+
+    # 太短的停留不该问
+    assert lq.rule_long_stay(DAY, [dict(stay, minutes=30.0)], []) is None
+    # 两个停留取更长的那个
+    longer = dict(stay, place="中关村", minutes=200.0, start=f"{DAY}T09:00:00+08:00")
+    q2 = lq.rule_long_stay(DAY, [stay, longer], [])
+    assert "中关村" in q2["text"], q2["text"]
+
+    # ⚠️ 反查不出地名时**不能装作认识那个地方**：报坐标，并且说明为什么。
+    qc = lq.rule_long_stay(DAY, [dict(stay, place="(39.9042,116.4074)", is_coord=True)], [])
+    assert "39.9042" in qc["text"], qc["text"]
+    assert "城市数据表" in qc["evidence"], "要说清为什么只有坐标"
+
+    # ── 手机静默 ──
+    def unlock(hh: int, mm: int) -> dict:
+        return {"metric": "unlock", "ts_utc": f"{DAY}T{hh:02d}:{mm:02d}:00+08:00"}
+
+    evs = [unlock(9, 0), unlock(11, 40)]           # 中间空了 160 分钟
+    q3 = lq.rule_phone_silence(DAY, [], evs)
+    assert q3 and "2 小时 40 分" in q3["text"], q3
+    assert "都没解锁" in q3["text"]
+
+    # 只有一条解锁 → 没有间隔可言，问不出来
+    assert lq.rule_phone_silence(DAY, [], [unlock(9, 0)]) is None
+    # 间隔太短不问
+    assert lq.rule_phone_silence(DAY, [], [unlock(9, 0), unlock(9, 30)]) is None
+    # ⚠️ 夜里那段不该问：凌晨本来就不解锁，拿它发问等于每天早上固定一条噪音
+    assert lq.rule_phone_silence(DAY, [], [unlock(23, 30), unlock(1, 30)]) is None
+
+    # ── 同一件事不重复问 ──
+    # `build()` 靠 _key 去重；中继那边是覆写，所以每次都要把当天全部重推一遍。
+    assert lq.qid(DAY, "同一句话") == lq.qid(DAY, "同一句话")
+    assert lq.qid(DAY, "a") != lq.qid(DAY, "b")
+    assert lq.make(DAY, "x", "e", "k1")["_key"] == "k1"
+
+
+check("live questions: 规则确定性 / 不勾任务 / 坐标不当地名 / 夜里不问",
+      t_live_question_rules)
+
+
+def t_feishu_freeform_cap():
+    """自由问答的每日封顶 —— 唯一挡住「随手问问变成花钱黑洞」的东西。
+
+    ⚠️ 自由问答每问一次就是一次真实的 LLM 调用。这条通道又特别容易问多
+       （打字就能问），所以上限必须在**调模型之前**拦住，而不是事后统计。
+       同时要保住一件事：模板那几类（去哪了/手机/电脑）**不占这个额度**，
+       否则额度用完之后整条通道看着就像哑了。
+    """
+    import importlib.util
+    import tempfile
+
+    path = (Path(__file__).resolve().parent.parent
+            / "server" / "feishu-bot" / "live.py")
+    spec = importlib.util.spec_from_file_location("live_ff", path)
+    lv = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lv)
+
+    with tempfile.TemporaryDirectory() as td:
+        lv.cfg = lambda: {"state_dir": td}       # 不碰真实配置
+        lv.LLM_DAILY_CAP = 2
+        day = "2026-10-16"
+        counter = Path(td) / f"feishu-llm-{day}.json"
+
+        # 计数已经到上限 → 必须**在调模型之前**返回，这里没有任何网络可用，
+        # 真去调的话这个测试会以连接错误的形式炸掉。
+        counter.write_text(json.dumps({"calls": 2}), encoding="utf-8")
+        out = lv.answer_freeform("今天出门几次", day_iso=day,
+                                 base="http://127.0.0.1:1", key="k")
+        assert "额度用完" in out, out
+        assert "2 次" in out, out
+        assert "模板" in out, "要说清模板那几类不受影响，别让人以为整个哑了"
+
+        # 计数文件坏了/不存在 → 当成 0，不能因此崩掉（那时它会去调模型，
+        # 这里只验「读不出来不抛异常」这一半：给个坏文件，看它是否还走额度分支）
+        counter.write_text("{ 这不是 json", encoding="utf-8")
+        lv.LLM_DAILY_CAP = 0                      # 逼它在读完之后立刻拦下来
+        out = lv.answer_freeform("再问一次", day_iso=day,
+                                 base="http://127.0.0.1:1", key="k")
+        assert "额度用完" in out, f"坏掉的计数文件该当成 0，然后被上限拦住：{out}"
+
+
+check("feishu: 自由问答每日封顶（在调模型之前拦，且不牵连模板那几类）",
+      t_feishu_freeform_cap)
+
+
 # ── 7d-3. 日记中继 ──────────────────────────────────────────────────
 print("\n[21] Journal relay")
 
@@ -1114,6 +1306,237 @@ def t_answer_formats():
 
 check("answer formats: parse / render / what-counts-as-done stay in sync",
       t_answer_formats)
+
+
+# ── 7d-6. 飞书那层的答案规范化 ─────────────────────────────────────
+print("\n[24] Feishu answer canonicalisation")
+
+
+def t_feishu_canonicalise():
+    """飞书的「中文 → 契约值」必须逐字产成 apply_answers 认的东西。
+
+    链路上现在多了一层：**人 → 机器人 → 中继 → 事件表 → apply_answers**。
+    中继只对**字面量** yes/no 转小写、选择题比的是选项原文**精确相等**，
+    所以机器人要是把「做了」原样转手发出去，答案照样存得进去、任务永远
+    勾不掉，而且两边都不报错 —— 这是这条链上最容易静默失败的一处。
+
+    这个测试同时钉死两件事：
+      · canonicalise 产出的值，answered_done 必须认
+      · **未经规范化的中文，answered_done 必须不认**（否则上面那条就是空话）
+    """
+    import importlib.util
+
+    from apply_answers import answered_done
+
+    path = (Path(__file__).resolve().parent.parent
+            / "server" / "feishu-bot" / "feishu_bot.py")
+    spec = importlib.util.spec_from_file_location("feishu_bot_t", path)
+    fb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fb)
+
+    # ── 先证明这个坑是真的 ──
+    yesno = {"id": "2026-10-14-abcd1234", "format": "yes_no", "text": "做了吗"}
+    assert not answered_done(yesno, "做了"), \
+        "如果中文原样能认，那 canonicalise 就没有存在意义了 —— 这个前提变了"
+
+    # ── 二值题 ──
+    for said in ("做了", "是", "好", "对", "有", "嗯", "yes", "Y", "1", "✓"):
+        v, _ = fb.canonicalise(yesno, said)
+        assert v == "yes", f"{said!r} 应该归一成 yes，得到 {v!r}"
+        assert answered_done(yesno, v), f"{said!r} → {v!r} 但 answered_done 不认"
+    for said in ("没做", "没", "否", "没有", "无", "no", "N", "0", "×"):
+        v, _ = fb.canonicalise(yesno, said)
+        assert v == "no", f"{said!r} 应该归一成 no，得到 {v!r}"
+        assert not answered_done(yesno, v)
+
+    # 认不出来必须返回 None（重问），**不能猜**
+    for said in ("大概吧", "", "  ", "42"):
+        v, hint = fb.canonicalise(yesno, said)
+        assert v is None, f"{said!r} 不该被猜成一个答案"
+        assert hint, "认不出来时要给出重问的话"
+
+    # ── 选择题：回的必须是**选项原文**，不是数字 ──
+    ch = {"id": "2026-10-14-beef5678", "format": "choice", "text": "做到哪一步",
+          "options": [{"label": "整条做完了", "done": True},
+                      {"label": "做了一半", "done": False},
+                      {"label": "压根没碰", "done": False}]}
+    v, _ = fb.canonicalise(ch, "1")
+    assert v == "整条做完了", f"回 1 要变成选项原文，得到 {v!r}"
+    assert answered_done(ch, v), "选了标 done 的那项，应该勾掉任务"
+
+    v, _ = fb.canonicalise(ch, "2")
+    assert v == "做了一半"
+    assert not answered_done(ch, v)
+
+    # 直接回原文也认（但要逐字对上）
+    v, _ = fb.canonicalise(ch, "整条做完了")
+    assert v == "整条做完了" and answered_done(ch, v)
+
+    # 越界 / 认不出的选项 → None
+    for said in ("4", "0", "做完了", "第一个"):
+        v, hint = fb.canonicalise(ch, said)
+        assert v is None, f"{said!r} 不该被认成某个选项（不做模糊匹配）"
+        assert hint
+
+    # ── 文字题：原样透传 ──
+    tx = {"id": "2026-10-14-cafe9012", "format": "text", "text": "随便说点什么"}
+    v, _ = fb.canonicalise(tx, "  今天有点累  ")
+    assert v == "今天有点累", "文字题要原样（只去首尾空白）"
+    assert not answered_done(tx, v), "文字题永远勾不了任务，这是有意的"
+    assert fb.canonicalise(tx, "   ")[0] is None, "空白的文字题不算答案"
+
+    # ── 缺 format 的老数据要当二值处理（和 answered_done 的默认一致）──
+    v, _ = fb.canonicalise({"id": "x"}, "做了")
+    assert v == "yes"
+
+    # ── 渲染：三种形态都得给出**可回答**的提示 ──
+    assert "做了" in fb.render_question(yesno, 3), "二值题要告诉人怎么回"
+    assert "1-3" in fb.render_question(ch, 2), "选择题要报出可回的数字范围"
+    assert "整条做完了" in fb.render_question(ch, 2), "选项要列出来"
+
+
+check("feishu: 中文答案归一成契约值，且未归一化的中文确实不被认",
+      t_feishu_canonicalise)
+
+
+def t_feishu_skip():
+    """`/skip` 必须**真的**跳过 —— 而不是让下一轮把同一题问回来。
+
+    ⚠️ 「什么算还没答」永远只有中继一份实现，所以被跳过的那题在中继眼里
+       仍然待答。本地不额外记一笔，`/skip` 就是个假动作：用户看到「跳过了」，
+       紧接着同一题又被推过来，比不支持跳过还糟。
+    """
+    import importlib.util
+
+    path = (Path(__file__).resolve().parent.parent
+            / "server" / "feishu-bot" / "feishu_bot.py")
+    spec = importlib.util.spec_from_file_location("feishu_bot_s", path)
+    fb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fb)
+
+    qs = [{"id": "d-1", "format": "yes_no", "text": "Q1"},
+          {"id": "d-2", "format": "yes_no", "text": "Q2"}]
+    fb.relay_pending = lambda: list(qs)          # 不碰网络
+
+    today = fb.datetime.now(fb.TZ).date().isoformat()
+
+    # 全新的一天：两题都在
+    st = {}
+    assert [q["id"] for q in fb.pending_filtered(st)] == ["d-1", "d-2"]
+    assert st["skipped"] == [] and st["skipped_day"] == today
+
+    # 跳过 d-1 之后它就不该再出现
+    st["skipped"] = ["d-1"]
+    assert [q["id"] for q in fb.pending_filtered(st)] == ["d-2"]
+
+    # 换一天要自动清空 —— 否则昨天跳过的题今天会被永久吞掉
+    st["skipped_day"] = "2000-01-01"
+    assert [q["id"] for q in fb.pending_filtered(st)] == ["d-1", "d-2"], \
+        "跨天必须重置，不能把昨天的跳过带到今天"
+    assert st["skipped"] == []
+
+    # 全跳过 → 空列表（advance 会据此说「今天没有待答的问题了」）
+    st["skipped"] = ["d-1", "d-2"]
+    assert fb.pending_filtered(st) == []
+
+
+check("feishu: /skip 真的跳过（跨天重置，且不影响中继的判定）",
+      t_feishu_skip)
+
+
+def t_feishu_live_routing():
+    """「问我今天」的分流：**先说不，再说能**。
+
+    ⚠️ 「我今天在电脑上干了什么」里既有「电脑」也像在问活动。要是位置/手机
+       那两条先命中，机器人会一本正经地回一段手机数据 —— 答非所问，而且
+       看着像答对了。所以顺序是有意的：先判那几类**服务器上没有的**数据。
+
+    顺带钉住「认不出来时不能默默去出题」：用户在问数据，却收到一串提问，
+    同样像坏了。
+    """
+    import importlib.util
+
+    path = (Path(__file__).resolve().parent.parent
+            / "server" / "feishu-bot" / "live.py")
+    spec = importlib.util.spec_from_file_location("live_t", path)
+    lv = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lv)
+
+    calls: list[str] = []
+    lv.render_location = lambda day: (calls.append("loc") or "⟨位置⟩")
+    lv.relay_events = lambda day, base, key: (calls.append("relay") or [])
+    lv.render_phone = lambda evs: (calls.append("phone") or "⟨手机⟩")
+    lv.render_desktop = lambda day, base, key: (calls.append("desktop") or "⟨电脑⟩")
+
+    def ask(t: str) -> str | None:
+        calls.clear()
+        return lv.answer_query(t, day_iso="2026-10-16",
+                               base="http://x", key="k")
+
+    # ── 仍然答不了的：一条数据都不该去拉 ──
+    for q in ("今天的日记写了吗", "我的 vault 里有什么"):
+        assert ask(q) == lv.JOURNAL_ANSWER, f"{q!r} 应该老实说 vault 没推上来"
+        assert calls == [], f"{q!r} 不该去拉任何数据，实际拉了 {calls}"
+
+    assert ask("今天走了多少步") == lv.HEALTH_ANSWER
+    assert calls == [], "手表数据还没接，不该去拉"
+
+    # ── 电脑活动现在答得了（笔记本会推快照）──
+    for q in ("我今天在电脑上干了什么", "我今天写代码了吗",
+              "我今天浏览器开了哪些网页"):
+        assert ask(q) == "⟨电脑⟩", f"{q!r} 应该走电脑快照"
+        assert calls == ["desktop"], calls
+
+    # 「电脑」优先于同在句中的其它关键词
+    assert ask("我在电脑上手机用了多久") == "⟨电脑⟩", \
+        "句中同时出现「电脑」时，应该答电脑而不是手机"
+
+    # 而「日记」比「电脑」更具体 —— 反过来会被电脑快照顶掉
+    assert ask("我今天在电脑上写的日记呢") == lv.JOURNAL_ANSWER, \
+        "日记那条更具体，必须赢过电脑活动"
+
+    # ── 答得了的：只拉该拉的 ──
+    assert ask("我今天去哪了") == "⟨位置⟩"
+    assert calls == ["loc"], calls
+
+    assert ask("手机用了多久") == "⟨手机⟩"
+    assert calls == ["relay", "phone"], calls
+
+    assert ask("今天解锁几次") == "⟨手机⟩"
+    assert calls == ["relay", "phone"], calls
+
+    # 两个都问到 → 两个都答，不猜他想问哪个
+    got = ask("今天去哪了，手机用了多久")
+    assert got == "⟨位置⟩\n\n⟨手机⟩", got
+    assert calls == ["loc", "relay", "phone"], calls
+
+    # ⚠️ 一边挂了不该拖垮另一边：两份数据、两条链路，各自独立。
+    def _boom(day):
+        calls.append("loc")
+        raise lv.LiveUnavailable("Dawarich 挂了")
+
+    lv.render_location = _boom
+    got = ask("今天去哪了，手机用了多久")
+    assert "Dawarich 挂了" in got and "⟨手机⟩" in got, got
+
+    # ── 认不出来时**不能**默默去出题 ──
+    assert ask("这是啥？") == lv.UNKNOWN_ANSWER, "带问号又没命中的，要明说能答什么"
+    assert calls == []
+
+    # ── 「随便一句就出题」这个手感要保住（返回 None = 交给调用方去出题）──
+    for t in ("", "   ", "?", "在吗", "给我题"):
+        assert ask(t) is None, f"{t!r} 应该落到「给我题」，而不是被当成查询"
+
+    # ── 那两句「答不了」必须说清**为什么**，不能是干巴巴的「不支持」──
+    assert "Obsidian" in lv.JOURNAL_ANSWER
+    assert "没有推到服务器" in lv.JOURNAL_ANSWER
+    # 「没推过」时要把人引到那个能修的地方去，不能只说一句「没有数据」
+    assert "push_desktop.py" in lv.DESKTOP_NO_DATA
+    assert "Gadgetbridge" in lv.HEALTH_ANSWER
+
+
+check("feishu: 路由从窄到宽 —— 日记/手表说答不了，电脑/位置/手机各拉各的",
+      t_feishu_live_routing)
 
 
 # ── 7e. Gadgetbridge 表选择 ────────────────────────────────────────
