@@ -66,6 +66,16 @@ ExecStart=/opt/lifelogging/venv/bin/python /opt/lifelogging/repo/server/feishu-b
 Restart=always
 RestartSec=5
 
+# ⚠️ **配置错了就别重启** —— 重启一百次也还是错的。
+#    feishu_bot.py 在配置有问题时用退出码 2 退出（EXIT_CONFIG），这行让它
+#    停下来等人，而不是每 5 秒重来一次。
+#
+#    实测踩到（2026-10-16）：env 里留着中文占位符，日志被同一句
+#    「✗ FEISHU_APP_SECRET 没填…」每 5 秒刷一遍，restart counter 涨到 24。
+#    **光靠 systemd 自己的 StartLimitBurst 拦不住**：默认 5 次/10 秒，而
+#    RestartSec=5 意味着 10 秒里只重启 2 次，永远够不到那个上限。
+RestartPreventExitStatus=2
+
 # 和 phone_relay / close-day 同一套加固
 NoNewPrivileges=yes
 PrivateTmp=yes

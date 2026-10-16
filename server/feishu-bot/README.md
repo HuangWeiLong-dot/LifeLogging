@@ -91,6 +91,12 @@ sudo chmod 600 /etc/lifelogging/feishu-bot.env
 
 `FEISHU_OWNER_OPEN_ID` **先留空**。第 4 步会告诉你它该填什么。
 
+> 🔑 **App Secret 是对外凭据 —— 别把它贴进任何对话、截图或 issue。**
+> 拿到 App ID + Secret 的人可以完全冒充这个机器人：读它收到的所有消息、
+> 以它的身份发消息。**一旦贴出去过，就去控制台重置一次**
+> （凭证与基础信息 → App Secret → 重置），然后更新这个 env 文件并重启。
+> 日志里的 `wss://…access_key=…&ticket=…` 同理，那是临时凭据，也不该外传。
+
 ### 第 3 步：装服务
 
 ```bash
@@ -403,6 +409,7 @@ sudo cat /var/lib/lifelogging/feishu-state.json
 | 主动推送报 230013 | 你不在应用的「可用范围」里 |
 | 权限怎么都不生效 | 版本没发布，或没通过管理员审批 |
 | 同一条消息回了两次 | 3 秒规则触发了超时重推。`on_message` 里**不能**发网络请求 —— 它只该入队 |
+| 日志被同一句 `✗ …` 每 5 秒刷一遍 | 配置有问题，而 unit 是 `Restart=always`。代码对配置错用退出码 `EXIT_CONFIG=2`，unit 里 `RestartPreventExitStatus=2` 让它停下来等人。**两边必须一致**（冒烟测试里钉了这点）。⚠️ systemd 自带的 `StartLimitBurst` **拦不住**这个：默认 5 次/10 秒，而 `RestartSec=5` 意味着 10 秒里只重启 2 次，永远够不到上限 |
 | 地名显示成 `(39.9042,116.4074)` 这种坐标 | GeoNames 数据表没下来。看日志里的 `[geo]` 那行；`LIFELOGGING_DATA_DIR` 指的目录必须**可写** |
 | 问数据时回「查不到：…」 | 服务器上的 `config/config.yaml` 还没建，或 `sources.dawarich` 没填。⚠️ **这不会让服务起不来** —— 那两个模块是惰性 import 的，出题那条主链路不受影响，只是查数据不可用 |
 | 问了「电脑上的事」，它回了一段手机数据 | 路由顺序被改坏了。必须先判 `_LAPTOP_WORDS` —— 见冒烟测试里 `feishu: 先说不再说能` 那一条 |

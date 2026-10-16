@@ -86,6 +86,16 @@ RELAY_API_KEY = os.environ.get("RELAY_API_KEY", "")
 STATE_DIR = Path(os.environ.get("FEISHU_STATE_DIR", "/var/lib/lifelogging"))
 STATE_PATH = STATE_DIR / "feishu-state.json"
 
+# 配置有问题时的退出码。unit 里用 `RestartPreventExitStatus=2` 认它。
+#
+# ⚠️ **必须有这个区分。** unit 是 `Restart=always`，而「配置错了」重启一百次
+#    还是错的 —— 实测：env 里留着中文占位符时，日志被同一句话每 5 秒刷一遍，
+#    一直刷到你把值改对（restart counter 涨到了 24）。
+#    光靠 systemd 自己的 StartLimitBurst **拦不住**：默认是 5 次/10 秒，而
+#    RestartSec=5 意味着 10 秒里只重启 2 次，永远够不到那个上限。
+#    分开退出码之后：配置错 → 停下来等人；运行时崩（长连接断了等）→ 照常重连。
+EXIT_CONFIG = 2
+
 # 每天几点主动推一次（本地时间）。留空 = 不主动推，只被动应答。
 PUSH_AT = os.environ.get("FEISHU_PUSH_AT", "08:30")
 
@@ -705,7 +715,8 @@ def main() -> int:
         #    「连上了但什么都不回」的形式出现，比直接退难查得多。
         for p in problems:
             print(f"  ✗ {p}", file=sys.stderr)
-        return 1
+        # EXIT_CONFIG 而不是 1：让 systemd **不要**重启（见上面那个常量的注释）。
+        return EXIT_CONFIG
     run()
     return 0
 

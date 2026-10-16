@@ -1154,6 +1154,50 @@ check("placeholder: 中文占位符 / 各种 REPLACE 写法，三处判断同义
       t_placeholder_detection)
 
 
+def t_feishu_exit_codes():
+    """配置错要用**专属退出码**退出，而且 unit 里必须认这个码。
+
+    ⚠️ 实测（2026-10-16）：env 里留着中文占位符时，`Restart=always` +
+       `RestartSec=5` 让日志被同一句「✗ FEISHU_APP_SECRET 没填…」每 5 秒刷一遍，
+       restart counter 涨到 24 才停（因为人把它改对了）。
+       systemd 自己的 StartLimitBurst **拦不住** —— 默认 5 次/10 秒，而 5 秒一次
+       意味着 10 秒里只重启 2 次，永远够不到上限。
+
+    这个测试钉的是**两半**：代码得用那个码退出，unit 得认那个码。
+    任一边改了没跟上，整套就静默退回「每 5 秒刷屏」。
+    """
+    import importlib.util
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "fb_ec", root / "server" / "feishu-bot" / "feishu_bot.py")
+    fb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fb)
+
+    assert fb.EXIT_CONFIG not in (0, 1), \
+        "0 是成功、1 是普通出错，配置错要用一个专属的码"
+
+    # 带着错配置启动 → 必须用那个码退出，而不是 1
+    old_id, old_secret, old_argv = fb.APP_ID, fb.APP_SECRET, sys.argv
+    fb.APP_ID, fb.APP_SECRET = "cli_你的appid", "REPLACE_ME"
+    sys.argv = ["feishu_bot.py"]
+    try:
+        rc = fb.main()
+    finally:
+        fb.APP_ID, fb.APP_SECRET, sys.argv = old_id, old_secret, old_argv
+    assert rc == fb.EXIT_CONFIG, f"配置错时该退 {fb.EXIT_CONFIG}，实际 {rc}"
+
+    # 另一半：unit 里必须真的认这个码
+    unit = (root / "server" / "feishu-bot"
+            / "lifelogging-feishu-bot.service").read_text(encoding="utf-8")
+    assert f"RestartPreventExitStatus={fb.EXIT_CONFIG}" in unit, \
+        "unit 没认这个退出码 —— 那它就会继续每 5 秒重启一次"
+
+
+check("feishu: 配置错用专属退出码，且 unit 里认它（两边必须一致）",
+      t_feishu_exit_codes)
+
+
 # ── 7d-3. 日记中继 ──────────────────────────────────────────────────
 print("\n[21] Journal relay")
 
