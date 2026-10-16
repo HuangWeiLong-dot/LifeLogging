@@ -130,15 +130,24 @@ sudo journalctl -u lifelogging-feishu-bot -f
 
 ## 验证
 
+> ⚠️ **手工跑这两个自检时，必须先把 env 文件读进来。**
+> `sudo -E` 保留的是**你当前 shell** 的环境变量，它**不会**去读
+> `/etc/lifelogging/*.env` —— 那是 systemd 启动服务时才做的事。
+> 所以直接 `sudo -E python feishu_bot.py --check` 会报「FEISHU_APP_ID 没填」，
+> 而那个文件其实是好的。下面用 `set -a; . 文件` 显式读进来。
+
 ```bash
 # 1. 配置和中继连通性（不连飞书也能查）
-sudo -E /opt/lifelogging/venv/bin/python \
-     /opt/lifelogging/repo/server/feishu-bot/feishu_bot.py --check
+sudo sh -c 'set -a; . /etc/lifelogging/feishu-bot.env; . /etc/lifelogging/relay.env; set +a; \
+  exec /opt/lifelogging/venv/bin/python \
+  /opt/lifelogging/repo/server/feishu-bot/feishu_bot.py --check'
 
 # 2. 主动推送自检 —— 不经过任何事件，专测「主动」这条路
+#    （先停服务，免得两边同时连着同一个应用）
 sudo systemctl stop lifelogging-feishu-bot
-sudo -E /opt/lifelogging/venv/bin/python \
-     /opt/lifelogging/repo/server/feishu-bot/feishu_bot.py --push-test "自检"
+sudo sh -c 'set -a; . /etc/lifelogging/feishu-bot.env; . /etc/lifelogging/relay.env; set +a; \
+  exec /opt/lifelogging/venv/bin/python \
+  /opt/lifelogging/repo/server/feishu-bot/feishu_bot.py --push-test "自检"'
 # 期望：手机飞书上收到「自检」
 sudo systemctl start lifelogging-feishu-bot
 ```
@@ -297,9 +306,12 @@ sudo journalctl -u lifelogging-live-questions -n 40 --no-pager
 先干跑一次看看它会问什么（不推、不落盘）：
 
 ```bash
-sudo -E /opt/lifelogging/venv/bin/python \
+sudo /opt/lifelogging/venv/bin/python \
      /opt/lifelogging/repo/scripts/live_questions.py --dry-run
 ```
+
+（这个脚本**不需要** env 文件 —— 中继地址和 key 它从 config.yaml 读，
+所以不用上面那种 `set -a; . 文件` 的写法。）
 
 ### 地名需要一份城市数据表
 
