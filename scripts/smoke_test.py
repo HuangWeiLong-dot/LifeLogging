@@ -1198,6 +1198,65 @@ check("feishu: 配置错用专属退出码，且 unit 里认它（两边必须�
       t_feishu_exit_codes)
 
 
+def t_feishu_relay_base():
+    """中继地址不能写死 —— 它绑的是 Tailscale 地址，而那是机器相关的。
+
+    ⚠️ 实测踩到：unit 里默认值写的是 127.0.0.1，而中继绑在 100.127.41.49。
+       后果**完全静默**：机器人连飞书一切正常、日志一片祥和，只是每一次中继
+       调用都失败 —— 表现是「收得到消息，答案从来不落库」。
+       讽刺的是那个 unit 的注释里恰好写了这条坑，然后自己踩了。
+    """
+    import importlib.util
+    import tempfile
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "fb_rb", root / "server" / "feishu-bot" / "feishu_bot.py")
+    fb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fb)
+
+    # ── 能从**中继自己的 unit** 里问出地址 ──
+    with tempfile.TemporaryDirectory() as td:
+        u = Path(td) / "lifelogging-relay.service"
+        u.write_text(
+            "[Service]\n"
+            "Environment=RELAY_HOST=100.127.41.49\n"
+            "Environment=RELAY_PORT=8788\n"
+            "Environment=RELAY_DATA_DIR=/var/lib/lifelogging\n",
+            encoding="utf-8")
+        old_unit, old_base = fb.RELAY_UNIT_FILE, fb.RELAY_BASE
+        fb.RELAY_UNIT_FILE, fb.RELAY_BASE = u, ""
+        try:
+            cands = fb.relay_base_candidates()
+        finally:
+            fb.RELAY_UNIT_FILE, fb.RELAY_BASE = old_unit, old_base
+        assert "http://100.127.41.49:8788" in cands, cands
+        assert any("127.0.0.1" in c for c in cands), "本机回环也要留着当兜底"
+        assert len(cands) == len(set(cands)), f"候选里有重复：{cands}"
+
+    # 显式配置的必须排第一（要覆盖时它得赢）
+    old_base = fb.RELAY_BASE
+    fb.RELAY_BASE = "http://example.invalid:9999"
+    try:
+        assert fb.relay_base_candidates()[0] == "http://example.invalid:9999"
+    finally:
+        fb.RELAY_BASE = old_base
+
+    # ── ⚠️ 另一半：unit 里**不能**再写死一个默认地址 ──
+    unit = (root / "server" / "feishu-bot"
+            / "lifelogging-feishu-bot.service").read_text(encoding="utf-8")
+    for line in unit.splitlines():
+        s = line.strip()
+        if s.startswith("Environment=FEISHU_RELAY_BASE="):
+            raise AssertionError(
+                f"unit 里又写死了中继地址，而那台机器上多半不是它：{s}\n"
+                "    要么删掉（让程序自己去问），要么确认它真的是那个地址。")
+
+
+check("feishu: 中继地址去问中继自己的 unit，不在 unit 里写死",
+      t_feishu_relay_base)
+
+
 # ── 7d-3. 日记中继 ──────────────────────────────────────────────────
 print("\n[21] Journal relay")
 

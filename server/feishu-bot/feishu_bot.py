@@ -80,8 +80,14 @@ APP_ID = os.environ.get("FEISHU_APP_ID", "")
 APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
 OWNER_OPEN_ID = os.environ.get("FEISHU_OWNER_OPEN_ID", "")
 
-RELAY_BASE = os.environ.get("FEISHU_RELAY_BASE", "http://127.0.0.1:8788").rstrip("/")
+RELAY_BASE = os.environ.get("FEISHU_RELAY_BASE", "").rstrip("/")
 RELAY_API_KEY = os.environ.get("RELAY_API_KEY", "")
+
+# 中继的 unit 文件。用它问出中继到底绑在哪个地址 —— 见 relay_base_candidates()。
+RELAY_UNIT_FILE = Path(
+    os.environ.get("FEISHU_RELAY_UNIT",
+                   "/etc/systemd/system/lifelogging-relay.service"))
+RELAY_PORT_DEFAULT = 8788
 
 STATE_DIR = Path(os.environ.get("FEISHU_STATE_DIR", "/var/lib/lifelogging"))
 STATE_PATH = STATE_DIR / "feishu-state.json"
@@ -159,6 +165,59 @@ def check_config() -> list[str]:
     return problems
 
 
+def relay_base_candidates() -> list[str]:
+    """中继可能在哪。按可信度排序。
+
+    ⚠️ **为什么不能写死一个默认值。**
+
+        中继在服务器上绑的是 **Tailscale 地址**（`phone-relay/README.md` 第 4 步
+        要求的，为了让手机连得上），**不是 127.0.0.1**。那个地址是机器相关的，
+        写不进要进 git 的 unit 文件。
+
+        而猜错的代价很大，而且**完全静默**：机器人连飞书一切正常、日志一片祥和，
+        只是每一次中继调用都失败 —— 表现是「收得到消息，答案从来不落库」。
+        实测踩到过：unit 里那行默认值就是 127.0.0.1，而中继绑在 100.127.41.49。
+
+        所以这里**去问中继自己的 unit**：它和本服务是并排部署的同一个中继，
+        unit 里那行 `Environment=RELAY_HOST=` 就是权威答案。
+        （只读文件，不用起子进程；ProtectSystem=strict 让 /etc 只读，但读得到。）
+    """
+    out: list[str] = []
+    if RELAY_BASE:
+        out.append(RELAY_BASE)          # 显式配置的最高优先
+
+    try:
+        txt = RELAY_UNIT_FILE.read_text(encoding="utf-8")
+    except OSError:
+        txt = ""
+    host = port = ""
+    for line in txt.splitlines():
+        line = line.strip()
+        if line.startswith("Environment=RELAY_HOST="):
+            host = line.split("=", 2)[2].strip()
+        elif line.startswith("Environment=RELAY_PORT="):
+            port = line.split("=", 2)[2].strip()
+    if host and port:
+        out.append(f"http://{host}:{port}")
+
+    out.append(f"http://127.0.0.1:{RELAY_PORT_DEFAULT}")
+    # 去重但保序
+    seen: set[str] = set()
+    return [c for c in out if not (c in seen or seen.add(c))]
+
+
+def pick_relay_base() -> str:
+    """挑第一个**真的应答**的候选。一个都不应答就返回第一个候选（照旧去撞）。"""
+    cands = relay_base_candidates()
+    for cand in cands:
+        try:
+            if httpx.get(f"{cand}/health", timeout=3.0).status_code == 200:
+                return cand
+        except Exception:  # noqa: BLE001
+            continue
+    return cands[0] if cands else f"http://127.0.0.1:{RELAY_PORT_DEFAULT}"
+
+
 def check_relay() -> list[str]:
     """中继连通性 + **新版路由在不在**。
 
@@ -167,30 +226,46 @@ def check_relay() -> list[str]:
        每次拉题目都 404。
     """
     problems: list[str] = []
-    headers = {"X-API-Key": RELAY_API_KEY}
-    try:
-        r = httpx.get(f"{RELAY_BASE}/health", timeout=5.0)
-        print(f"  /health -> {r.status_code} {r.text[:120]}")
-    except Exception as e:  # noqa: BLE001
+    cands = relay_base_candidates()
+    print(f"  候选地址：{', '.join(cands)}")
+
+    good = None
+    for cand in cands:
+        try:
+            r = httpx.get(f"{cand}/health", timeout=5.0)
+            print(f"    {cand}/health -> {r.status_code}")
+            if r.status_code == 200:
+                good = cand
+                break
+        except Exception as e:  # noqa: BLE001
+            print(f"    {cand}/health -> 连不上（{type(e).__name__}）")
+
+    if good is None:
         problems.append(
-            f"连不上中继 {RELAY_BASE}：{e}\n"
-            "    ⚠️ 常见原因：中继绑的是 Tailscale 地址，而这里配的是 127.0.0.1。\n"
-            "       `systemctl show lifelogging-relay -p Environment | tr ' ' '\\n' | grep RELAY_HOST`\n"
-            "       然后把 FEISHU_RELAY_BASE 改成同一个地址。"
+            "上面这些地址一个都连不上中继。\n"
+            "    先确认它活着：  systemctl status lifelogging-relay\n"
+            "    再看它绑在哪：  sudo systemctl show lifelogging-relay -p Environment"
+            " | tr ' ' '\\n' | grep RELAY_HOST\n"
+            "    然后显式覆盖：  在 feishu-bot 的 unit 里设\n"
+            "        Environment=FEISHU_RELAY_BASE=http://<那个地址>:<端口>"
         )
         return problems
 
+    print(f"  → 用 {good}")
     try:
-        r = httpx.get(f"{RELAY_BASE}/questions/pending", headers=headers, timeout=5.0)
+        r = httpx.get(f"{good}/questions/pending",
+                      headers={"X-API-Key": RELAY_API_KEY}, timeout=5.0)
         if r.status_code == 404:
             problems.append(
                 "中继上没有 /questions/pending —— 跑的还是旧版代码。\n"
-                "    在服务器上 `sudo /opt/lifelogging/repo/server/deploy.sh` 更新它。"
+                "    在服务器上 `sudo /opt/lifelogging/repo/server/deploy.sh` 更新它；\n"
+                "    ⚠️ 你要是已经手工 git pull 过，deploy.sh 会认为「没有变化」而"
+                "**跳过重启** —— 直接 `sudo systemctl restart lifelogging-relay`。"
             )
         elif r.status_code == 401:
             problems.append("中继返回 401 —— RELAY_API_KEY 不对。")
         else:
-            print(f"  /questions/pending -> {r.status_code} {r.text[:160]}")
+            print(f"    /questions/pending -> {r.status_code} {r.text[:160]}")
     except Exception as e:  # noqa: BLE001
         problems.append(f"打 /questions/pending 出错：{e}")
     return problems
@@ -653,6 +728,18 @@ def on_message(data) -> None:
 
 def run() -> None:
     import lark_oapi as lark
+
+    # ⚠️ 启动时**当场**定下中继地址，并且打出来。
+    #    定错了的代价是静默的（见 relay_base_candidates 的注释），所以这一行
+    #    日志是这个服务里最该被人看见的一行。
+    global RELAY_BASE
+    picked = pick_relay_base()
+    if picked != RELAY_BASE:
+        tail = f"（配置里是 {RELAY_BASE}）" if RELAY_BASE else ""
+        print(f"→ 中继地址自动选定 {picked}{tail}")
+    else:
+        print(f"→ 中继地址 {picked}")
+    RELAY_BASE = picked
 
     if not OWNER_OPEN_ID:
         print("⚠️  没配 FEISHU_OWNER_OPEN_ID —— 被动应答能用，主动推送不能。",

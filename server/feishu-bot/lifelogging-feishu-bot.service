@@ -38,10 +38,18 @@ EnvironmentFile=-/etc/lifelogging/feishu-bot.env
 # 这样轮换密钥只需要改一处。
 EnvironmentFile=-/etc/lifelogging/relay.env
 
-# ⚠️ 中继**绑的是 Tailscale 地址**（生产环境的设置），不是 127.0.0.1。
-#    不对的话这里每一次调用都失败，而现象是「机器人收得到消息、答案从来不落库」。
-#    查：systemctl show lifelogging-relay -p Environment | tr ' ' '\n' | grep RELAY_HOST
-Environment=FEISHU_RELAY_BASE=http://127.0.0.1:8788
+# ⚠️ **这里刻意不写死中继地址。** 中继绑的是 **Tailscale 地址**（生产环境的
+#    设置，为了让手机连得上），而那个地址是机器相关的，写不进要进 git 的 unit。
+#    写死一个错的默认值的后果是**静默**的：机器人连飞书一切正常、日志一片祥和，
+#    只是每一次中继调用都失败 —— 表现是「收得到消息，答案从来不落库」。
+#    实测踩到过。
+#
+#    所以由程序自己去问：feishu_bot.py 的 relay_base_candidates() 会读中继自己的
+#    unit（/etc/systemd/system/lifelogging-relay.service）里那行 RELAY_HOST，
+#    再挨个探一遍 /health，挑第一个应答的，并把结果打进日志。
+#
+#    真要覆盖（比如中继在别的机器上），再把这行打开：
+# Environment=FEISHU_RELAY_BASE=http://100.127.41.49:8788
 Environment=FEISHU_STATE_DIR=/var/lib/lifelogging
 Environment=FEISHU_TZ=Asia/Shanghai
 # ⚠️ 城市数据表（GeoNames）放哪。默认是仓库里的 data/，但下面 ProtectSystem=strict
