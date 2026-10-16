@@ -1111,6 +1111,49 @@ check("feishu: 自由问答每日封顶（在调模型之前拦，且不牵连�
       t_feishu_freeform_cap)
 
 
+def t_placeholder_detection():
+    """「还没填」的判定 —— 三种写法都得认出来。
+
+    ⚠️ 实测踩到：文档里的占位符是纯英文的（cli_REPLACE_ME），但**整行连着中文
+       一起粘进去**（cli_你的真实appid）才是常态。那种值是「有」的 —— 非空、
+       也不含 REPLACE，看着完全正常 —— 然后一路跑到 SDK / httpx 里炸成一个
+       编码错误，跟「你忘了填」这个事实看不出任何关系。
+
+    ⚠️ 另一个实测踩到的：我原来写的是 startswith(\"cli-REPLACE\")（连字符），
+       而文档里的占位符是 cli_REPLACE_ME（下划线）—— 连自己写的占位符都拦不住。
+       所以现在查的是 REPLACE 这个子串，不分位置、不分大小写。
+    """
+    import importlib.util
+
+    def load(name: str, path: Path):
+        spec = importlib.util.spec_from_file_location(name, path)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m
+
+    root = Path(__file__).resolve().parent.parent
+    fb = load("fb_ph", root / "server" / "feishu-bot" / "feishu_bot.py")
+    lq = load("lq_ph", root / "scripts" / "live_questions.py")
+    pd = load("pd_ph", root / "scripts" / "push_desktop.py")
+
+    for bad in ("", "   ", "REPLACE_ME", "cli_REPLACE_ME", "cli-REPLACE-ME",
+                "REPLACE_WITH_THE_RELAY_KEY", "你的key", "cli_你的真实appid",
+                "sk-你的key"):
+        assert fb.looks_like_placeholder(bad), f"{bad!r} 该被认成「还没填」"
+
+    for good in ("cli_a1b2c3d4", "sk-9f8e7d6c", "rO5b4H6l6Rw_R_4DBwbv"):
+        assert not fb.looks_like_placeholder(good), f"{good!r} 是正常值，别误伤"
+
+    # ⚠️ 三处的判断必须**同义**。同一个 config 在两个脚本里一个过、一个不过，
+    #    是那种「换个脚本跑就好了」的幽灵故障。
+    for v in ("", "REPLACE_ME", "你的key", "http://100.127.41.49:8788", "cli_a1b2c3d4"):
+        assert fb.looks_like_placeholder(v) == lq._unfilled(v) == pd._unfilled(v), v
+
+
+check("placeholder: 中文占位符 / 各种 REPLACE 写法，三处判断同义",
+      t_placeholder_detection)
+
+
 # ── 7d-3. 日记中继 ──────────────────────────────────────────────────
 print("\n[21] Journal relay")
 

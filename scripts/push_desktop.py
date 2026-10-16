@@ -68,12 +68,26 @@ TOP_APPS = 15
 TOP_TITLES = 8
 
 
+def _unfilled(v: str) -> bool:
+    """空、占位符、或混了非 ASCII —— 都算「还没填」。
+
+    ⚠️ 和 live_questions.py 里那个是同一条判断，刻意保持一致。
+       （不抽到 common.py 是因为这几个脚本各自独立跑，仓库里向来是各持一份；
+        但**判断的含义**必须一样，不然同一个 config 在两个脚本里一个过、一个不过。）
+    """
+    if not v or not v.strip():
+        return True
+    if "REPLACE" in v.upper():
+        return True
+    return any(ord(c) > 127 for c in v)
+
+
 def relay() -> tuple[str, str] | None:
     """中继地址和 key。
 
-    ⚠️ 占位符要**两个都查**：配置模板里写的是 `REPLACE_ME`，而几个老脚本
-       只查 `REPLACE_WITH` —— 于是 `api_key: "REPLACE_ME"` 会一路通过检查，
-       最后以一个 401 的形式出现，看不出是「你忘了填」。
+    ⚠️ 占位符要查**子串**：配置模板里写的是 `REPLACE_ME`，而几个老脚本只查
+       `REPLACE_WITH` —— 于是 `api_key: "REPLACE_ME"` 会一路通过检查，最后
+       以一个 401 的形式出现，看不出是「你忘了填」。
     """
     cfg = (CFG.get("sources") or {}).get("phone_relay") or {}
     if not cfg.get("enabled"):
@@ -81,9 +95,8 @@ def relay() -> tuple[str, str] | None:
         return None
     base = (cfg.get("api_base") or "").rstrip("/")
     key = cfg.get("api_key") or ""
-    if (not base or "REPLACE_WITH" in base or "REPLACE_ME" in base
-            or not key or "REPLACE_WITH" in key or "REPLACE_ME" in key):
-        print("  ⚠️  phone_relay 开着，但 config.yaml 里还是占位符（没填服务器地址或 key）")
+    if _unfilled(base) or _unfilled(key):
+        print("  ⚠️  phone_relay 开着，但 config.yaml 里还是占位符（或混了非 ASCII）")
         return None
     return base, key
 

@@ -106,17 +106,45 @@ RECENT_MAX = 50          # 记住多少条 message_id，用来挡超时重推
 
 
 # ── 配置自检 ────────────────────────────────────────────────────────
+def looks_like_placeholder(v: str) -> bool:
+    """这个值看着像「还没填」吗？
+
+    ⚠️ **非 ASCII 一律算没填**，这条是重点。文档里的占位符是纯英文的
+       （`cli_REPLACE_ME`），但真正会发生的是：**整个占位符被连着中文一起
+       粘进去**（`cli_你的真实appid`）—— 值是「有」的，非空、也不含
+       REPLACE，看着完全正常。然后它会一路跑到 SDK 里，报出来的是一个
+       内部的编码错误，跟「你忘了填」这个事实看不出任何关系。
+
+       仓库里为同一件事已经吃过一次亏，见 `common.require_api_key()` 的注释
+       （那次是 DeepSeek 的 key 被写成了 `sk-你的key`）。这里把那条教训
+       直接做成检查。
+
+    ⚠️ 也别只查一个前缀：我以前写的是 `startswith("cli-REPLACE")`（连字符），
+       而文档里的占位符是 `cli_REPLACE_ME`（下划线）—— 连自己写的占位符都
+       拦不住，等于没写。所以这里查 `REPLACE` 这个**子串**，不分大小写。
+    """
+    if not v or not v.strip():
+        return True
+    if "REPLACE" in v.upper():
+        return True
+    return any(ord(ch) > 127 for ch in v)
+
+
 def check_config() -> list[str]:
     """返回一串「人类可读的问题」。空列表 = 没问题。"""
     problems: list[str] = []
-    if not APP_ID or APP_ID.startswith("cli-REPLACE"):
-        problems.append("FEISHU_APP_ID 没填（或还是占位符）")
-    if not APP_SECRET or APP_SECRET.startswith("REPLACE"):
-        problems.append("FEISHU_APP_SECRET 没填（或还是占位符）")
-    if not RELAY_API_KEY:
+    if looks_like_placeholder(APP_ID):
         problems.append(
-            "RELAY_API_KEY 没填。它在中继的 /etc/lifelogging/relay.env 里，"
-            "unit 用 EnvironmentFile 把那份也读进来了，确认那行还在。"
+            "FEISHU_APP_ID 没填、还是占位符，或者里面混了非 ASCII 字符\n"
+            "     （中文占位符会被原样当凭据用，报出来的是 SDK 内部的编码错，看不出真因）"
+        )
+    if looks_like_placeholder(APP_SECRET):
+        problems.append("FEISHU_APP_SECRET 没填、还是占位符，或混了非 ASCII 字符")
+    if looks_like_placeholder(RELAY_API_KEY):
+        problems.append(
+            "RELAY_API_KEY 没填（或还是占位符）。它在中继的 "
+            "/etc/lifelogging/relay.env 里，unit 用 EnvironmentFile 把那份也读进来了，"
+            "确认那行还在。"
         )
     return problems
 

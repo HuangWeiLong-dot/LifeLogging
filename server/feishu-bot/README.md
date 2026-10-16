@@ -80,9 +80,14 @@ EOF
 sudo chmod 600 /etc/lifelogging/feishu-bot.env
 ```
 
-> ⚠️ **占位符必须纯 ASCII**。写成带中文的（比如 `cli_你的appid`）会被原样
-> 当成真值用，而报错会是 SDK 内部一个看不懂的编码错。这一条在中继那边
-> 实测踩过一次（见 `../README.md`）。
+> ⚠️ **这两个值你必须换成真的，别把上面的占位符原样留着。**
+> 写成带中文的（`cli_你的真实appid`）会被**原样当凭据用** —— 值是有的、非空、
+> 也不含 REPLACE，看着完全正常 —— 然后报出来的是 SDK 内部一个看不懂的编码错。
+>
+> 现在程序会自己拦住这种：`check_config()` 对「空 / 含 REPLACE / 混了非 ASCII」
+> 一律判成没填，启动时直接退出并说清是哪个变量。日志里看到
+> `✗ FEISHU_APP_ID 没填、还是占位符，或者里面混了非 ASCII 字符` 就是这里没改。
+> （同一件事仓库里吃过一次亏，见 `scripts/common.py` 的 `require_api_key()`。）
 
 `FEISHU_OWNER_OPEN_ID` **先留空**。第 4 步会告诉你它该填什么。
 

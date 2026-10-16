@@ -73,6 +73,25 @@ MIN_SILENCE_MIN = 90     # 手机静默多久才值得问
 MIN_APP_MIN = 150        # 某个应用前台多久才值得问
 
 
+def _unfilled(v: str) -> bool:
+    """空、占位符、或混了非 ASCII —— 都算「还没填」。
+
+    ⚠️ 非 ASCII 那条是重点。占位符被连着中文一起粘进去时
+       （`REPLACE_ME` 写成 `你的key`），值是**有**的、非空、也不含 REPLACE，
+       看着完全正常 —— 然后它会在 httpx 拼请求头时炸成一个编码错误，
+       跟「你忘了填」这个事实看不出任何关系。仓库里为同一件事吃过一次亏，
+       见 common.require_api_key() 的注释。
+
+    ⚠️ 也别只查一个前缀：老脚本查的是 `REPLACE_WITH`，而配置模板里写的是
+       `REPLACE_ME` —— 于是「忘了填」会以一个 401 的形式出现。这里查子串。
+    """
+    if not v or not v.strip():
+        return True
+    if "REPLACE" in v.upper():
+        return True
+    return any(ord(c) > 127 for c in v)
+
+
 def relay() -> tuple[str, str] | None:
     cfg = (CFG.get("sources") or {}).get("phone_relay") or {}
     if not cfg.get("enabled"):
@@ -80,10 +99,8 @@ def relay() -> tuple[str, str] | None:
         return None
     base = (cfg.get("api_base") or "").rstrip("/")
     key = cfg.get("api_key") or ""
-    # 两个占位符前缀都查 —— 配置模板里写的是 REPLACE_ME，只查 REPLACE_WITH 会漏。
-    if (not base or "REPLACE_WITH" in base or "REPLACE_ME" in base
-            or not key or "REPLACE_WITH" in key or "REPLACE_ME" in key):
-        print("  ⚠️  phone_relay 开着，但 config.yaml 里还是占位符")
+    if _unfilled(base) or _unfilled(key):
+        print("  ⚠️  phone_relay 开着，但 config.yaml 里还是占位符（或混了非 ASCII）")
         return None
     return base, key
 
