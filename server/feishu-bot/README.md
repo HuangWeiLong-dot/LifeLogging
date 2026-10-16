@@ -127,12 +127,27 @@ sudo journalctl -u lifelogging-feishu-bot -f
 
 然后**从你的手机飞书给机器人发一句话**，在日志里找到：
 
+```bash
+sudo journalctl -u lifelogging-feishu-bot -n 50 --no-pager | grep '\[recv\]'
+# [recv] open_id=ou_xxxxxxxx chat=p2p text='...'
 ```
-[recv] open_id=ou_xxxxxxxx chat=p2p text='...'
-```
+
+> ⚠️ **要 grep `[recv]`，不要 grep `open_id`。** 启动时那句警告
+> （「没配 FEISHU_OWNER_OPEN_ID…」）里就含 `open_id` 这四个字母，按它 grep
+> 出来全是那句警告，看不出到底有没有收到消息 —— 实测被这个绕了一次。
 
 把那个 `ou_…` 填回 `/etc/lifelogging/feishu-bot.env` 的 `FEISHU_OWNER_OPEN_ID`，
 再 `sudo systemctl restart lifelogging-feishu-bot`。
+
+> ⚠️ **看不 `[recv]` 行时的两个方向，别混：**
+>
+> 1. **一条都没有** → 事件根本没到。去开发者后台看「事件与回调」，
+>    确认订阅方式 = 长连接、事件里有 `im.message.receive_v1`，
+>    并且**改完必须重新发版本**才生效。另一种表现是：机器人聊天窗连输入框
+>    都没有（提示 Can't message this bot yet）——那也是同一个原因。
+> 2. **有别的行、就是没有 `[recv]`** → 见上面那条 `sys.stdout.reconfigure`：
+>    这个脚本已经把 stdout 改成行缓冲了，如果你看到的是旧版行为（自己 print
+>    的行迟迟不出现、而 `[Lark]` 的行正常），说明服务器上跑的还是旧代码。
 
 > 这是拿到自己 open_id 的**零权限**办法：不需要 `contact` 权限，只要有人给
 > 机器人发过一句话。另一个办法（按手机号查 `batch_get_id`）要多一个权限，不值。
@@ -400,6 +415,8 @@ sudo cat /var/lib/lifelogging/feishu-state.json
 
 | 症状 | 多半是 |
 |---|---|
+| 机器人聊天窗**连输入框都没有**，提示 `Can't message this bot yet` | 事件订阅缺 `im.message.receive_v1`。官方 FAQ 的原话：机器人必须订阅「接收消息」事件，聊天窗口才会出现对话框。**和版本发布、可用范围无关** —— 那两样都对也一样会这样。改完必须**重新发版本** |
+| 自己 `print` 的行迟迟不出现，而 `[Lark] …` 的行正常 | stdout 被块缓冲了（systemd 捕获的是管道）。旧版代码有这个问题，已用 `sys.stdout.reconfigure(line_buffering=True)` 修掉 —— 还这样的话说明服务器上跑的是旧代码 |
 | 服务 active，日志里没有 `connected to wss://` | 出站被挡（**不要**给 unit 加 `IPAddressAllow=`/`RestrictAddressFamilies=`），或 App ID/Secret 不对 |
 | 起不来，报 `Job for … failed because of unavailable resources or another system error` | 十有八九是 `/etc/lifelogging/feishu-bot.env` **还没建**。这个 unit 里两个 `EnvironmentFile=` 都带了 `-`（见文件里的注释），所以正常情况下它会照常启动、由程序自己报清楚 —— 你要是看到 systemd 这句，说明装的是**旧版 unit**，重装一次 |
 | 起来又立刻退出，日志里 `✗ FEISHU_APP_ID 没填（或还是占位符）` | 就是字面意思：env 文件没建，或者占位符没换成真值。见上面第 2 步 |
