@@ -378,6 +378,9 @@ sudo cat /var/lib/lifelogging/feishu-state.json
 | 症状 | 多半是 |
 |---|---|
 | 服务 active，日志里没有 `connected to wss://` | 出站被挡（**不要**给 unit 加 `IPAddressAllow=`/`RestrictAddressFamilies=`），或 App ID/Secret 不对 |
+| 起不来，报 `Job for … failed because of unavailable resources or another system error` | 十有八九是 `/etc/lifelogging/feishu-bot.env` **还没建**。这个 unit 里两个 `EnvironmentFile=` 都带了 `-`（见文件里的注释），所以正常情况下它会照常启动、由程序自己报清楚 —— 你要是看到 systemd 这句，说明装的是**旧版 unit**，重装一次 |
+| 起来又立刻退出，日志里 `✗ FEISHU_APP_ID 没填（或还是占位符）` | 就是字面意思：env 文件没建，或者占位符没换成真值。见上面第 2 步 |
+| `sudo /opt/lifelogging/repo/server/deploy.sh` 报 `command not found` | 那个文件的**可执行位**。git 在 Linux 上会记录权限位，而仓库里它一直是 `100644` —— clone 出来就没有 +x，而文档里 5 处都把它当命令直接跑。已于 2026-10-16 修成 `100755`；老克隆 `git pull` 一次即可生效，急着用就先 `sudo bash /opt/lifelogging/repo/server/deploy.sh` |
 | 收到了消息，但答案从来不落库 | `FEISHU_RELAY_BASE` 对不上中继实际绑的地址。查 `systemctl show lifelogging-relay -p Environment` |
 | 每次重启都把问过的题重问一遍 | 状态文件写不下去 —— unit 少了 `ReadWritePaths=/var/lib/lifelogging` |
 | 主动推送报 230013 | 你不在应用的「可用范围」里 |

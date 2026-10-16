@@ -25,10 +25,18 @@ WorkingDirectory=/opt/lifelogging/repo
 
 # Feishu 的 App ID / App Secret 和 OWNER_OPEN_ID 在这里。
 # **不要写进这个文件** —— 它是要进 git 的。
-EnvironmentFile=/etc/lifelogging/feishu-bot.env
+#
+# ⚠️ 前面那个 `-` 是**故意加的**：加了它，文件不存在时 systemd 仍然把进程拉起来，
+#    由 feishu_bot.py 自己打出「✗ FEISHU_APP_ID 没填」然后退出 1。
+#    不加的话，systemd 会拒绝启动，而 `systemctl enable --now` 只会给你一句
+#    **「Job for … failed because of unavailable resources or another system error」**
+#    —— 那句话完全看不出是「env 文件还没建」。实测踩到过。
+#    代价：文件没了不会在 systemd 这一层报错，但少了凭据机器人本来也跑不起来，
+#    而它自己那句话比 systemd 的清楚得多。
+EnvironmentFile=-/etc/lifelogging/feishu-bot.env
 # 中继那把 key 从它自己的文件里读，而不是在 feishu-bot.env 里再抄一份 ——
 # 这样轮换密钥只需要改一处。
-EnvironmentFile=/etc/lifelogging/relay.env
+EnvironmentFile=-/etc/lifelogging/relay.env
 
 # ⚠️ 中继**绑的是 Tailscale 地址**（生产环境的设置），不是 127.0.0.1。
 #    不对的话这里每一次调用都失败，而现象是「机器人收得到消息、答案从来不落库」。

@@ -23,8 +23,9 @@ User=root
 Group=root
 WorkingDirectory=/opt/lifelogging/repo
 
-# 中继那把 key 从它自己的文件里读（config.yaml 里那份才是主，这里只是兜底）。
-EnvironmentFile=-/etc/lifelogging/relay.env
+# 它**不读** RELAY_API_KEY 环境变量 —— 中继地址和 key 都从服务器自己的
+# config/config.yaml（sources.phone_relay）里读，和 collect_phone_events.py、
+# merge_ledger.py 那几个脚本一个路子。所以这里没有 EnvironmentFile。
 
 # ⚠️ 城市数据表放哪 —— 和 feishu-bot 同一个目录。默认值是仓库里的 data/，
 #    而下面 ProtectSystem=strict 让它只读，那会导致反查地名失败并**静默**
