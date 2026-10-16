@@ -72,6 +72,23 @@ from pathlib import Path
 
 import httpx
 
+# ⚠️ **必须改成行缓冲。**
+#
+# systemd 捕获的 stdout 是**管道**，而 Python 对管道默认用**块缓冲**
+# （4/8KB）。于是 print() 出来的行会卡在缓冲区里，journal 上半天看不到 ——
+# 更糟的是它们的**时间戳会落在真正发生的那一刻之前**，因为那一行是后来
+# 才被一起写出去的。
+#
+# 这会让「我发了消息、机器人没反应」查起来完全跑偏：消息其实收到了，
+# 只是那行日志还没被冲出来。实测踩到过。
+#
+# （logging 模块走的是 stderr，不受影响 —— 所以 `[Lark] connected to wss://`
+#   一直都能看到，而自己 print 的行看不到，这个差别正是线索。）
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except (AttributeError, ValueError):  # 极老的 Python 或已被替换的流
+    pass
+
 # 让 `import live` 在「直接跑脚本」和「被 importlib 加载」两种情况下都成立。
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import live  # noqa: E402
