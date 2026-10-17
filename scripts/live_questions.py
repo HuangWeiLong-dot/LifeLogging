@@ -51,6 +51,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from collections import Counter
 from datetime import datetime, timedelta
@@ -77,6 +78,36 @@ ASK_UNTIL_HOUR = 22
 # ⚠️ 这**不是**「够久才问」的门槛 —— 每小时必问，这个值只决定
 #    「这一小时里哪件事最值得提」。路过、等红灯不算。
 MIN_STAY_MIN = 30
+
+# 晚上几点开始「一天的收尾」。到点之后不再发小时的题，改发三条总结题；
+# 答完之后机器人会用 LLM 写一段当天总结（见 feishu_bot）。
+# 留空 = 不做收尾，只发小时题。
+SUMMARY_AT = os.environ.get("LIVE_SUMMARY_AT", "21:30")
+
+
+def _summary_due(now: datetime) -> bool:
+    if not SUMMARY_AT:
+        return False
+    try:
+        hh, _, mm = SUMMARY_AT.partition(":")
+        due = now.replace(hour=int(hh), minute=int(mm or 0),
+                          second=0, microsecond=0)
+    except (TypeError, ValueError):
+        return False
+    return now >= due
+
+
+def _summary_soon(now: datetime) -> bool:
+    """离收尾不到一小时了吗？到了就别再发小时题 —— 否则晚上连着两条。"""
+    if not SUMMARY_AT:
+        return False
+    try:
+        hh, _, mm = SUMMARY_AT.partition(":")
+        due = now.replace(hour=int(hh), minute=int(mm or 0),
+                          second=0, microsecond=0)
+    except (TypeError, ValueError):
+        return False
+    return now >= due - timedelta(hours=1)
 
 
 def _unfilled(v: str) -> bool:
@@ -143,14 +174,15 @@ def qid(day: str, text: str) -> str:
     return f"{day}-{hashlib.sha1(text.encode('utf-8')).hexdigest()[:8]}"
 
 
-def make(day: str, text: str, evidence: str, key: str) -> dict:
+def make(day: str, text: str, evidence: str, key: str,
+         kind: str = "routine") -> dict:
     """实时题一律是**文字题**。
 
     ⚠️ `format="text"` 会让 apply_answers 那边永远判成「没完成」（文字题
        没有完成这个概念），这正是我们要的：实时题不该去勾任何任务，
        它只是问你一句。所以 `ref` 必须是空的。
     """
-    return {"id": qid(day, text), "kind": "routine", "format": "text",
+    return {"id": qid(day, text), "kind": kind, "format": "text",
             "text": text, "evidence": evidence, "ref": "",
             "_key": key}
 
@@ -316,16 +348,71 @@ def relay_desktop(base: str, key: str) -> dict | None:
         return None
 
 
+def summary_questions(day_iso: str, stays: list[dict],
+                      events: list[dict], snap: dict | None) -> list[dict]:
+    """晚上收尾的三题。答完之后机器人会用 LLM 写一段当天总结。
+
+    三题的用意各不相同：
+      1. 让**你自己**挑出今天最重要的一件事 —— 数据里永远没有这个。
+      2. 拿当天数据对照一下，看哪块和你的印象不一样。
+      3. 收尾时把「没做成、想留到明天」的捞出来 —— 明天的问责批会用上。
+    """
+    facts: list[str] = []
+    today = (snap or {}).get("today") or {}
+    total = float(today.get("total_hours") or 0)
+    if total:
+        cats = today.get("by_category") or []
+        top = " / ".join(f"{k} {v}h" for k, v in cats[:3])
+        facts.append(f"电脑合计 {total} 小时（{top}）")
+    places = [s for s in stays if float(s.get("minutes") or 0) >= 20]
+    if places:
+        best = max(places, key=lambda s: float(s.get("minutes") or 0))
+        facts.append(f"去过 {len(places)} 个地方，最久的是{best.get('place')}"
+                     f"（{_hm(float(best.get('minutes') or 0))}）")
+    unlocks = sum(1 for e in events if e.get("metric") == "unlock")
+    if unlocks:
+        facts.append(f"手机解锁 {unlocks} 次")
+    fact_line = "；".join(facts) if facts else "今天记录不多"
+
+    return [
+        make(day_iso, "今天最值得记住的一件事是什么？",
+             "收尾题。随便写，会进当天的日记。",
+             f"summary-{day_iso}-1", kind="summary"),
+        make(day_iso, f"今天的数据：{fact_line}。\n哪一块和你想的不一样？",
+             "数据来自电脑快照 / Dawarich / 中继。",
+             f"summary-{day_iso}-2", kind="summary"),
+        make(day_iso, "今天有什么没做成、想留到明天的？",
+             "这条会成为明天问责的线索。",
+             f"summary-{day_iso}-3", kind="summary"),
+    ]
+
+
 def build(day: Day, base: str, key: str) -> list[dict]:
     events = relay_phone_events(day.iso, base, key)
     stays = today_stays(day)
     snap = relay_desktop(base, key)
     now = datetime.now(TZ)
 
-    # 已经发过的（按小时 key）—— 同一小时只问一次
+    # 已经发过的（按 key）—— 同一小时只问一次，收尾一天一次
     known = load_asked(day.iso)
     fired = {str(q.get("_key") or "") for q in known}
 
+    # ── 晚上收尾 ──
+    if _summary_due(now):
+        prefix = f"summary-{day.iso}"
+        if any(k.startswith(prefix) for k in fired):
+            return known                  # 今天已经收过尾了
+        try:
+            return known + summary_questions(day.iso, stays, events, snap)
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠️  收尾题生成失败：{type(e).__name__}: {e}")
+            return known
+
+    # 离收尾不到一小时就别再发小时题 —— 否则晚上连着两条。
+    if _summary_soon(now):
+        return known
+
+    # ── 每小时一题 ──
     try:
         q = rule_hourly(day.iso, stays, events, snap, now)
     except Exception as e:  # noqa: BLE001

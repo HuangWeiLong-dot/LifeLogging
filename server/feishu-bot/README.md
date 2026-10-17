@@ -76,16 +76,9 @@ sudo tee /etc/lifelogging/feishu-bot.env >/dev/null <<'EOF'
 FEISHU_APP_ID=cli_REPLACE_ME
 FEISHU_APP_SECRET=REPLACE_ME
 FEISHU_OWNER_OPEN_ID=
-# 可选：把自由问答的 LLM 调用追踪到 Langfuse。不填这两行就完全关闭。
-# LANGFUSE_PUBLIC_KEY=pk-lf-...
-# LANGFUSE_SECRET_KEY=sk-lf-...
-# LANGFUSE_BASE_URL=https://cloud.langfuse.com
 EOF
 sudo chmod 600 /etc/lifelogging/feishu-bot.env
 ```
-
-> 追踪只影响「自由问答」那颗 LLM 调用；出题、模板问答都不经过模型。
-> 全局说明见仓库根目录 README 的「可观测性（Langfuse，可选）」。
 
 > ⚠️ **这两个值你必须换成真的，别把上面的占位符原样留着。**
 > 写成带中文的（`cli_你的真实appid`）会被**原样当凭据用** —— 值是有的、非空、
@@ -289,6 +282,29 @@ sudo /opt/lifelogging/repo/server/deploy.sh
 > 既有「电脑」也有活动词，顺序反了就会一本正经地回一段手机数据 —— 答非所问，
 > 而且看着像答对了。
 
+## 记一笔（随手记录）
+
+**给机器人发任何没被识别成「查数据」的话，它都会存下来。** 例如：
+
+```
+你：今天见了老王，聊了项目
+它：记下了。（这条会进今天的日记。想让我出题就发「?」）
+```
+
+存成 `domain=manual / metric=note`，走**和中继上其他手机事件同一条管道**：
+中继 `/ingest/phone` → 当天 JSONL → 笔记本拉取 → `events.db` →
+`normalize.Timeline.notes` → 日记提示词。
+
+> ⚠️ 日记提示词里它被放在**时间块之后的第一节**，而且明确写着
+> 「these are **first-hand facts** and outrank anything inferred」。
+> 不这么说的话，模型可能用「你在 VSCode 待了 4 小时」盖掉「今天主要在陪家人」。
+>
+> ⚠️ **代价**（这是有意的取舍）：一句没命中关键词的问句（「我今天咋这么累」）
+> 不会得到回答，而是被记下来。它没丢 —— 进了当天的日记资料 —— 但也不是
+> 你要的那个答案。想明确出题就发「?」。
+
+重置/清空：`state/feishu-state.json` 里的 `asked` 按天自动清。
+
 ## 实时提问（第二个提问来源）
 
 除了笔记本晚上生成的「问责批」，服务器白天还会自己问几句 ——
@@ -393,6 +409,23 @@ sudo /opt/lifelogging/venv/bin/python \
 
 （这个脚本**不需要** env 文件 —— 中继地址和 key 它从 config.yaml 读，
 所以不用上面那种 `set -a; . 文件` 的写法。）
+
+## 晚上收尾（每日总结）
+
+每天 **21:30**（`LIVE_SUMMARY_AT`）之后，实时题换成三条**收尾题**：
+
+1. 今天最值得记住的一件事是什么？
+2. 今天的数据：电脑合计 X 小时（Work … / Life …）；手机解锁 N 次。哪一块和你想的不一样？
+3. 今天有什么没做成、想留到明天的？
+
+答完第三条，机器人会**用 LLM 写一段当天总结**发给你，并**把总结也存成一条笔记** ——
+所以它明天会出现在日记资料里，是真·记忆的一部分，而不只是聊天记录里的一句话。
+
+> ⚠️ 收尾题一天只发一次（key 前缀 `summary-<day>`）。到点前一小时就不再发
+> 小时题了，否则晚上连着两条。
+>
+> ⚠️ 总结走的是同一套每日额度（默认 10 次），费用进同一份成本台账。
+> 额度用完时只会说一句「没写成」，不会静默。
 
 ### 地名需要一份城市数据表
 

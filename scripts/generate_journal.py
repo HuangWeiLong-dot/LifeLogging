@@ -235,6 +235,32 @@ def build_user_prompt(tl: dict, day: Day, carryover: list[str]) -> str:
                  "default = rules did not recognise the app, almost certainly Other）")
     lines.append("")
 
+    # 用户在飞书里随手记下的一笔。
+    #
+    # ⚠️ 放在最前面（紧跟时间块），而且要明说它**高于推断**。
+    #    「见了老王，聊了项目」这种事实，窗口标题永远推不出来；反过来，
+    #    让模型把笔记和窗口标题放在同等地位，它可能用「你在 VSCode 待了 4 小时」
+    #    盖掉「今天主要在陪家人」这种真正重要的事。
+    notes = tl.get("notes") or []
+    if notes:
+        lines.append("## Notes — written by the user during the day")
+        lines.append("")
+        lines.append("These are things the user explicitly wanted remembered. They are")
+        lines.append("**first-hand facts** and outrank anything inferred from window titles")
+        lines.append("or location. If a note contradicts a guess of yours, the note wins.")
+        lines.append("")
+        for n in notes[:50]:
+            text = " ".join(str(n.get("text") or "").split())
+            if not text:
+                continue
+            ts = n.get("ts")
+            try:
+                hhmm = datetime.fromisoformat(str(ts)).astimezone(day.tz).strftime("%H:%M")
+            except (TypeError, ValueError):
+                hhmm = ""
+            lines.append(f"- [{hhmm}] {text}" if hhmm else f"- {text}")
+        lines.append("")
+
     health = tl.get("health") or {}
     if health:
         lines.append("## Health data")

@@ -380,6 +380,28 @@ def relay_answer(qid: str, value: str, note: str = "") -> dict:
     return r.json()
 
 
+def relay_note(text: str) -> dict:
+    """把一句话存成**笔记**，走和中继上其他手机事件同一条管道。
+
+    ⚠️ 用 `/ingest/phone` 而不是新开一个端点：那条路已经是「收下就追加到
+       当天 JSONL」的，而且笔记本那边的 collect_phone_events.py 会原样透传
+       任意 domain —— 于是 manual/note 会自动进事件表、进日记提示词。
+       新开端点就得再改一遍笔记本侧，多一处会漂移的约定。
+
+    `ts` 用 Unix 秒（和 Tasker 一样），中继会统一转成 ISO。
+    """
+    r = httpx.post(f"{RELAY_BASE}/ingest/phone",
+                   headers={"X-API-Key": RELAY_API_KEY},
+                   json={"ts": int(datetime.now(timezone.utc).timestamp()),
+                         "domain": "manual",
+                         "metric": "note",
+                         "value_text": text[:2000],
+                         "source": "feishu"},
+                   timeout=10.0)
+    r.raise_for_status()
+    return r.json()
+
+
 def pending_filtered(state: dict) -> list[dict]:
     """中继说还没答的题，减去**今天手动跳过**的那些。
 
@@ -513,9 +535,12 @@ def canonicalise(q: dict, raw: str) -> tuple[str | None, str, str]:
 # ── 渲染 ────────────────────────────────────────────────────────────
 def render_question(q: dict, remaining: int) -> str:
     kind = {"commitment": "问责", "routine": "常规"}.get(str(q.get("kind") or ""), "")
-    # 实时题单独标出来：它是「刚刚根据你今天的行踪生成的」，和晚上批量生成的
-    # 问责批性质不同，混在一起会让人以为系统在乱问。
-    if str(q.get("source") or "") == "live":
+    # 实时题 / 收尾题单独标出来：它们和晚上批量生成的问责批性质不同，
+    # 混在一起会让人以为系统在乱问。
+    # ⚠️ 收尾题也带 source="live"，所以必须先判 kind。
+    if str(q.get("kind") or "") == "summary":
+        kind = "收尾"
+    elif str(q.get("source") or "") == "live":
         kind = "实时"
     head = f"还剩 {remaining} 题" + (f"（{kind}）" if kind else "")
     lines = [head]
@@ -636,6 +661,84 @@ def send_text(open_id: str, text: str) -> None:
 
 
 # ── 核心：推进一轮问答 ──────────────────────────────────────────────
+def _asked_map(state: dict, day_iso: str) -> dict:
+    """今天问过哪些题（qid → 题干/类型）。跨天自动清空。
+
+    ⚠️ 为什么需要它：中继只存**答案**（`<题号>|<值>|<备注>`），题目原文在答完
+       之后就不在「待答」列表里了。收尾写总结时要把「我问了什么、你怎么答的」
+       配对喂给模型，所以题干得在发出去的那一刻记下来。
+    """
+    if state.get("asked_day") != day_iso:
+        state["asked_day"] = day_iso
+        state["asked"] = {}
+    m = state.get("asked")
+    return m if isinstance(m, dict) else {}
+
+
+def _answers_today(day_iso: str) -> dict[str, str]:
+    """今天答过的题：qid → 值。答案就在中继的当天事件流里。"""
+    try:
+        r = httpx.get(f"{RELAY_BASE}/events", params={"day": day_iso},
+                      headers={"X-API-Key": RELAY_API_KEY}, timeout=15.0)
+        r.raise_for_status()
+        evs = r.json().get("events") or []
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN 读答案失败：{type(e).__name__}: {e}", file=sys.stderr)
+        return {}
+    out: dict[str, str] = {}
+    for e in evs:
+        if e.get("domain") != "question" or e.get("metric") != "answer":
+            continue
+        parts = str(e.get("value_text") or "").split("|", 2)
+        if parts and parts[0]:
+            out[parts[0]] = parts[1] if len(parts) > 1 else ""
+    return out
+
+
+def maybe_write_summary(open_id: str, day_iso: str) -> bool:
+    """收尾三题**全答完**了吗？答完就写一段当天总结。返回是否处理了。
+
+    ⚠️ 「答完」靠**中继**判断（再拉一次待答，看还有没有 kind=summary 的题），
+       不在本地留队列 —— 和「什么算还没答」永远只有一份实现是同一个原则。
+    """
+    try:
+        pending = relay_pending()
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN 收尾：拉不到待答：{type(e).__name__}: {e}", file=sys.stderr)
+        return False
+    if any(str(x.get("kind") or "") == "summary" for x in pending):
+        return False                    # 还有没收尾的题
+
+    state = load_state()
+    asked = state.get("asked") if isinstance(state.get("asked"), dict) else {}
+    answers = _answers_today(day_iso)
+    qa = [(str(v.get("text") or ""), answers[qid])
+          for qid, v in asked.items()
+          if isinstance(v, dict) and str(v.get("kind") or "") == "summary"
+          and qid in answers]
+    # 按出题顺序排（key 里带 -1/-2/-3）
+    qa.sort(key=lambda x: x[0])
+
+    try:
+        text, err = live.write_day_summary(day_iso, RELAY_BASE,
+                                           RELAY_API_KEY, qa)
+    except Exception as e:  # noqa: BLE001
+        print(f"ERROR 写总结失败：{type(e).__name__}: {e}", file=sys.stderr)
+        return False
+    if text is None:
+        send_text(open_id, f"今天的总结没写成：{err}")
+        return True
+
+    send_text(open_id, "今天的总结：\n\n" + text)
+    # ⚠️ 总结**也存成一条笔记** —— 明天写日记时它会作为「你说过的话」进提示词。
+    #    不然它就只是聊天记录里的一句话，不属于这套系统的记忆。
+    try:
+        relay_note("【今日总结】" + text)
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN 总结存笔记失败：{type(e).__name__}: {e}", file=sys.stderr)
+    return True
+
+
 def advance(open_id: str) -> None:
     """拉一次「还没答的题」，把下一题发出去。没有题就明说。
 
@@ -672,6 +775,11 @@ def advance(open_id: str) -> None:
         sent = {}
     sent[qid] = datetime.now(TZ).isoformat(timespec="seconds")
     state["sent"] = sent
+    # 记下题干 —— 收尾时要用它和答案配成问答对。中继那边只存答案（`qid|值|备注`），
+    # 题目原文在答完之后就不在待答列表里了。
+    asked = _asked_map(state, datetime.now(TZ).date().isoformat())
+    asked[qid] = {"text": str(q.get("text") or ""),
+                  "kind": str(q.get("kind") or "")}
     save_state(state)
 
 
@@ -684,26 +792,28 @@ def handle_text(open_id: str, text: str) -> None:
 
     if stripped in ("/help", "帮助", "/?"):
         send_text(open_id,
+                  "【记一笔】\n"
+                  "  直接发一句话 → 存进今天的记录，会进日记。\n"
+                  "  例：「今天见了老王，聊了项目」\n"
+                  "\n"
                   "【要我出题】\n"
-                  "  回「?」或者随便一句 → 今天还没答的题\n"
-                  "  一题一题问：二值题回「做了 / 没做」，选择题回数字\n"
-                  "  答案后面可以接着写自己的话：\n"
-                  "    「做了，花了两小时」→ 答案是「做了」，后半句记成备注\n"
-                  "    「1 其实只做了一半」→ 选项 1，后半句记成备注\n"
-                  "  /skip 跳过这题（不记成答案） · /pending 重新拉一遍\n"
+                  "  回「?」→ 今天还没答的题\n"
+                  "  二值题回「做了 / 没做」，选择题回数字；\n"
+                  "  答案后面可以接着写自己的话，后半句记成备注：\n"
+                  "    「做了，花了两小时」 / 「1 其实只做了一半」\n"
+                  "  /skip 跳过这题 · /pending 重新拉一遍\n"
                   "\n"
                   "【问我今天】\n"
-                  "  · 我今天去哪了\n"
-                  "  · 手机用了多久 / 屏幕时间\n"
-                  "  · 今天解锁几次 / 用得最多的应用\n"
+                  "  · 我今天去哪了 · 手机用了多久 · 今天解锁几次\n"
                   "  · 我今天在电脑上干了什么 / 现在在忙什么\n"
-                  "  别的也能问 —— 上面这几类走模板（不花钱、每次一样）；\n"
-                  "  模板覆盖不到的会交给模型，但**只喂今天的数据**，\n"
-                  "  数据里没有的它会说「记录里没有」，不编。\n"
+                  "  模板覆盖不到的交给模型，只喂今天的数据，没有就说没有。\n"
                   "\n"
-                  "⚠️ 电脑那份快照只在笔记本醒着时更新（它一天只醒约 3.4 小时），\n"
-                  "   所以答案里会写明「最后上报是什么时候」—— 那是几小时前的就直说，\n"
-                  "   别当成此刻。\n"
+                  "【白天与晚上】\n"
+                  "  白天每个小时问你一次「刚才这一小时在干嘛」；\n"
+                  "  21:30 左右问三条收尾题，答完我给你写一段今天的总结。\n"
+                  "\n"
+                  "⚠️ 电脑数据来自笔记本每 10 分钟推的快照，答案里会写明\n"
+                  "   「最后上报是几点」—— 是几小时前的就直说，别当成此刻。\n"
                   "⚠️ 日记和 vault 答不了：它们在笔记本的 Obsidian 库里，没推到服务器。\n"
                   "⚠️ 手表（步数/心率）还没接。")
         return
@@ -757,7 +867,31 @@ def handle_text(open_id: str, text: str) -> None:
         if reply:
             send_text(open_id, reply)
             return
-        advance(open_id)
+
+        # ── 出题的暗号 ──
+        # 这几个词仍然是「给我题」，不当事笔记。除此之外**一律记下来**。
+        if stripped in ("?", "？", "题", "给我题"):
+            advance(open_id)
+            return
+
+        if not stripped:
+            return
+
+        # ── 记一笔 ──
+        #
+        # ⚠️ 这是**有意的取舍**（使用者定的）：任何没被识别成「查数据」的消息
+        #    都存成笔记，而不是被当成「给我出题」或被打回去重说。
+        #    代价：一句没命中关键词的问句（「我今天咋这么累」）不会得到回答，
+        #    而是被记下来。但它同时也进了当天的日记资料 —— 所以不是「丢了」，
+        #    而是「记下来了」。想明确要题就发「?」。
+        try:
+            relay_note(stripped)
+        except Exception as e:  # noqa: BLE001
+            print(f"ERROR 记笔记失败：{type(e).__name__}: {e}", file=sys.stderr)
+            send_text(open_id, f"没存进去：{e}")
+            return
+        send_text(open_id, "记下了。\n"
+                           "（这条会进今天的日记。想让我出题就发「?」）")
         return
 
     try:
@@ -795,6 +929,15 @@ def handle_text(open_id: str, text: str) -> None:
             stored += f"\n备注：{note}"
     print(f"[answer] {awaiting} = {value!r} note={note!r} -> relay {res}")
     send_text(open_id, stored)
+
+    # 晚上收尾：这是最后一道总结题的话，立刻写总结，不再接着出题。
+    if str(q.get("kind") or "") == "summary":
+        try:
+            if maybe_write_summary(open_id, datetime.now(TZ).date().isoformat()):
+                return
+        except Exception as e:  # noqa: BLE001
+            print(f"WARN 收尾失败：{type(e).__name__}: {e}", file=sys.stderr)
+
     advance(open_id)
 
 
@@ -887,6 +1030,9 @@ def push_next_live(open_id: str) -> bool:
         state["awaiting"] = qid
         sent[qid] = datetime.now(TZ).isoformat(timespec="seconds")
         state["sent"] = sent
+        asked = _asked_map(state, today)
+        asked[qid] = {"text": str(q.get("text") or ""),
+                      "kind": str(q.get("kind") or "")}
         save_state(state)
         print(f"[live-push] {qid}")
         return True

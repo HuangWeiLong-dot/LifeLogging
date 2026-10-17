@@ -1012,7 +1012,12 @@ check("live questions: 实时批不遮蔽笔记本批，手机链路冻结，实
 
 
 def t_live_question_rules():
-    """实时提问的规则：确定性、不勾任务、不把坐标当地名、夜里不问。"""
+    """每小时一题：**固定节拍**，数据再平淡也要问；且不勾任务、不写死「今天」。
+
+    ⚠️ 这里锁的是最早那版的设计错误：最初是三条阈值规则（停留/静默/单应用），
+       够不到阈值就一题都不发 —— 而使用者要的是「每小时至少问一次」。
+       把节拍和选材混成一套规则，就会在数据平淡的那天彻底沉默。
+    """
     import importlib.util
 
     lq_path = Path(__file__).resolve().parent / "live_questions.py"
@@ -1020,61 +1025,59 @@ def t_live_question_rules():
     lq = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(lq)
 
-    DAY = "2026-10-16"
+    # 用真实的「整点」构造，这样和脚本里的 now 是同一套时区语义。
+    now = lq.datetime.now(lq.TZ).replace(minute=0, second=0, microsecond=0)
+    day = now.date().isoformat()
+    start = now - lq.timedelta(hours=1)
+    iso = lambda dt: dt.isoformat()          # noqa: E731
 
-    # ── 长停留 ──
-    stay = {"place": "望京, 北京朝阳", "minutes": 150.0,
-            "start": f"{DAY}T14:05:00+08:00", "end": f"{DAY}T16:35:00+08:00",
-            "is_coord": False}
-    q = lq.rule_long_stay(DAY, [stay], [])
-    assert q, "150 分钟的停留应该问一句"
-    assert "2 小时 30 分" in q["text"] and "望京" in q["text"], q["text"]
-    assert q["text"].startswith("14:05–16:35"), q["text"]
-    # ⚠️ 题干里**不能**出现「今天」。这题可能隔天才被读到，而「昨天的事」用
-    #    「今天」的口吻说出来，看着完全正常但它是错的。日期由渲染层按 day 补。
+    stay = {"place": "望京, 北京朝阳", "minutes": 80.0,
+            "start": iso(start - lq.timedelta(minutes=20)),
+            "end": iso(now), "is_coord": False}
+    events = [
+        {"metric": "unlock", "ts_utc": iso(start + lq.timedelta(minutes=5))},
+        {"metric": "app_switch", "value_text": "com.tencent.mm",
+         "ts_utc": iso(start + lq.timedelta(minutes=6))},
+        {"metric": "unlock", "ts_utc": iso(start + lq.timedelta(minutes=40))},
+    ]
+    snap = {"last_hour": {"total_minutes": 35.0,
+                          "top_apps": [["Code.exe", 25.0], ["msedge.exe", 10.0]]}}
+
+    q = lq.rule_hourly(day, [stay], events, snap, now)
+    assert q, "每小时都该有一题"
+    assert q["text"].startswith(start.strftime("%H:%M")), q["text"]
+    assert "望京" in q["text"], q["text"]
+    assert "Code.exe" in q["text"], q["text"]
+    assert "解锁 2 次" in q["text"], q["text"]
+    assert "WeChat" in q["text"], f"包名要翻成人话：{q['text']}"
     assert "今天" not in q["text"], f"题干不该写死「今天」：{q['text']}"
-    # ⚠️ 实时题是文字题：apply_answers 对 text 永远判「没完成」，
-    #    所以它**不会去勾任何任务** —— 这正是要的，实时题只是问一句。
+    assert q["_key"] == f"hour-{day}T{now.strftime('%H')}", q["_key"]
+    # ⚠️ 文字题：apply_answers 对 text 永远判「没完成」，所以实时题**不会勾任务**。
     assert q["format"] == "text" and q["ref"] == ""
-    assert q["id"].startswith(f"{DAY}-"), "题号必须带日期前缀（apply_answers 靠它筛）"
+    assert q["id"].startswith(f"{day}-"), "题号必须带日期前缀"
 
-    # 太短的停留不该问
-    assert lq.rule_long_stay(DAY, [dict(stay, minutes=30.0)], []) is None
-    # 两个停留取更长的那个
-    longer = dict(stay, place="中关村", minutes=200.0, start=f"{DAY}T09:00:00+08:00")
-    q2 = lq.rule_long_stay(DAY, [stay, longer], [])
-    assert "中关村" in q2["text"], q2["text"]
+    # ⚠️ 核心：数据平淡也要问。这是「每小时一次」和「够阈值才问」的分水岭。
+    quiet = lq.rule_hourly(day, [], [], None, now)
+    assert quiet is not None, "这一小时没数据也要问，不能沉默"
+    assert "没有记录到活动" in quiet["text"] or "一次都没解锁" in quiet["text"], \
+        quiet["text"]
 
-    # ⚠️ 反查不出地名时**不能装作认识那个地方**：报坐标，并且说明为什么。
-    qc = lq.rule_long_stay(DAY, [dict(stay, place="(39.9042,116.4074)", is_coord=True)], [])
-    assert "39.9042" in qc["text"], qc["text"]
-    assert "城市数据表" in qc["evidence"], "要说清为什么只有坐标"
+    # 一小时前就结束的停留，不该被当成「还在那儿」
+    old = dict(stay, place="中关村", minutes=80.0,
+               start=iso(start - lq.timedelta(hours=3)),
+               end=iso(start - lq.timedelta(minutes=10)))
+    assert "中关村" not in lq.rule_hourly(day, [old], [], None, now)["text"]
 
-    # ── 手机静默 ──
-    def unlock(hh: int, mm: int) -> dict:
-        return {"metric": "unlock", "ts_utc": f"{DAY}T{hh:02d}:{mm:02d}:00+08:00"}
+    # 路过的短暂停留不值得一提
+    brief = dict(stay, place="便利店", minutes=10.0)
+    assert "便利店" not in lq.rule_hourly(day, [brief], [], None, now)["text"]
 
-    evs = [unlock(9, 0), unlock(11, 40)]           # 中间空了 160 分钟
-    q3 = lq.rule_phone_silence(DAY, [], evs)
-    assert q3 and "2 小时 40 分" in q3["text"], q3
-    assert "都没解锁" in q3["text"]
-    assert "今天" not in q3["text"], f"题干不该写死「今天」：{q3['text']}"
-
-    # 只有一条解锁 → 没有间隔可言，问不出来
-    assert lq.rule_phone_silence(DAY, [], [unlock(9, 0)]) is None
-    # 间隔太短不问
-    assert lq.rule_phone_silence(DAY, [], [unlock(9, 0), unlock(9, 30)]) is None
-    # ⚠️ 夜里那段不该问：凌晨本来就不解锁，拿它发问等于每天早上固定一条噪音
-    assert lq.rule_phone_silence(DAY, [], [unlock(23, 30), unlock(1, 30)]) is None
-
-    # ── 同一件事不重复问 ──
-    # `build()` 靠 _key 去重；中继那边是覆写，所以每次都要把当天全部重推一遍。
-    assert lq.qid(DAY, "同一句话") == lq.qid(DAY, "同一句话")
-    assert lq.qid(DAY, "a") != lq.qid(DAY, "b")
-    assert lq.make(DAY, "x", "e", "k1")["_key"] == "k1"
+    # 同一小时只问一次：key 里带小时，第二次跑会被 fired 拦住
+    assert lq.rule_hourly(day, [], [], None, now)["_key"] == \
+        lq.rule_hourly(day, [], [], None, now)["_key"]
 
 
-check("live questions: 规则确定性 / 不勾任务 / 坐标不当地名 / 夜里不问",
+check("live questions: 每小时必问（数据平淡也问）/ 不勾任务 / 不写死「今天」",
       t_live_question_rules)
 
 
@@ -1337,6 +1340,9 @@ def t_feishu_live_push():
     fb.save_state = lambda s: box.__setitem__("state", s)
     fb.send_text = lambda oid, text: box["sent"].append(text)
     fb.relay_pending = lambda: pending["qs"]
+    # ⚠️ 必须把「别打扰时段」也固定住，否则这条测试**按运行时刻时红时绿**：
+    #    晚上跑就永远推不出去，白天跑就正常。
+    fb.in_quiet_hours = lambda now: False
 
     day = fb.datetime.now(fb.TZ).date().isoformat()
     laptop = {"id": f"{day}-lap", "day": day, "source": "laptop",
@@ -1372,9 +1378,147 @@ def t_feishu_live_push():
     assert box["state"]["awaiting"] == f"{day}-liv2"
     assert len(box["sent"]) == 2
 
+    # ⚠️ 「别打扰」时段一律不推 —— 哪怕是当天的题、哪怕没在等答案。
+    #    生成器那边有窗口，但推送这一层必须自己再拦一道（见 t_quiet_hours）。
+    fb.in_quiet_hours = lambda now: True
+    box["state"] = {}
+    box["sent"] = []
+    pending["qs"] = [live]
+    assert fb.push_next_live("ou_x") is False, "夜里不该推消息"
+    assert box["sent"] == []
+    fb.in_quiet_hours = lambda now: False
+
+    # ⚠️ 隔了夜的实时题也不推：早上收到「昨天 21:00–22:00 这一段…」只会困惑。
+    from datetime import timedelta as _td
+    yesterday = (datetime.now(fb.TZ).date() - _td(days=1)).isoformat()
+    old = {"id": f"{yesterday}-old", "day": yesterday, "source": "live",
+           "format": "text", "text": "昨天那道实时题"}
+    box["state"] = {}
+    pending["qs"] = [old]
+    assert fb.push_next_live("ou_x") is False, "隔夜的实时题不该在早上推出来"
+    assert box["sent"] == []
+
 
 check("feishu: 实时题尽快单独推（不插队 / 不重复 / 不夹带问责批）",
       t_feishu_live_push)
+
+
+def t_quiet_hours():
+    """夜里不能发消息 —— 而且**生成器和推送层都要拦**。
+
+    ⚠️ 实测的设计漏洞：生成器有 8–22 的窗口，但推送那一层没有。于是
+       21:58 生成的题会在 22:03 被收到，或者服务器半夜重启时把待推的题发出去。
+       两道闸缺一不可 —— 生成器只管「生不生成」，题生成完还躺着等推送。
+    """
+    import importlib.util
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "fb_qh", root / "server" / "feishu-bot" / "feishu_bot.py")
+    fb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fb)
+
+    base = fb.datetime.now(fb.TZ).replace(minute=0, second=0, microsecond=0)
+
+    def at(h: int) -> bool:
+        return fb.in_quiet_hours(base.replace(hour=h))
+
+    fb.QUIET_FROM, fb.QUIET_UNTIL = 22, 8
+    for h in (22, 23, 0, 3, 7):
+        assert at(h), f"{h} 点该是别打扰时段（跨午夜）"
+    for h in (8, 12, 18, 21):
+        assert not at(h), f"{h} 点不该被禁"
+
+    # 不跨午夜的时段也要对
+    fb.QUIET_FROM, fb.QUIET_UNTIL = 1, 5
+    assert at(2) and not at(6)
+
+    # 两端相等 = 不静音（别把人锁死）
+    fb.QUIET_FROM = fb.QUIET_UNTIL = 0
+    assert not at(3)
+
+
+check("feishu: 夜间静音（跨午夜 / 不跨午夜 / 两端相等都要对）",
+      t_quiet_hours)
+
+
+def t_summary_questions():
+    """晚上收尾：三条题、带 kind=summary、一天一次、到点才发。"""
+    import importlib.util
+
+    lq_path = Path(__file__).resolve().parent / "live_questions.py"
+    spec = importlib.util.spec_from_file_location("live_q2", lq_path)
+    lq = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lq)
+
+    now = lq.datetime.now(lq.TZ).replace(minute=0, second=0, microsecond=0)
+    day = now.date().isoformat()
+
+    qs = lq.summary_questions(
+        day, [], [],
+        {"today": {"total_hours": 6.5,
+                   "by_category": [["Work", 3.2], ["Life", 2.1]]}})
+    assert len(qs) == 3, qs
+    assert all(q["kind"] == "summary" for q in qs), "必须带 kind=summary"
+    assert all(q["format"] == "text" and q["ref"] == "" for q in qs), \
+        "收尾题是文字题，不能去勾任务"
+    keys = [q["_key"] for q in qs]
+    assert len(set(keys)) == 3, f"三题的 key 不能重：{keys}"
+    assert all(k.startswith(f"summary-{day}") for k in keys), keys
+    # 第二题要把当天的真实数字带进去，而不是空泛地问
+    assert "6.5" in qs[1]["text"], qs[1]["text"]
+
+    # 到点判定
+    lq.SUMMARY_AT = "21:30"
+    assert not lq._summary_due(now.replace(hour=21, minute=29))
+    assert lq._summary_due(now.replace(hour=21, minute=30))
+    assert lq._summary_due(now.replace(hour=23))
+    # 收尾前一小时不再发小时题
+    assert lq._summary_soon(now.replace(hour=20, minute=40))
+    assert not lq._summary_soon(now.replace(hour=19))
+
+    # 留空 = 不做收尾
+    lq.SUMMARY_AT = ""
+    assert not lq._summary_due(now.replace(hour=23))
+
+
+check("live questions: 收尾三题（kind=summary / 一天一次 / 到点才发）",
+      t_summary_questions)
+
+
+def t_notes_into_journal():
+    """飞书里记的一笔，必须真的**流进日记提示词** —— 否则存了等于白存。
+
+    链路：机器人 → 中继 /ingest/phone（domain=manual）→ 笔记本拉取 →
+    events.db → normalize.attach_other_domains → Timeline.notes →
+    generate_journal.build_user_prompt。
+
+    这里锁住最后两跳：Timeline 有 notes 字段、提示词里有它们、而且是
+    单独一节并明确「优先于推断」。
+    """
+    from common import Day
+    from generate_journal import build_user_prompt
+    from normalize import Timeline, render_markdown
+
+    day = Day.parse("2026-10-16", ZoneInfo(CFG["timezone"]))
+    note = {"ts": "2026-10-16T06:00:00+00:00", "metric": "note",
+            "text": "今天见了老王，聊了项目"}
+
+    # 提示词
+    tl = {"blocks": [], "notes": [note], "health": {}, "location": [],
+          "phone": {}, "web": [], "by_category": {}, "total_hours": 0}
+    prompt = build_user_prompt(tl, day, [])
+    assert "今天见了老王" in prompt, "笔记没进提示词"
+    assert "first-hand facts" in prompt, "要明确告诉模型：笔记优先于推断"
+    assert "[14:00]" in prompt, f"笔记该带本地时间（UTC 06:00 → 北京 14:00）：{prompt}"
+
+    # vault 的 timeline 页
+    md = render_markdown(Timeline(day="2026-10-16", notes=[note]))
+    assert "今天见了老王" in md, "笔记没进 vault 的时间轴页"
+
+
+check("notes: 飞书记的一笔真的进了日记提示词和 vault",
+      t_notes_into_journal)
 
 
 # ── 7d-3. 日记中继 ──────────────────────────────────────────────────

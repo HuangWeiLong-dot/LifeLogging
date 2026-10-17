@@ -471,6 +471,59 @@ def _llm_counter(state_dir: Path, day_iso: str) -> Path:
     return state_dir / f"feishu-llm-{day_iso}.json"
 
 
+def _llm_used(counter: Path) -> int:
+    try:
+        return int(json.loads(counter.read_text(encoding="utf-8"))["calls"])
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return 0
+
+
+def _llm_bump(counter: Path, day_iso: str, used: int) -> None:
+    """记一次调用。⚠️ **成功之后**才调 —— 失败也计的话，一次网络抖动就吃掉一次额度。"""
+    try:
+        counter.parent.mkdir(parents=True, exist_ok=True)
+        tmp = counter.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"day": day_iso, "calls": used + 1}),
+                       encoding="utf-8")
+        tmp.replace(counter)
+    except OSError as e:
+        # 记不上只是额度约束失效，不该把已经拿到的答案丢掉。
+        print(f"WARN 自由问答计数写不进去：{e}", file=sys.stderr)
+
+
+def _run_llm_turn(conf: dict, counter: Path, day_iso: str, *,
+                  system: str, user: str, stage: str) -> tuple[str | None, str]:
+    """跑一次受每日额度约束的 LLM 调用。返回 (文本, 给人看的失败原因)。
+
+    ⚠️ **每次新建一个 LLM 实例。** 它的 `_calls` 是按实例计的，而且那个计数
+       是按「单次流水线运行最多几次」设的（默认 8）。常驻机器人复用同一个
+       实例的话，那个上限迟早被撑满，然后**从此再也不回话** —— 而且表现为
+       「突然不说话了」，日志上看不出和调用次数有关。
+
+    ⚠️ **成功之后**才计数。失败也计的话，一次网络抖动就会吃掉一次额度。
+    """
+    from common import BudgetExceeded, CostLedger, LLM, new_run_id
+
+    used = _llm_used(counter)
+    if used >= LLM_DAILY_CAP:
+        return None, (f"今天的 AI 额度用完了（{LLM_DAILY_CAP} 次）。\n"
+                      f"模板那几类（去哪了 / 手机 / 电脑）不受这个限制，照常能问。")
+
+    ledger = CostLedger(conf["budget"]["ledger_path"])
+    llm = LLM(cfg=conf, ledger=ledger)
+    try:
+        out = llm.complete(system=system, user=user, stage=stage,
+                           run_id=new_run_id())
+    except BudgetExceeded as e:
+        return None, f"今天的 AI 预算用完了。（{e}）"
+    except Exception as e:  # noqa: BLE001
+        print(f"ERROR LLM 调用失败：{type(e).__name__}: {e}", file=sys.stderr)
+        return None, f"{type(e).__name__}: {e}"
+
+    _llm_bump(counter, day_iso, used)
+    return out.strip(), ""
+
+
 def answer_freeform(text: str, *, day_iso: str, base: str, key: str) -> str | None:
     """没有现成模板时的自由问答。**绝不用来回答已经能算出来的数字。**
 
@@ -478,56 +531,67 @@ def answer_freeform(text: str, *, day_iso: str, base: str, key: str) -> str | No
     这里接的是「今天有没有出门三次」这类模板答不了、但数据里其实有答案的问题。
     """
     try:
-        from common import BudgetExceeded, CostLedger, LLM, new_run_id
         conf = cfg()
     except LiveUnavailable:
         raise
     except Exception as e:  # noqa: BLE001
         raise LiveUnavailable(f"自由问答不可用：{type(e).__name__}: {e}") from None
 
-    state_dir = Path(conf.get("state_dir") or ".")
-    counter = _llm_counter(state_dir, day_iso)
+    counter = _llm_counter(Path(conf.get("state_dir") or "."), day_iso)
+    digest = _digest(day_iso, base, key)
+    out, err = _run_llm_turn(
+        conf, counter, day_iso,
+        system=_LLM_SYSTEM,
+        user=f"【今天的原始数据】\n{digest}\n\n【用户的问题】\n{text}",
+        stage="feishu_ask")
+    if out is None:
+        return f"问不了：{err}"
+    return out
+
+
+_SUMMARY_SYSTEM = """你在给用户写**今天的收尾总结**。
+
+规则（必须遵守）：
+1. 只用下面给的数据，以及用户自己写下的东西。数据里没有的不要说，不要推测。
+2. 三到五句话。不分点、不加标题、不列清单、不罗列整张表。
+3. 语气平实，像朋友回顾一天。不要打气、不要评价好坏、不要给建议。
+4. 用户自己写的笔记和回答**优先于任何推断**。如果它们和统计数据冲突，
+   以用户说的为准。
+5. 如果今天记录很少，就照实说「今天记录不多」，不要编。"""
+
+
+def write_day_summary(day_iso: str, base: str, key: str,
+                      qa: list[tuple[str, str]]) -> tuple[str | None, str]:
+    """晚上收尾：把今天的数据 + 刚答的三句，写成一段总结。
+
+    返回 (总结正文, 给人看的话)。正文为 None 表示没写成，第二个值是原因。
+
+    ⚠️ 总结会**同时存成一条笔记**（调用方负责），所以它也是「记忆」的一部分 ——
+       以后翻日记能看到自己那天收尾时说的话。
+    """
     try:
-        used = int(json.loads(counter.read_text(encoding="utf-8"))["calls"])
-    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
-        used = 0
-    if used >= LLM_DAILY_CAP:
-        return (f"今天的自由问答额度用完了（{LLM_DAILY_CAP} 次）。\n"
-                f"模板那几类（去哪了 / 手机 / 电脑）不受这个限制，照常能问。")
+        conf = cfg()
+    except LiveUnavailable:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise LiveUnavailable(f"总结不可用：{type(e).__name__}: {e}") from None
 
     digest = _digest(day_iso, base, key)
-    ledger = CostLedger(conf["budget"]["ledger_path"])
-    # ⚠️ **每次请求新建一个 LLM**。它的 `_calls` 是**按实例**计的，而且那个
-    #    计数是按「单次流水线运行最多几次」设的（默认 8）。常驻机器人复用
-    #    同一个实例的话，那个上限迟早会被撑满，然后**从此再也答不了** ——
-    #    而且表现为「突然不回话了」，看不出跟调用次数有关。
-    #    这里每次新建，`_calls` 永远从 0 开始；真正的封顶是上面那个每日额度。
-    llm = LLM(cfg=conf, ledger=ledger)
-    try:
-        out = llm.complete(
-            system=_LLM_SYSTEM,
-            user=f"【今天的原始数据】\n{digest}\n\n【用户的问题】\n{text}",
-            stage="feishu_ask",
-            run_id=new_run_id(),
-        )
-    except BudgetExceeded as e:
-        return f"问不了：今天的 AI 预算用完了。（{e}）"
-    except Exception as e:  # noqa: BLE001
-        print(f"ERROR 自由问答失败：{type(e).__name__}: {e}", file=sys.stderr)
-        return f"问不了：{type(e).__name__}: {e}"
+    if qa:
+        answers = "\n".join(f"- 问：{q}\n  答：{a}" for q, a in qa)
+    else:
+        answers = "（今天没有回答记录）"
 
-    # ⚠️ 调用**成功之后**才计数。失败也计的话，一次网络抖动就会吃掉一次额度。
-    try:
-        state_dir.mkdir(parents=True, exist_ok=True)
-        tmp = counter.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"day": day_iso, "calls": used + 1}),
-                       encoding="utf-8")
-        tmp.replace(counter)
-    except OSError as e:
-        # 记不上就只是额度约束失效，不该把已经拿到的答案丢掉。
-        print(f"WARN 自由问答计数写不进去：{e}", file=sys.stderr)
-
-    return out.strip()
+    counter = _llm_counter(Path(conf.get("state_dir") or "."), day_iso)
+    out, err = _run_llm_turn(
+        conf, counter, day_iso,
+        system=_SUMMARY_SYSTEM,
+        user=(f"【今天的原始数据】\n{digest}\n\n"
+              f"【今天我问你、你回答的】\n{answers}"),
+        stage="feishu_summary")
+    if out is None:
+        return None, err
+    return out, ""
 
 
 def answer_query(text: str, *, day_iso: str, base: str, key: str) -> str | None:

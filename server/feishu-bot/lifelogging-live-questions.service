@@ -32,6 +32,11 @@ WorkingDirectory=/opt/lifelogging/repo
 #    退回坐标（问出来的是「你在 (39.9042,116.4074) 待了两小时」）。
 Environment=LIFELOGGING_DATA_DIR=/var/lib/lifelogging/geo
 
+# 晚上几点开始「一天的收尾」。到点之后不再发小时题，改发三条总结题；
+# 答完之后机器人会写一段当天总结（LLM，走每日额度）。
+# 留空 = 不做收尾，只发小时题。
+Environment=LIVE_SUMMARY_AT=21:30
+
 ExecStart=/opt/lifelogging/venv/bin/python /opt/lifelogging/repo/scripts/live_questions.py
 
 # 拉一次位置 + 一次中继，正常几秒。给足余量但别无限挂。

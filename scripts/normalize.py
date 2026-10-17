@@ -185,6 +185,9 @@ class Timeline:
     unmatched_apps: dict[str, float] = field(default_factory=dict)
     web: list[dict[str, Any]] = field(default_factory=list)
     track: dict[str, Any] = field(default_factory=dict)
+    # 用户在飞书里随手记下的一笔（domain=manual / metric=note）。
+    # ⚠️ 这是**第一手事实** —— 比任何推断出来的都可靠，日记提示词里要单独说清。
+    notes: list[dict[str, Any]] = field(default_factory=list)
     total_hours: float = 0.0
 
 
@@ -1002,9 +1005,20 @@ def attach_other_domains(tl: Timeline, day: Day) -> None:
                 "site": e.get("value_text") or "",
                 "minutes": round((e.get("value_num") or 0) / 60.0, 1),
             })
+        elif dom == "manual":
+            # 用户在飞书里随手记的一笔。**原样**带下去，不做任何改写 ——
+            # 这是全系统里唯一一条「用户直接说的话」，价值最高。
+            text = str(e.get("value_text") or "").strip()
+            if text:
+                tl.notes.append({
+                    "ts": e.get("ts_utc"),
+                    "metric": met,
+                    "text": text,
+                })
 
     tl.location.sort(key=lambda x: x["minutes"], reverse=True)
     tl.web.sort(key=lambda x: x["minutes"], reverse=True)
+    tl.notes.sort(key=lambda x: str(x.get("ts") or ""))
 
     # 手机事件要整体看才能推前台时长（见 summarize_phone），所以收集完再算，
     # 不在循环里逐条计数 —— 逐条只能得到「切换了多少次」，得不到「用在哪」。
@@ -1017,6 +1031,14 @@ def attach_other_domains(tl: Timeline, day: Day) -> None:
 
 def render_markdown(tl: Timeline) -> str:
     lines = [f"# Timeline {tl.day}", ""]
+
+    # 飞书里随手记的那几句，放最前面 —— 它们是用户直接说的话，
+    # 比下面任何推导出来的统计都更值得先看到。
+    if tl.notes:
+        lines.append("## Notes（飞书里记的）")
+        for n in tl.notes:
+            lines.append(f"- {n.get('text', '')}")
+        lines.append("")
 
     if tl.health:
         lines.append("## Health")
