@@ -438,6 +438,18 @@ if ($targets.Count -gt 0) {
     Invoke-Step "answers" "scripts\apply_answers.py" @("--date", $aDay) | Out-Null
 }
 
+# ── 周整合：把刚过去的一周压成一份回顾 ───────────────────────────────
+#
+# 放在日循环**外面**，而且不依赖 $targets —— 一周结束时不一定有新的一天要处理。
+# 只处理**已经过完**的 ISO 周；已经有回顾文件就跳过。
+#
+# ⚠️ 产物有两份：vault\07-Reviews\<年>-W<周>.md 给人看，
+#    state\weeks\<年>-W<周>.json 里的结构化事实留给模型用（第三层的画像吃它）。
+# ⚠️ `-SkipAI` 时跳过 —— 它是一次 LLM 调用。
+if (-not $SkipAI) {
+    Invoke-Step "weekly" "scripts\weekly_review.py" @("--max-weeks", "4") | Out-Null
+}
+
 # ── 每日花费写进事件表（Grafana 的「AI 花费」面板读它）──────────────
 #
 # 每次调用的花费原本只记在 state/cost_ledger.jsonl，而 Grafana 挂的是

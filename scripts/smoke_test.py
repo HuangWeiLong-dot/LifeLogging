@@ -13,7 +13,7 @@ import json
 import os
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -1636,6 +1636,67 @@ def t_memory_retrieval():
 
 check("memory: 中文两字词查得到（逐字切分）/ AND 空时退回 OR",
       t_memory_retrieval)
+
+
+def t_weekly_review_parse():
+    """周整合：**没有依据的事实必须被丢掉**。
+
+    ⚠️ 这是这条链上最重要的一道闸。一条「感觉你最近很累」这种没有依据的断言
+       一旦进了周回顾，下个月的画像会继承它，再往下的日记又会继承画像 ——
+       错误被一层层放大，而且越来越难发现。
+
+    同时钉住周的边界：只处理**已经过完**的 ISO 周。
+    """
+    import importlib.util
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "wr_t", root / "scripts" / "weekly_review.py")
+    wr = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(wr)
+
+    # ── 周的计算 ──
+    sat = date(2026, 10, 17)
+    y, w = wr.last_completed_week(sat)
+    mon, sun = wr.week_bounds(y, w)
+    assert (mon, sun) == (date(2026, 10, 5), date(2026, 10, 11)), (mon, sun)
+    assert wr.week_key(mon) == f"{y}-W{w:02d}"
+    assert wr.parse_week_key("2026-W42") == (2026, 42)
+
+    # ── 解析：该留的留、该丢的丢 ──
+    raw = json.dumps({
+        "prose": "这周主要在搭 LifeLogging。",
+        "facts": [
+            {"kind": "project", "text": "在搭 LifeLogging",
+             "days": ["2026-10-13", "2026-10-14"]},
+            {"kind": "sleep", "text": "经常两点睡",
+             "days": ["2026-09-01"]},          # 不在本周 → 丢
+            {"kind": "person", "text": "见了老王"},  # 没 days → 丢
+            {"kind": "bogus", "text": "x",
+             "days": ["2026-10-13"]},          # kind 非法 → 丢
+        ],
+    }, ensure_ascii=False)
+
+    prose, facts, dropped = wr.parse_review(
+        raw, {"2026-10-13", "2026-10-14"})
+    assert prose.startswith("这周"), prose
+    assert len(facts) == 1, facts
+    assert facts[0]["days"] == ["2026-10-13", "2026-10-14"]
+    assert dropped == 3, f"该丢掉 3 条无依据的，实际 {dropped}"
+
+    # 带代码围栏的输出也要能解析
+    fenced = "```json\n" + raw + "\n```"
+    assert wr.parse_review(fenced, {"2026-10-13"})[0].startswith("这周")
+
+    # 渲染出的 markdown 必须带依据
+    md = wr.render_markdown("2026-W42", date(2026, 10, 12), date(2026, 10, 18),
+                            "散文", facts, 0.01)
+    assert "在搭 LifeLogging" in md and "10-13" in md, md
+    assert "2026-W42" in md
+
+
+check("weekly: 没有依据的事实被丢掉 / 周一~周日边界正确 / 渲染带出处",
+      t_weekly_review_parse)
 
 
 # ── 7d-3. 日记中继 ──────────────────────────────────────────────────

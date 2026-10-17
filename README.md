@@ -91,6 +91,7 @@ LifeLogging/
 │   ├── app_map.py               ← 「应用 → 分类」的学习表（运行时产物 state/app_map.json）
 │   ├── learn_apps.py            ← 学认不出来的新应用：问一次模型，缓存成规则
 │   ├── memory.py                ← 长期记忆 · 检索层：FTS5 索引日记/笔记/问答，按需取回 top-k
+│   ├── weekly_review.py         ← 长期记忆 · 整合层：一周压成回顾（散文给人，事实给模型）
 │   ├── generate_journal.py      ← 日记的提示词 / 校验 / 组装（AI 调用在服务器上）
 │   ├── push_journal_input.py    ← 把「写日记需要的一切」推给服务器
 │   ├── pull_journal_output.py   ← 取回服务器写好的正文，组装进 vault
