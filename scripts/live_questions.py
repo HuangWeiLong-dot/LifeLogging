@@ -350,41 +350,72 @@ def relay_desktop(base: str, key: str) -> dict | None:
 
 def summary_questions(day_iso: str, stays: list[dict],
                       events: list[dict], snap: dict | None) -> list[dict]:
-    """晚上收尾的三题。答完之后机器人会用 LLM 写一段当天总结。
+    """晚上收尾的几道题。答完之后机器人会用 LLM 写一段当天总结。
 
-    三题的用意各不相同：
-      1. 让**你自己**挑出今天最重要的一件事 —— 数据里永远没有这个。
-      2. 拿当天数据对照一下，看哪块和你的印象不一样。
-      3. 收尾时把「没做成、想留到明天」的捞出来 —— 明天的问责批会用上。
+    ⚠️ 题目是**按当天真实数据拼出来的**，不是每天问同样三句。
+
+       原来只有三条固定模板，其中两条（「最值得记住的一件事」「没做成什么」）
+       完全是空问 —— 换成任何一天都成立，也就等于没有信息。现在每条都带上
+       当天的具体数字或地点，让你能对着答。
+
+    题目的顺序有讲究：
+      1. 最值得记住的一件事 —— 数据里永远没有，只能问你
+      2. 电脑分布 —— 对照体感：统计说的和你感觉的一样吗
+      3. 手机节奏 —— 解锁/切换次数，问「哪一段是真投入」
+      4. 位置 —— 去过几个地方、最久的是哪，问计划外的那次
+      5. 没做成、想留到明天 —— 明天的问责线索
+
+    ⚠️ **某一块没有数据就不问那一题**（比如位置数据缺失的那天）。
+       硬问一句「今天去了哪」只会让你没法答，还会污染总结。
+       所以题数在 2–5 之间浮动，不是固定三条。
     """
-    facts: list[str] = []
     today = (snap or {}).get("today") or {}
     total = float(today.get("total_hours") or 0)
-    if total:
-        cats = today.get("by_category") or []
-        top = " / ".join(f"{k} {v}h" for k, v in cats[:3])
-        facts.append(f"电脑合计 {total} 小时（{top}）")
+    cats = today.get("by_category") or []
+    d_apps = [(str(a), float(h)) for a, h in (today.get("top_apps") or [])]
+
+    unlocks = sum(1 for e in events if e.get("metric") == "unlock")
+    switches = sum(1 for e in events if e.get("metric") == "app_switch")
     places = [s for s in stays if float(s.get("minutes") or 0) >= 20]
+
+    qs: list[dict] = []
+
+    def add(text: str, evidence: str) -> None:
+        qs.append(make(day_iso, text, evidence,
+                       f"summary-{day_iso}-{len(qs) + 1}", kind="summary"))
+
+    # 1. 只能问你的那一件
+    add("今天最值得记住的一件事是什么？",
+        "数据里永远没有这个 —— 只有你知道。一句话就行，会进日记。")
+
+    # 2. 电脑分布：和他自己的体感对一下
+    if total:
+        dist = " / ".join(f"{k} {v}h" for k, v in cats[:4]) or "无分类"
+        top = f"；最久的是 {d_apps[0][0]}（{d_apps[0][1]}h）" if d_apps else ""
+        add(f"今天电脑合计 {total} 小时（{dist}）{top}。"
+            "这个分布和你的体感一致吗？",
+            "来自笔记本每 10 分钟推的快照：today.total_hours / by_category / top_apps。")
+
+    # 3. 手机节奏：次数是实测的
+    if unlocks or switches:
+        add(f"今天手机解锁 {unlocks} 次、切换应用 {switches} 次。"
+            "哪一段时间是真正投入的？",
+            "来自中继上的手机事件（Tasker 上报），次数是实测的，不是估的。")
+
+    # 4. 位置：只有 ≥20 分钟的停留才算
     if places:
         best = max(places, key=lambda s: float(s.get("minutes") or 0))
-        facts.append(f"去过 {len(places)} 个地方，最久的是{best.get('place')}"
-                     f"（{_hm(float(best.get('minutes') or 0))}）")
-    unlocks = sum(1 for e in events if e.get("metric") == "unlock")
-    if unlocks:
-        facts.append(f"手机解锁 {unlocks} 次")
-    fact_line = "；".join(facts) if facts else "今天记录不多"
+        tag = "坐标 " if best.get("is_coord") else ""
+        add(f"今天去过 {len(places)} 个地方，最久的是{tag}{best.get('place')}"
+            f"（{_hm(float(best.get('minutes') or 0))}）。"
+            "这些停留里有哪一次是计划外的？",
+            "位置来自 Dawarich 的停留推导；只有 ≥20 分钟的停留才算。")
 
-    return [
-        make(day_iso, "今天最值得记住的一件事是什么？",
-             "收尾题。随便写，会进当天的日记。",
-             f"summary-{day_iso}-1", kind="summary"),
-        make(day_iso, f"今天的数据：{fact_line}。\n哪一块和你想的不一样？",
-             "数据来自电脑快照 / Dawarich / 中继。",
-             f"summary-{day_iso}-2", kind="summary"),
-        make(day_iso, "今天有什么没做成、想留到明天的？",
-             "这条会成为明天问责的线索。",
-             f"summary-{day_iso}-3", kind="summary"),
-    ]
+    # 5. 留给明天的问责线索
+    add("今天有什么没做成、想留到明天的？",
+        "这条会成为明天问责的线索（也会进周回顾的素材）。")
+
+    return qs
 
 
 def build(day: Day, base: str, key: str) -> list[dict]:

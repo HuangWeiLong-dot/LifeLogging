@@ -1459,6 +1459,8 @@ def t_summary_questions():
     spec.loader.exec_module(lq)
 
     now = lq.datetime.now(lq.TZ).replace(minute=0, second=0, microsecond=0)
+    start = now - lq.timedelta(hours=1)
+    iso = lambda dt: dt.isoformat()          # noqa: E731
     day = now.date().isoformat()
 
     qs = lq.summary_questions(
@@ -1474,6 +1476,28 @@ def t_summary_questions():
     assert all(k.startswith(f"summary-{day}") for k in keys), keys
     # 第二题要把当天的真实数字带进去，而不是空泛地问
     assert "6.5" in qs[1]["text"], qs[1]["text"]
+
+    # ⚠️ 数据齐的时候题更多、更具体：电脑 / 手机 / 位置各一题
+    rich = lq.summary_questions(
+        day,
+        [{"place": "望京, 北京朝阳", "minutes": 150.0,
+          "start": iso(start), "end": iso(now), "is_coord": False}],
+        [{"metric": "unlock", "ts_utc": iso(start)},
+         {"metric": "app_switch", "value_text": "com.tencent.mm",
+          "ts_utc": iso(start)}],
+        {"today": {"total_hours": 6.5,
+                   "by_category": [["Work", 3.2]],
+                   "top_apps": [["Code.exe", 2.1]]}},
+    )
+    assert len(rich) == 5, [q["text"] for q in rich]
+    assert any("解锁 1 次" in q["text"] for q in rich), "手机那题没出"
+    assert any("望京" in q["text"] for q in rich), "位置那题没出"
+    assert any("Code.exe" in q["text"] for q in rich), "电脑那题没带最久的应用"
+
+    # 没有位置/手机数据时，**不能硬问** —— 只问有数据的那几块
+    lean = lq.summary_questions(day, [], [], None)
+    assert len(lean) == 2, [q["text"] for q in lean]
+    assert all("去过" not in q["text"] and "解锁" not in q["text"] for q in lean)
 
     # 到点判定
     lq.SUMMARY_AT = "21:30"
