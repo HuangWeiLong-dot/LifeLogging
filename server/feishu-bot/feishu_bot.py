@@ -125,6 +125,14 @@ PUSH_AT = os.environ.get("FEISHU_PUSH_AT", "08:30")
 # 模板答不了的问题，要不要花钱交给 LLM。设成 0 就纯模板（零成本）。
 FREEFORM_LLM = os.environ.get("FEISHU_FREEFORM_LLM", "1").lower() not in (
     "", "0", "false", "no", "off")
+
+# 服务器每 30 分钟生成的**实时题**，要不要尽快单独推给你。
+# 关掉的话就只剩每天 08:30 那次整批推送 —— 那样「实时提问」名不副实。
+LIVE_PUSH = os.environ.get("FEISHU_LIVE_PUSH", "1").lower() not in (
+    "", "0", "false", "no", "off")
+# 多久去中继看一眼有没有新的实时题。生成器是 30 分钟一次，这里比它密，
+# 所以题生成后最多几分钟就到手机上。
+LIVE_POLL_MIN = max(1, int(os.environ.get("FEISHU_LIVE_POLL_MIN", "5") or 5))
 TZ_NAME = os.environ.get("FEISHU_TZ", "Asia/Shanghai")
 
 try:
@@ -483,6 +491,10 @@ def canonicalise(q: dict, raw: str) -> tuple[str | None, str, str]:
 # ── 渲染 ────────────────────────────────────────────────────────────
 def render_question(q: dict, remaining: int) -> str:
     kind = {"commitment": "问责", "routine": "常规"}.get(str(q.get("kind") or ""), "")
+    # 实时题单独标出来：它是「刚刚根据你今天的行踪生成的」，和晚上批量生成的
+    # 问责批性质不同，混在一起会让人以为系统在乱问。
+    if str(q.get("source") or "") == "live":
+        kind = "实时"
     head = f"还剩 {remaining} 题" + (f"（{kind}）" if kind else "")
     lines = [head]
 
@@ -793,6 +805,73 @@ def worker_loop() -> None:
 
 
 # ── 定时主动推送 ────────────────────────────────────────────────────
+def push_next_live(open_id: str) -> bool:
+    """有新的**实时题**就立刻推一题。返回是否推了。
+
+    ⚠️ 为什么需要它。
+
+        `live_questions.py` 每 30 分钟把当天的行踪/手机数据扫一遍，生成一题推到
+        中继 —— 但它**只生成、不发送**。而机器人原来只在每天 08:30 推一次。
+        于是「实时提问」的实际效果是：第二天早上一次性看到一堆昨天的题。
+        名字和效果差得很远。实测由用户指出。
+
+    三条约束：
+
+      · **只在没在等答案时推**（`awaiting` 为空）。否则会把正在答的那题顶掉，
+        用户刚打了一半的答案会被当成另一题的答案。
+      · **只推 source="live" 的题**。笔记本那批问责题仍然每天整批推一次 ——
+        它们是「晚上的事」，不该在白天插进来。
+      · **先发再落状态**，和 advance() 同一个理由：发送失败不该留下一个
+        「在等一题用户没见过的题」的状态。
+    """
+    state = load_state()
+    if state.get("awaiting"):
+        return False
+
+    try:
+        pending = relay_pending()
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN: 实时题轮询失败：{type(e).__name__}: {e}", file=sys.stderr)
+        return False
+
+    live_qs = [q for q in pending if str(q.get("source") or "") == "live"]
+    if not live_qs:
+        return False
+
+    sent = state.get("sent")
+    if not isinstance(sent, dict):
+        sent = {}
+    for q in live_qs:
+        qid = str(q.get("id") or "")
+        if not qid or qid in sent:
+            continue
+        send_text(open_id, render_question(q, len(live_qs)))
+        state["awaiting"] = qid
+        sent[qid] = datetime.now(TZ).isoformat(timespec="seconds")
+        state["sent"] = sent
+        save_state(state)
+        print(f"[live-push] {qid}")
+        return True
+    return False
+
+
+def live_push_loop() -> None:
+    """每隔 LIVE_POLL_MIN 分钟看一眼有没有新的实时题。"""
+    if not LIVE_PUSH:
+        print("FEISHU_LIVE_PUSH=0，不主动推实时题（只剩每天定时那一次）。")
+        return
+    if not OWNER_OPEN_ID:
+        print("WARN: 没配 FEISHU_OWNER_OPEN_ID，实时题推不了。", file=sys.stderr)
+        return
+    print(f"→ 实时题轮询：每 {LIVE_POLL_MIN} 分钟")
+    while True:
+        try:
+            push_next_live(OWNER_OPEN_ID)
+        except Exception as e:  # noqa: BLE001
+            print(f"WARN: 实时题循环出错：{type(e).__name__}: {e}", file=sys.stderr)
+        time.sleep(LIVE_POLL_MIN * 60)
+
+
 def push_loop() -> None:
     """每天 PUSH_AT 主动推一次。这就是选飞书而不是 QQ 的全部理由。"""
     if not PUSH_AT:
@@ -892,6 +971,8 @@ def run() -> None:
 
     threading.Thread(target=worker_loop, daemon=True).start()
     threading.Thread(target=push_loop, daemon=True).start()
+    # 实时题单独一个循环：它要按分钟级去看中继，而不是等每天 08:30 那一次。
+    threading.Thread(target=live_push_loop, daemon=True).start()
     # 提前把 GeoNames 城市表准备好。第一次要下载 30–40 MB，那一下绝不能在
     # 处理用户消息的线程里发生 —— 否则机器人会显得「卡死」很久。
     threading.Thread(target=live.warm_geocoding, daemon=True).start()

@@ -976,6 +976,10 @@ def t_live_questions():
         #    「这是 X 月 X 日的题」—— 缺了的话，前一天的实时题会以「今天」
         #    的口吻出现在今天，看着正常但是错的。
         assert [q["day"] for q in both] == [day, day], both
+        # ⚠️ 还要带**来源**。机器人靠它区分「现在就推」（实时批）和
+        #    「每天整批推」（问责批）—— 没有这个字段，实时提问就变成了
+        #    「第二天早上一次性看到一堆昨天的题」。实测由使用者指出。
+        assert [q["source"] for q in both] == ["laptop", "live"], both
 
         # 答掉一题 → 并集里就该没了（去重靠的是 answered_ids，不是文件）
         pr.append_events([{"ts": int(datetime.now(timezone.utc).timestamp()),
@@ -1305,6 +1309,72 @@ def t_feishu_api_error_hints():
 
 check("feishu: 21001 要指向数据安全策略，并**明确否定** IP 白名单",
       t_feishu_api_error_hints)
+
+
+def t_feishu_live_push():
+    """实时题要**尽快单独推**，而且不能打断正在答的那题。
+
+    ⚠️ 实测踩到的缺口：服务器每 30 分钟生成实时题推到中继，但机器人只在每天
+       08:30 推一次 —— 于是「实时提问」的实际效果是「第二天早上一次性看到
+       一堆昨天的题」。生成和送达是两件事，中间那段当时是断的。
+
+    这个测试钉三件事：
+      · 只有问责批时**不推**（它走每天整批）
+      · 有实时题时推一条，并记进 sent
+      · 正在等答案时**不插队**
+    """
+    import importlib.util
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "fb_lp", root / "server" / "feishu-bot" / "feishu_bot.py")
+    fb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fb)
+
+    box: dict = {"state": {}, "sent": []}
+    pending: dict = {"qs": []}
+    fb.load_state = lambda: box["state"]
+    fb.save_state = lambda s: box.__setitem__("state", s)
+    fb.send_text = lambda oid, text: box["sent"].append(text)
+    fb.relay_pending = lambda: pending["qs"]
+
+    day = fb.datetime.now(fb.TZ).date().isoformat()
+    laptop = {"id": f"{day}-lap", "day": day, "source": "laptop",
+              "format": "yes_no", "text": "问责批的题"}
+    live = {"id": f"{day}-liv", "day": day, "source": "live",
+            "format": "text", "text": "实时批的题"}
+
+    # 只有问责批 → 不推。它该等 08:30 的整批推送。
+    pending["qs"] = [laptop]
+    box["state"] = {}
+    assert fb.push_next_live("ou_x") is False, "问责批不该被实时循环推出去"
+    assert box["sent"] == []
+
+    # 有实时题 → 推且只推一题
+    pending["qs"] = [laptop, live]
+    assert fb.push_next_live("ou_x") is True
+    assert box["state"]["awaiting"] == f"{day}-liv", box["state"]
+    assert f"{day}-liv" in box["state"]["sent"]
+    assert len(box["sent"]) == 1
+    assert "实时" in box["sent"][0], "题干里该标明是实时题"
+    assert "问责批的题" not in box["sent"][0], "不该把问责批一起推出去"
+
+    # 还在等答案 → 不插队（哪怕又来了新题）
+    live2 = {"id": f"{day}-liv2", "day": day, "source": "live",
+             "format": "text", "text": "第二道实时题"}
+    pending["qs"] = [laptop, live, live2]
+    assert fb.push_next_live("ou_x") is False, "正在等答案时不该插队"
+    assert len(box["sent"]) == 1
+
+    # 答完了，但同一题不重复推
+    box["state"]["awaiting"] = None
+    assert fb.push_next_live("ou_x") is True, "答完之后该推下一道新题"
+    assert box["state"]["awaiting"] == f"{day}-liv2"
+    assert len(box["sent"]) == 2
+
+
+check("feishu: 实时题尽快单独推（不插队 / 不重复 / 不夹带问责批）",
+      t_feishu_live_push)
 
 
 # ── 7d-3. 日记中继 ──────────────────────────────────────────────────

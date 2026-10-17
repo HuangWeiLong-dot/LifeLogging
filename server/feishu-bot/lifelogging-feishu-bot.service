@@ -59,6 +59,12 @@ Environment=LIFELOGGING_DATA_DIR=/var/lib/lifelogging/geo
 # 每天几点主动推。留空 = 不主动推，只被动应答。
 Environment=FEISHU_PUSH_AT=08:30
 
+# 服务器每 30 分钟生成的**实时题**，尽快单独推给你（不必等到第二天早上）。
+# ⚠️ 只在没在等答案时才推，所以不会打断你正在答的那题。
+Environment=FEISHU_LIVE_PUSH=1
+# 多久去中继看一眼有没有新题（分钟）。生成器是 30 分钟一次。
+# Environment=FEISHU_LIVE_POLL_MIN=5
+
 # 模板答不了的问题要不要花钱交给模型。设 0 = 纯模板、零成本。
 # ⚠️ 每天还有一道**硬上限**（默认 10 次，见 live.py 的 LLM_DAILY_CAP），
 #    而且每次调用都走 budget 那套预检，超了当日 daily_cap 就拒答。

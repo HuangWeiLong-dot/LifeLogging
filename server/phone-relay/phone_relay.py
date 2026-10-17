@@ -566,7 +566,11 @@ def pending_questions(include_live: bool = False) -> tuple[dict | None, list[dic
     done = answered_ids()
     seen: set[str] = set()
     items: list[dict] = []
-    for payload in (laptop, live):
+    # ⚠️ 带上来源。飞书机器人要区分「笔记本的问责批」和「服务器现生成的实时批」——
+    #    实时批要**尽快单独推**（见 feishu_bot 的 live_push_loop），问责批仍然
+    #    每天整批推一次。没有这个字段的话，机器人只能按 id 猜，或者一视同仁，
+    #    而一视同仁正是「实时提问」变成了「第二天早上一次性看到」的原因。
+    for payload, src in ((laptop, "laptop"), (live, "live")):
         for x in ((payload or {}).get("questions") or []):
             if not isinstance(x, dict):
                 continue
@@ -584,6 +588,7 @@ def pending_questions(include_live: bool = False) -> tuple[dict | None, list[dic
             #    渲染那一层需要这个日期才能把话说明白，所以这里补上。
             item = dict(x)
             item["day"] = str((payload or {}).get("day") or "")
+            item["source"] = src
             items.append(item)
     return primary, items
 
