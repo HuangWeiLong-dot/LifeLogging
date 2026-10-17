@@ -54,7 +54,7 @@ import json
 import os
 import sys
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -348,6 +348,32 @@ def relay_desktop(base: str, key: str) -> dict | None:
         return None
 
 
+# 收尾里的「常规题」：**数据看不见的那些维度**。
+#
+# ⚠️ 按天轮换，不是每天问同样两题。同样的问句连问一周，回答会退化成
+#    「还行」「正常」—— 那就等于没问。轮换让每个维度隔几天被认真问一次。
+#
+# ⚠️ 条目数用质数（7），轮换步长 2 —— 这样七天内能走遍所有维度，且相邻两天
+#    不会是同一题。
+ROUTINE_POOL: tuple[tuple[str, str], ...] = (
+    ("今天体力上是什么状态？什么时候开始明显下降的？",
+     "身体的感觉数据看不到 —— 步数和心率只能说明你动过。"),
+    ("今天心情怎么样？有没有哪一段明显好起来或者沉下去？",
+     "情绪数据看不到。"),
+    ("今天和谁待在一起的时间比较长？聊了什么？",
+     "人际数据看不到 —— 位置只说明你们在同一个地方。"),
+    ("昨晚睡得怎么样？今天有没有因此受影响？",
+     "睡眠质量只有你知道，手环只能测时长。"),
+    ("今天的饭是按点吃的吗？有没有哪一餐跳过了？",
+     "吃饭不产生事件。"),
+    ("今天有没有一段是真正休息的（不是刷手机）？",
+     "「休息」和「娱乐」在数据上分不开。"),
+    ("今天学到了什么以前不知道的？",
+     "学到的东西不会出现在窗口标题里。"),
+)
+ROUTINE_PER_DAY = 2
+
+
 def summary_questions(day_iso: str, stays: list[dict],
                       events: list[dict], snap: dict | None) -> list[dict]:
     """晚上收尾的几道题。答完之后机器人会用 LLM 写一段当天总结。
@@ -363,7 +389,9 @@ def summary_questions(day_iso: str, stays: list[dict],
       2. 电脑分布 —— 对照体感：统计说的和你感觉的一样吗
       3. 手机节奏 —— 解锁/切换次数，问「哪一段是真投入」
       4. 位置 —— 去过几个地方、最久的是哪，问计划外的那次
-      5. 没做成、想留到明天 —— 明天的问责线索
+      5. 常规题 ×2 —— **数据看不见的维度**（体力/心情/人际/睡眠/吃饭/休息/
+         学习），按天轮换，见 ROUTINE_POOL
+      6. 没做成、想留到明天 —— 明天的问责线索
 
     ⚠️ **某一块没有数据就不问那一题**（比如位置数据缺失的那天）。
        硬问一句「今天去了哪」只会让你没法答，还会污染总结。
@@ -380,9 +408,14 @@ def summary_questions(day_iso: str, stays: list[dict],
 
     qs: list[dict] = []
 
-    def add(text: str, evidence: str) -> None:
-        qs.append(make(day_iso, text, evidence,
-                       f"summary-{day_iso}-{len(qs) + 1}", kind="summary"))
+    def add(text: str, evidence: str, routine: bool = False) -> None:
+        q = make(day_iso, text, evidence,
+                 f"summary-{day_iso}-{len(qs) + 1}", kind="summary")
+        if routine:
+            # kind 仍是 summary（收尾流程靠它判断「答完了没有」），
+            # 只是打个标记，让机器人把它显示成「常规」。
+            q["routine"] = True
+        qs.append(q)
 
     # 1. 只能问你的那一件
     add("今天最值得记住的一件事是什么？",
@@ -411,7 +444,18 @@ def summary_questions(day_iso: str, stays: list[dict],
             "这些停留里有哪一次是计划外的？",
             "位置来自 Dawarich 的停留推导；只有 ≥20 分钟的停留才算。")
 
-    # 5. 留给明天的问责线索
+    # 常规题：数据看不见的维度，按天轮换
+    if ROUTINE_PER_DAY > 0 and ROUTINE_POOL:
+        n = len(ROUTINE_POOL)
+        try:
+            ord_ = date.fromisoformat(day_iso).toordinal()
+        except ValueError:
+            ord_ = 0
+        for k in range(min(ROUTINE_PER_DAY, n)):
+            text, evidence = ROUTINE_POOL[(ord_ * 2 + k) % n]
+            add(text, evidence, routine=True)
+
+    # 最后一道：留给明天的问责线索
     add("今天有什么没做成、想留到明天的？",
         "这条会成为明天问责的线索（也会进周回顾的素材）。")
 

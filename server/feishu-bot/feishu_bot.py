@@ -543,7 +543,9 @@ def render_question(q: dict, remaining: int) -> str:
     # 混在一起会让人以为系统在乱问。
     # ⚠️ 收尾题也带 source="live"，所以必须先判 kind。
     if str(q.get("kind") or "") == "summary":
-        kind = "收尾"
+        # 收尾流程里的「常规题」（体力/心情/人际…）单独标出来 —— 它们和
+        # 数据拼出来的题性质不同，混在一起会让人以为系统在瞎问。
+        kind = "常规" if q.get("routine") else "收尾"
     elif str(q.get("source") or "") == "live":
         kind = "实时"
     head = f"还剩 {remaining} 题" + (f"（{kind}）" if kind else "")
