@@ -422,7 +422,20 @@ def canonicalise(q: dict, raw: str) -> tuple[str | None, str]:
 def render_question(q: dict, remaining: int) -> str:
     kind = {"commitment": "问责", "routine": "常规"}.get(str(q.get("kind") or ""), "")
     head = f"还剩 {remaining} 题" + (f"（{kind}）" if kind else "")
-    lines = [head, "", str(q.get("text") or "").strip()]
+    lines = [head]
+
+    # ⚠️ 题干本身**不写「今天」**（见 live_questions.py 的注释）。日期在这里按
+    #    题目真实的 day 补上。
+    #
+    #    为什么必须有这一步：实时题的有效期是 1 天，所以**昨天晚上生成的题可能
+    #    今天早上才被读到**。题干要是写着「今天 16:23–18:08 …」，而那是昨天的
+    #    数据 —— 看着完全正常，但它是错的。实测在第一次联通时就踩到了。
+    day = str(q.get("day") or "")
+    today = datetime.now(TZ).date().isoformat()
+    if day and day != today:
+        lines += ["", f"⚠️ 这是 **{day}** 的题，不是今天的。"]
+
+    lines += ["", str(q.get("text") or "").strip()]
 
     evidence = str(q.get("evidence") or "").strip()
     if evidence:

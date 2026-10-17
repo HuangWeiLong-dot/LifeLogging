@@ -574,7 +574,17 @@ def pending_questions(include_live: bool = False) -> tuple[dict | None, list[dic
             if not qid or qid in done or qid in seen:
                 continue          # 已答过、或两个来源里重复的，只留一条
             seen.add(qid)
-            items.append(x)
+            # ⚠️ 把「这题是哪天的」一起带出去，**不要**改存的原件。
+            #
+            #    提问正文里常常写着「今天 16:23–18:08 …」。实时题可能隔天才被
+            #    读到（晚上生成的、第二天早上才回），而 `questions-live-*` 的
+            #    有效期是 1 天 —— 于是**昨天的题会以「今天」的口吻出现在今天**，
+            #    看着完全正常，但它是错的。实测踩到过。
+            #
+            #    渲染那一层需要这个日期才能把话说明白，所以这里补上。
+            item = dict(x)
+            item["day"] = str((payload or {}).get("day") or "")
+            items.append(item)
     return primary, items
 
 

@@ -972,6 +972,10 @@ def t_live_questions():
         # 飞书那条：两批的并集
         _, both = pr.pending_questions(include_live=True)
         assert [q["id"] for q in both] == [f"{day}-lap1", f"{day}-liv1"], both
+        # ⚠️ 每题都要带上「它属于哪一天」。渲染层靠它决定要不要写
+        #    「这是 X 月 X 日的题」—— 缺了的话，前一天的实时题会以「今天」
+        #    的口吻出现在今天，看着正常但是错的。
+        assert [q["day"] for q in both] == [day, day], both
 
         # 答掉一题 → 并集里就该没了（去重靠的是 answered_ids，不是文件）
         pr.append_events([{"ts": int(datetime.now(timezone.utc).timestamp()),
@@ -1021,7 +1025,10 @@ def t_live_question_rules():
     q = lq.rule_long_stay(DAY, [stay], [])
     assert q, "150 分钟的停留应该问一句"
     assert "2 小时 30 分" in q["text"] and "望京" in q["text"], q["text"]
-    assert q["text"].startswith("今天 14:05–16:35"), q["text"]
+    assert q["text"].startswith("14:05–16:35"), q["text"]
+    # ⚠️ 题干里**不能**出现「今天」。这题可能隔天才被读到，而「昨天的事」用
+    #    「今天」的口吻说出来，看着完全正常但它是错的。日期由渲染层按 day 补。
+    assert "今天" not in q["text"], f"题干不该写死「今天」：{q['text']}"
     # ⚠️ 实时题是文字题：apply_answers 对 text 永远判「没完成」，
     #    所以它**不会去勾任何任务** —— 这正是要的，实时题只是问一句。
     assert q["format"] == "text" and q["ref"] == ""
@@ -1047,6 +1054,7 @@ def t_live_question_rules():
     q3 = lq.rule_phone_silence(DAY, [], evs)
     assert q3 and "2 小时 40 分" in q3["text"], q3
     assert "都没解锁" in q3["text"]
+    assert "今天" not in q3["text"], f"题干不该写死「今天」：{q3['text']}"
 
     # 只有一条解锁 → 没有间隔可言，问不出来
     assert lq.rule_phone_silence(DAY, [], [unlock(9, 0)]) is None

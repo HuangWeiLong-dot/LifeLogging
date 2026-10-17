@@ -217,14 +217,18 @@ def rule_long_stay(day_iso: str, stays: list[dict], _events: list[dict]) -> dict
 
     where = best["place"]
     span = f"{_hhmm(best['start'])}–{_hhmm(best['end'])}"
+    # ⚠️ 正文里**不要写「今天」**。这题可能隔天才被读到，而「昨天的事」用
+    #    「今天」的口吻说出来，看着完全正常但它是错的。日期由渲染那一层按
+    #    题目真实的 day 补上（见 feishu_bot.render_question）。
     if best["is_coord"]:
         # 反查不出地名时**别装作认识那个地方**，直接用坐标，
         # 并在证据里说明为什么是坐标。
-        text = f"今天 {span} 你在 {where} 待了 {_hm(best['minutes'])}，那是在做什么？"
-        evidence = "位置来自手机 GPS / Dawarich；服务器上没有城市数据表，所以只有坐标。"
+        text = f"{span} 你在 {where} 待了 {_hm(best['minutes'])}，那是在做什么？"
+        evidence = ("位置来自手机 GPS / Dawarich；服务器上没有城市数据表，"
+                    f"所以只有坐标。（{day_iso}）")
     else:
-        text = f"今天 {span} 你在{where}待了 {_hm(best['minutes'])}，那是在做什么？"
-        evidence = f"位置来自手机 GPS / Dawarich 的停留推导（{where}）。"
+        text = f"{span} 你在{where}待了 {_hm(best['minutes'])}，那是在做什么？"
+        evidence = f"位置来自手机 GPS / Dawarich 的停留推导（{where}，{day_iso}）。"
     return make(day_iso, text, evidence, f"longstay-{best['start']}")
 
 
@@ -257,10 +261,11 @@ def rule_phone_silence(day_iso: str, _stays: list[dict], events: list[dict]) -> 
         return None
 
     a, b, gap = best
-    text = (f"今天 {a.strftime('%H:%M')}–{b.strftime('%H:%M')} 手机一次都没解锁"
+    # 同上：不写「今天」，日期交给渲染层。
+    text = (f"{a.strftime('%H:%M')}–{b.strftime('%H:%M')} 手机一次都没解锁"
             f"（{_hm(gap)}），那段时间在干嘛？")
     return make(day_iso, text,
-                "来自中继上的手机解锁事件（Tasker 上报），间隔是实测的。",
+                f"来自中继上的手机解锁事件（Tasker 上报），间隔是实测的。（{day_iso}）",
                 f"silence-{a.isoformat()}")
 
 
@@ -281,10 +286,11 @@ def rule_heavy_app(day_iso: str, _stays: list[dict], events: list[dict]) -> dict
     name, minutes = top[0]
     if minutes < MIN_APP_MIN:
         return None
-    text = f"今天 {name} 用了 {_hm(minutes)}，是整天都开着，还是真的在用它？"
+    # 同上：不写「今天」。
+    text = f"{name} 用了 {_hm(minutes)}，是整天都开着，还是真的在用它？"
     return make(day_iso, text,
                 f"来自手机前台时长（相邻两次应用切换的时间差推导，是**下界**）："
-                f"今天合计前台 {_hm(s.get('foreground_minutes') or 0)}。",
+                f"{day_iso} 合计前台 {_hm(s.get('foreground_minutes') or 0)}。",
                 f"heavyapp-{name}")
 
 
