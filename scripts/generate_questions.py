@@ -40,8 +40,9 @@ import argparse
 import hashlib
 import json
 import re
+import sqlite3
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -99,8 +100,9 @@ basing it on. "Commit the repo in the first 15 minutes of the session" beats \
 "stay focused".
 - Do not moralise, do not congratulate, do not explain why the question matters. \
 Ask the question and stop.
-- If a commitment has already been carried over more than once, say how many days \
-it has slipped - that is the whole point.
+- The task list may annotate a task with "← 已经挂了 N 天" (it has been open for N \
+days). When it does, say N in the question - a task that has slipped for days is \
+the whole point of asking about it.
 - Write the question, the evidence and any options in __LANG_NAME__. Keep proper \
 nouns, app names, file paths and numbers as they are.
 
@@ -210,6 +212,112 @@ def read_open_tasks() -> list[str]:
     return out
 
 
+def _timeline(day: Day) -> dict:
+    p = STATE / f"timeline-{day.iso}.json"
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def read_notes(day: Day) -> list[str]:
+    """当天他自己记的笔记（飞书里发的一句话）。
+
+    ⚠️ 这是全系统**最可靠**的材料：不是推断、不是模型写的，是他直接说的。
+       问责题引用它，比引用任何统计数字都更有力。
+    """
+    return [str(n.get("text") or "").strip()
+            for n in (_timeline(day).get("notes") or [])
+            if str(n.get("text") or "").strip()]
+
+
+def read_time_sinks(day: Day) -> list[str]:
+    """被规则标成「黑洞」的时间块。
+
+    点名「18:22 那 26 分钟你在 Chrome 里看什么」比「你今天效率不高」有用得多 ——
+    后者既不能被回答，也不能被证伪。
+    """
+    out: list[str] = []
+    for b in (_timeline(day).get("blocks") or []):
+        if not b.get("blackhole"):
+            continue
+        titles = " / ".join(str(t) for t in (b.get("titles") or [])[:2])
+        out.append(f"{b.get('time', '')} {b.get('hours', '?')}h {b.get('app', '')}"
+                   + (f" — {titles[:80]}" if titles else ""))
+    return out[:6]
+
+
+def read_previous_qa(day: Day) -> list[str]:
+    """前一天早上的问题 + 他当时怎么答的。
+
+    ⚠️ 回答落在**作答那天**（中继就是这么记的），所以这里配的是「前一天生成的
+       问题」和事件表里的答案，按题号对上。答「没做」的那些是第二天最好的
+       问责素材 —— 比任何数据都直接。
+    """
+    prev = day.d - timedelta(days=1)
+    qp = STATE / f"questions-{prev.isoformat()}.json"
+    if not qp.exists():
+        return []
+    try:
+        payload = json.loads(qp.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    texts = {str(q.get("id")): str(q.get("text") or "")
+             for q in (payload.get("questions") or []) if q.get("id")}
+    if not texts:
+        return []
+
+    try:
+        conn = sqlite3.connect(STATE / "events.db")
+        conn.execute("PRAGMA busy_timeout=5000;")
+        try:
+            rows = conn.execute(
+                """SELECT value_text FROM events
+                   WHERE domain='question' AND metric='answer'"""
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.OperationalError:
+        return []
+
+    answers: dict[str, str] = {}
+    for (vt,) in rows:
+        parts = str(vt or "").split("|", 2)
+        if parts[0] in texts:
+            note = parts[2] if len(parts) > 2 else ""
+            val = parts[1] + (f"（{note}）" if note else "")
+            answers[parts[0]] = val
+
+    return [f"Q: {texts[qid]}  →  A: {answers[qid]}"
+            for qid in texts if qid in answers]
+
+
+def task_age_days(task: str, day: Day, lookback: int = 7) -> int:
+    """这条任务在往前**连续**几天的 Adjustments 里出现过。
+
+    系统提示词早就要求「挂了好几天就说几天」，但以前的输入里根本没有这个信息，
+    模型只能猜。这里补上。
+
+    ⚠️ 复用 `apply_answers.find_task` 的比对逻辑 —— 再写一套「这两句话算不算
+       同一条任务」的模糊匹配，两边迟早会给出不同答案，而那种不一致没人会发现。
+    """
+    try:
+        from apply_answers import find_task
+    except Exception:  # noqa: BLE001
+        return 0
+    n = 0
+    for i in range(1, lookback + 1):
+        d = Day(day.d - timedelta(days=i), day.tz)
+        adjs = read_journal_section(d, H_ADJUST)
+        if any(find_task([a], task) for a in adjs):
+            n += 1
+        else:
+            break
+    return n
+
+
 def data_digest(day: Day) -> str:
     """把当天的原始数字压成几行 —— 用来找「你说的」和「数据说的」对不上的地方。
 
@@ -263,32 +371,107 @@ def data_digest(day: Day) -> str:
     if track.get("span_km"):
         lines.append(f"- Movement: {track['points']} points over {track['span_km']} km")
 
+    # 这一天的「形状」——第一段活动、最后一段、以及最长的一块。
+    # 模型很难从上面那些汇总数字里自己推出「几点开电脑、几点收工」，
+    # 而这两点恰恰是最容易被拿来做问责的具体坐标。
+    blocks = tl.get("blocks") or []
+    if blocks:
+        def _start(b: dict) -> str:
+            return str(b.get("time") or "").split("-")[0]
+        longest = max(blocks, key=lambda b: float(b.get("hours") or 0))
+        lines.append(
+            f"- Day shape: first block {_start(blocks[0])}, last block "
+            f"{_start(blocks[-1])}; longest {longest.get('time')} "
+            f"{longest.get('hours')}h on {longest.get('app', '')}"
+        )
+
     return "\n".join(lines) if lines else "(nothing recorded)"
 
 
 def build_user_prompt(day: Day, adjustments: list[str], tasks: list[str],
-                      digest: str, n_commit: int, n_routine: int) -> str:
+                      digest: str, n_commit: int, n_routine: int,
+                      notes: list[str] | None = None,
+                      sinks: list[str] | None = None,
+                      prev_qa: list[str] | None = None,
+                      task_ages: dict[str, int] | None = None) -> str:
+    """拼输入。
+
+    ⚠️ 顺序**有意的**：他自己写的东西排在最前（笔记 → 昨天的问题与回答 →
+       今天的 Adjustments），统计数字排后面。模型最先读到什么，就最可能
+       以什么为依据发问 —— 而「他亲口说的」永远比「推算出来的」更有力。
+    """
     def bullets(items: list[str]) -> str:
         return "\n".join(f"- {x}" for x in items) if items else "(none)"
 
-    return f"""# Day to review: {day.iso} ({day.d.strftime('%A')})
+    def task_lines() -> str:
+        if not tasks:
+            return "(none)"
+        ages = task_ages or {}
+        out = []
+        for t in tasks:
+            age = int(ages.get(t) or 0)
+            out.append(f"- {t}" + (f"   ← 已经挂了 {age} 天" if age >= 1 else ""))
+        return "\n".join(out)
 
-## What they wrote in their own journal for that day
+    parts = [f"# Day to review: {day.iso} ({day.d.strftime('%A')})", ""]
 
-### Adjustments for Tomorrow (things they said they would do)
-{bullets(adjustments)}
+    parts += [
+        "## Things THEY said themselves (first-hand — the strongest material)",
+        "",
+    ]
+    if notes:
+        parts += ["### Notes they jotted during the day", ""]
+        parts += [f"- {n}" for n in notes[:20]]
+        parts += [""]
+    if prev_qa:
+        parts += [
+            "### Yesterday morning's questions and how they answered",
+            "",
+            "Answers of \"no\" here are the sharpest possible basis for a question:",
+            "they already admitted it did not happen.",
+            "",
+        ]
+        parts += [f"- {x}" for x in prev_qa[:20]]
+        parts += [""]
+    if not notes and not prev_qa:
+        parts += ["(nothing they wrote directly today)", ""]
 
-### Open tasks carried in the task list
-{bullets(tasks)}
+    parts += [
+        "## What their journal said they would do",
+        "",
+        "### Adjustments for Tomorrow",
+        bullets(adjustments),
+        "",
+        "### Open tasks carried in the task list",
+        task_lines(),
+        "",
+        "## What the recorded data says about that day",
+        "",
+        digest,
+        "",
+    ]
 
-## What the recorded data says about that day
+    if sinks:
+        parts += ["## Time sinks (blocks the rules flagged)", ""]
+        parts += [f"- {s}" for s in sinks]
+        parts += [""]
 
-{digest}
+    parts += [
+        "---",
+        "",
+        f"Write {n_commit} questions of kind \"commitment\" and {n_routine} of kind "
+        f"\"routine\", for the morning after this day.",
+        "",
+        "Every question must quote something concrete from above — a time, a number,",
+        "an app, a place, or a phrase they wrote. A question that could have been",
+        "asked without any of this evidence is a wasted question.",
+        "",
+        "Choose the answer format that lets them answer honestly (see the system",
+        "prompt): some are genuinely binary, but a batch where everything is yes_no",
+        "has thrown away the middle.",
+    ]
 
----
-
-Write {n_commit} questions of kind "commitment" and {n_routine} of kind "routine", \
-for the morning after this day. Every one must be answerable with "yes" or "no"."""
+    return "\n".join(parts)
 
 
 FORMATS = ("yes_no", "choice", "text")
@@ -472,7 +655,13 @@ def main() -> None:
     system = SYSTEM_PROMPT.replace(
         "__LANG_NAME__",
         "Chinese (简体中文)" if lang.startswith("zh") else "English")
-    user = build_user_prompt(day, adjustments, tasks, digest, n_commit, n_routine)
+    user = build_user_prompt(
+        day, adjustments, tasks, digest, n_commit, n_routine,
+        notes=read_notes(day),
+        sinks=read_time_sinks(day),
+        prev_qa=read_previous_qa(day),
+        task_ages={t: task_age_days(t, day) for t in tasks},
+    )
 
     ledger = CostLedger(CFG["budget"]["ledger_path"])
     llm = LLM(cfg=CFG, ledger=ledger)

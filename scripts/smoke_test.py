@@ -1699,6 +1699,53 @@ check("weekly: 没有依据的事实被丢掉 / 周一~周日边界正确 / 渲�
       t_weekly_review_parse)
 
 
+def t_question_prompt_enrichment():
+    """问责提示词：**他自己的话、昨天的回答、漂了几天、时间黑洞**都要进去。
+
+    ⚠️ 同时钉死一个曾经存在的自相矛盾：系统提示词要求「不能全是 yes_no」，
+       而用户提示词最后一句却写着 "Every one must be answerable with yes or no"
+       —— 模型照最后一句执行，整批就退化成二值题。这类矛盾不会报错，
+       只会让输出悄悄变差。
+    """
+    import generate_questions as gq
+    from common import Day
+
+    day = Day.parse("2026-10-16", ZoneInfo(CFG["timezone"]))
+    prompt = gq.build_user_prompt(
+        day,
+        adjustments=["明天先把书架收拾了"],
+        tasks=["整理书架"],
+        digest="- Recorded time: 7.5h total (Work 3h)",
+        n_commit=3, n_routine=2,
+        notes=["今天见了老王，聊了项目"],
+        sinks=["18:22-18:48 0.4h chrome.exe — 知乎 / 夸克"],
+        prev_qa=["Q: 20:11 那次节点上线了吗？  →  A: no"],
+        task_ages={"整理书架": 3},
+    )
+
+    # 第一手材料排在最前
+    assert prompt.index("今天见了老王") < prompt.index("### Adjustments for Tomorrow"), \
+        "他自己的笔记应该排在日记的 Adjustments 之前"
+    assert "Q: 20:11 那次节点上线了吗？" in prompt
+    assert "已经挂了 3 天" in prompt, "任务漂了几天必须显式说出来"
+    assert "18:22-18:48" in prompt, "时间黑洞没进去"
+    assert "Day" in prompt and "2026-10-16" in prompt
+
+    # ⚠️ 那个自相矛盾的指令不能再出现
+    assert "Every one must be answerable" not in prompt, \
+        "用户提示词又在要求「全部二值」，会和系统提示词的「混用格式」打架"
+    assert "yes_no" in prompt, "仍要提醒它按格式选，而不是一律二值"
+
+    # 没有素材时也不能崩，且要明确说「没有」
+    bare = gq.build_user_prompt(day, [], [], "(nothing recorded)", 1, 1)
+    assert "(nothing they wrote directly today)" in bare
+    assert "(none)" in bare
+
+
+check("questions: 笔记/昨日回答/漂了几天/时间黑洞都进 prompt，且不再自相矛盾",
+      t_question_prompt_enrichment)
+
+
 # ── 7d-3. 日记中继 ──────────────────────────────────────────────────
 print("\n[21] Journal relay")
 
