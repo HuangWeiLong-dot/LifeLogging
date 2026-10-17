@@ -417,6 +417,7 @@ sudo cat /var/lib/lifelogging/feishu-state.json
 |---|---|
 | 机器人聊天窗**连输入框都没有**，提示 `Can't message this bot yet` | 事件订阅缺 `im.message.receive_v1`。官方 FAQ 的原话：机器人必须订阅「接收消息」事件，聊天窗口才会出现对话框。**和版本发布、可用范围无关** —— 那两样都对也一样会这样。改完必须**重新发版本** |
 | 自己 `print` 的行迟迟不出现，而 `[Lark] …` 的行正常 | stdout 被块缓冲了（systemd 捕获的是管道）。旧版代码有这个问题，已用 `sys.stdout.reconfigure(line_buffering=True)` 修掉 —— 还这样的话说明服务器上跑的是旧代码 |
+| 收得到消息、**发不出去**；日志里 `code: 21001 Access denied by access control policy` | `EXIT 21001` 是**数据安全策略**拦的，⚠️**不是 IP 白名单**（那个是 `99991401`，而且官方文档明说它不作用于 token 接口）。去看两处：开发者后台 → 权限管理（每个 scope 是「已开通」还是「需申请/已拒绝/默认关闭」）；管理后台 → 安全 → 数据安全 → 应用权限管控。⚠️ 注意长连接**能连上**不代表 OpenAPI 可用——两者走不同的鉴权路径 |
 | 服务 active，日志里没有 `connected to wss://` | 出站被挡（**不要**给 unit 加 `IPAddressAllow=`/`RestrictAddressFamilies=`），或 App ID/Secret 不对 |
 | 起不来，报 `Job for … failed because of unavailable resources or another system error` | 十有八九是 `/etc/lifelogging/feishu-bot.env` **还没建**。这个 unit 里两个 `EnvironmentFile=` 都带了 `-`（见文件里的注释），所以正常情况下它会照常启动、由程序自己报清楚 —— 你要是看到 systemd 这句，说明装的是**旧版 unit**，重装一次 |
 | 起来又立刻退出，日志里 `✗ FEISHU_APP_ID 没填（或还是占位符）` | 就是字面意思：env 文件没建，或者占位符没换成真值。见上面第 2 步 |

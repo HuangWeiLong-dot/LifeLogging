@@ -1257,6 +1257,48 @@ check("feishu: 中继地址去问中继自己的 unit，不在 unit 里写死",
       t_feishu_relay_base)
 
 
+def t_feishu_api_error_hints():
+    """飞书的错误码要翻成「该去改什么」，而不是把栈甩给人看。
+
+    ⚠️ 实测踩到的那个：`code 21001 Access denied by access control policy`
+       看着**非常像** IP 白名单问题，实际不是 —— IP 白名单的码是 99991401，
+       而且官方文档明说它**不作用于 access_token 接口**。
+       21001 是 type=policy / subtype=access_denied，即权限被数据安全策略拦了。
+       我当时差点照 IP 白名单去指方向。
+
+       另一件实测的事：`--push-test` 原来直接把 traceback 甩出来，屏幕上最显眼
+       的是 lark_oapi 七八层调用栈，真正有用的那句缩在最后一行。
+    """
+    import importlib.util
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "fb_hint", root / "server" / "feishu-bot" / "feishu_bot.py")
+    fb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fb)
+
+    # 真实的异常长这样（--push-test 那次）：
+    real = RuntimeError(
+        "obtain self tenant access token failed, code: 21001, msg: "
+        "Access denied by access control policy. Contact the administrator "
+        "for assistance.")
+    got = fb.explain_api_error(real)
+    assert "21001" in got, got
+    assert "数据安全" in got, got
+    # ⚠️ 这条断言是重点：必须**明确否定** IP 白名单，否则下一个人还是会跑偏
+    assert "不是 IP 白名单" in got and "99991401" in got, got
+
+    assert "可用范围" in fb.explain_api_error(RuntimeError("code: 230013 x"))
+    assert "IP 白名单" in fb.explain_api_error(RuntimeError("code: 99991401 x"))
+
+    # 认不出来的错误不要瞎编一个原因
+    assert fb.explain_api_error(RuntimeError("something else entirely")) == ""
+
+
+check("feishu: 21001 要指向数据安全策略，并**明确否定** IP 白名单",
+      t_feishu_api_error_hints)
+
+
 # ── 7d-3. 日记中继 ──────────────────────────────────────────────────
 print("\n[21] Journal relay")
 

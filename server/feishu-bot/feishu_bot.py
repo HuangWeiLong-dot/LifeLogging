@@ -463,12 +463,42 @@ def feishu_client():
         return _client
 
 
+# 飞书那几个「查起来会跑偏」的错误码，各自的真实原因和该去哪儿。
+# ⚠️ 21001 那条特别值得留着：它**看起来**像 IP 白名单问题，实际不是 ——
+#    IP 白名单的码是 99991401，而且**根本不作用于 access_token 接口**。
+#    21001 是 type=policy / subtype=access_denied，即「你要的权限被数据安全
+#    管控策略拦了」。实测在这个坑上差点指错方向。
+_API_HINTS = (
+    ("21001",
+     "被飞书的**数据安全策略**拦了（不是 IP 白名单 —— 那个的码是 99991401，"
+     "而且不作用于 token 接口）。\n"
+     "      去看看两处：\n"
+     "        · 开发者后台 → 权限管理：每个 scope 的状态是「已开通」还是"
+     "「需申请 / 已拒绝 / 默认关闭」\n"
+     "        · 管理后台 → 安全 → 数据安全 → 应用权限管控：这个应用有没有被拦"),
+    ("230013", "目标用户不在机器人的**可用范围**里（或者被列进了禁用名单）。"),
+    ("99991401", "调用方的公网 IP 不在应用的 **IP 白名单**里（安全设置 → IP 白名单）。"),
+)
+
+
+def explain_api_error(err: BaseException) -> str:
+    """把一个飞书 API 异常翻成「该去改什么」。认不出来就原样返回。"""
+    text = f"{type(err).__name__}: {err}"
+    for code, hint in _API_HINTS:
+        if code in text:
+            return f"  ⚠️ code {code} —— {hint}"
+    return ""
+
+
 def send_text(open_id: str, text: str) -> None:
     """主动发一条文本。
 
     这里**不用 reply**（回复原消息）而是直接 create 到 open_id：少一层对
     message_id 的依赖，出错面更小。主动能力正是选飞书的全部理由，
     所以走的也是「主动消息」那条路径。
+
+    ⚠️ 拿 tenant_access_token 也在这一步发生（SDK 内部做），所以**权限/策略
+       类的问题会在这里第一次现形**，而不是在某个业务调用上。
     """
     from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
 
@@ -480,9 +510,19 @@ def send_text(open_id: str, text: str) -> None:
                          .content(json.dumps({"text": text}, ensure_ascii=False))
                          .build())
            .build())
-    resp = feishu_client().im.v1.message.create(req)
+    try:
+        resp = feishu_client().im.v1.message.create(req)
+    except Exception as e:  # noqa: BLE001
+        # SDK 拿不到 token 时是**抛异常**而不是返回 success=False 的响应，
+        # 所以两条路都要接住。
+        hint = explain_api_error(e)
+        raise RuntimeError(f"飞书发送失败：{type(e).__name__}: {e}"
+                           + (f"\n{hint}" if hint else "")) from None
     if not resp.success():
-        raise RuntimeError(f"飞书发送失败 code={resp.code} msg={resp.msg}")
+        raise RuntimeError(
+            f"飞书发送失败 code={resp.code} msg={resp.msg}"
+            + (f"\n{explain_api_error(RuntimeError(f'{resp.code}: {resp.msg}'))}"
+               if resp.code else ""))
 
 
 # ── 核心：推进一轮问答 ──────────────────────────────────────────────
@@ -809,7 +849,17 @@ def main() -> int:
             for p in problems:
                 print(f"  ✗ {p}", file=sys.stderr)
             return 1
-        send_text(OWNER_OPEN_ID, args.push_test)
+        try:
+            send_text(OWNER_OPEN_ID, args.push_test)
+        except Exception as e:  # noqa: BLE001
+            # ⚠️ **不要甩 traceback。** 这条命令是给人用来定位问题的，而一堆
+            #    栈帧只会把真正有用的那句「code 21001 … 该去哪儿改」埋掉。
+            #    实测就是这样的：屏幕上最显眼的是 lark_oapi 的七八层调用栈，
+            #    而「Access denied by access control policy」缩在最后一行。
+            print("  ✗ 发不出去。", file=sys.stderr)
+            for line in str(e).splitlines():
+                print(f"    {line}", file=sys.stderr)
+            return 1
         print(f"已发给 {OWNER_OPEN_ID}")
         return 0
 
