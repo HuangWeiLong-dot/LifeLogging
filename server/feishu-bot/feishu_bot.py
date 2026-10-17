@@ -91,6 +91,10 @@ except (AttributeError, ValueError):  # 极老的 Python 或已被替换的流
 
 # 让 `import live` 在「直接跑脚本」和「被 importlib 加载」两种情况下都成立。
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# `live_questions`（收尾题的生成器）在 scripts/ 下。它是**延迟 import** 的
+# （见 handle_end_day）—— 那个模块在 import 时会 load_config()，不想让它
+# 影响机器人启动。
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "scripts"))
 import live  # noqa: E402
 
 APP_ID = os.environ.get("FEISHU_APP_ID", "")
@@ -783,6 +787,56 @@ def advance(open_id: str) -> None:
     save_state(state)
 
 
+END_DAY_COMMANDS = ("/收尾", "/结束", "/收工", "/end")
+
+
+def handle_end_day(open_id: str) -> None:
+    """「我现在要结束这一天」—— 立刻出收尾三题，不等 21:30。
+
+    ⚠️ 一天什么时候结束只有你自己知道。`SUMMARY_AT` 是服务器按钟点猜的，
+       而这个命令把它变成一件由你发起的事。
+
+    ⚠️ 会覆盖当前 `awaiting`：你已经明确说「结束了」，那一道没答的就先放下。
+       它仍然留在中继上，之后还会再被问到（不会丢）。
+    """
+    day_iso = datetime.now(TZ).date().isoformat()
+    try:
+        # 延迟 import：live_questions 在 import 时会 load_config()，
+        # 不想让「配置文件有问题」把整个机器人拖得启动不了。
+        import live_questions as lq
+    except Exception as e:  # noqa: BLE001
+        send_text(open_id, f"收尾功能不可用：{type(e).__name__}: {e}")
+        return
+
+    try:
+        qs = lq.force_summary(day_iso, RELAY_BASE, RELAY_API_KEY)
+    except Exception as e:  # noqa: BLE001
+        print(f"ERROR 收尾题生成失败：{type(e).__name__}: {e}", file=sys.stderr)
+        send_text(open_id, f"收尾题没生成成：{type(e).__name__}: {e}")
+        return
+
+    if not qs:
+        send_text(open_id, "今天的收尾题都已经答完了。")
+        return
+
+    q = qs[0]
+    qid = str(q.get("id") or "")
+    send_text(open_id, render_question(q, len(qs)))
+
+    state = load_state()
+    state["awaiting"] = qid
+    sent = state.get("sent")
+    if not isinstance(sent, dict):
+        sent = {}
+    sent[qid] = datetime.now(TZ).isoformat(timespec="seconds")
+    state["sent"] = sent
+    asked = _asked_map(state, day_iso)
+    asked[qid] = {"text": str(q.get("text") or ""),
+                  "kind": str(q.get("kind") or "")}
+    save_state(state)
+    print(f"[end-day] 收尾开始，还剩 {len(qs)} 题")
+
+
 def handle_text(open_id: str, text: str) -> None:
     """一条用户消息进来之后做什么。跑在 worker 线程里，不受 3 秒限制。"""
     state = load_state()
@@ -810,12 +864,17 @@ def handle_text(open_id: str, text: str) -> None:
                   "\n"
                   "【白天与晚上】\n"
                   "  白天每个小时问你一次「刚才这一小时在干嘛」；\n"
-                  "  21:30 左右问三条收尾题，答完我给你写一段今天的总结。\n"
+                  "  发「/收尾」→ 立刻开始问三条收尾题，答完我给你写一段今天的总结。\n"
+                  "  （21:30 也会自动问一次，如果你还没发过）\n"
                   "\n"
                   "⚠️ 电脑数据来自笔记本每 10 分钟推的快照，答案里会写明\n"
                   "   「最后上报是几点」—— 是几小时前的就直说，别当成此刻。\n"
                   "⚠️ 日记和 vault 答不了：它们在笔记本的 Obsidian 库里，没推到服务器。\n"
                   "⚠️ 手表（步数/心率）还没接。")
+        return
+
+    if stripped in END_DAY_COMMANDS:
+        handle_end_day(open_id)
         return
 
     if stripped == "/pending":

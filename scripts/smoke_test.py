@@ -1809,6 +1809,68 @@ check("feishu: 跨夜的实时题不会吃掉第二天的第一句话（问责�
       t_live_question_expiry)
 
 
+def t_end_day_command():
+    """「/收尾」立刻推收尾题，不等 21:30。"""
+    import importlib.util
+    import types
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "fb_end", root / "server" / "feishu-bot" / "feishu_bot.py")
+    fb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fb)
+
+    today = datetime.now(fb.TZ).date().isoformat()
+    qs = [
+        {"id": f"{today}-sum1", "day": today, "kind": "summary",
+         "format": "text", "text": "今天最值得记住的一件事是什么？"},
+        {"id": f"{today}-sum2", "day": today, "kind": "summary",
+         "format": "text", "text": "哪一块和你想的不一样？"},
+    ]
+
+    calls: list[str] = []
+    state: dict = {}
+    fb.load_state = lambda: state
+    fb.save_state = lambda s: state.update(s)
+    fb.send_text = lambda oid, t: calls.append(t)
+
+    fake = types.ModuleType("live_questions")
+    fake.force_summary = lambda day_iso, base, key: list(qs)
+    old = sys.modules.get("live_questions")
+    sys.modules["live_questions"] = fake
+    try:
+        fb.handle_end_day("ou_x")
+    finally:
+        if old is not None:
+            sys.modules["live_questions"] = old
+        else:
+            sys.modules.pop("live_questions", None)
+
+    assert len(calls) == 1, calls
+    assert "今天最值得记住的一件事" in calls[0], calls[0]
+    assert state["awaiting"] == f"{today}-sum1"
+    assert f"{today}-sum1" in state["sent"]
+    assert state["asked"][f"{today}-sum1"]["kind"] == "summary"
+
+    # 都答完了要明确说一声，不能静默
+    calls.clear()
+    fake2 = types.ModuleType("live_questions")
+    fake2.force_summary = lambda day_iso, base, key: []
+    sys.modules["live_questions"] = fake2
+    try:
+        fb.handle_end_day("ou_x")
+    finally:
+        if old is not None:
+            sys.modules["live_questions"] = old
+        else:
+            sys.modules.pop("live_questions", None)
+    assert calls and "都已经答完" in calls[0], calls
+
+
+check("feishu: /收尾 立刻出收尾题（不等 21:30），答完会明说",
+      t_end_day_command)
+
+
 # ── 7d-3. 日记中继 ──────────────────────────────────────────────────
 print("\n[21] Journal relay")
 

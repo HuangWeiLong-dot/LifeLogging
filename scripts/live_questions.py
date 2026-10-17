@@ -424,6 +424,65 @@ def build(day: Day, base: str, key: str) -> list[dict]:
     return known
 
 
+def push(day_iso: str, base: str, key: str,
+         questions: list[dict]) -> tuple[bool, str]:
+    """把当天全部实时题推到中继，**成功之后**才落本地。返回 (成功?, 说明)。
+
+    ⚠️ 顺序不能反：先落本地的话，一次推送失败会让这条规则当天再也不发
+       （本地记着「已发」），而服务器上看不出任何异常 —— 这个项目一路在打的
+       正是这类静默失效。
+    """
+    payload = {"day": day_iso,
+               "generated_at": datetime.now(TZ).isoformat(timespec="seconds"),
+               "questions": [{k: v for k, v in q.items() if k != "_key"}
+                             for q in questions]}
+    try:
+        r = httpx.post(f"{base}/questions/live", json=payload,
+                       headers={"X-API-Key": key}, timeout=30.0)
+    except Exception as e:  # noqa: BLE001
+        return False, f"推不到中继 {base}：{e}"
+    if r.status_code == 404:
+        # 404 几乎只有这一个原因：服务器上跑的还是旧版中继。
+        return False, "中继没有 /questions/live —— 服务器上跑的还是旧版代码"
+    if r.status_code != 200:
+        return False, f"中继返回 {r.status_code}：{r.text[:200]}"
+    save_asked(day_iso, questions)
+    return True, str(r.json().get("count"))
+
+
+def fetch_pending(base: str, key: str) -> list[dict]:
+    r = httpx.get(f"{base}/questions/pending",
+                  headers={"X-API-Key": key}, timeout=20.0)
+    r.raise_for_status()
+    return [q for q in (r.json().get("questions") or []) if isinstance(q, dict)]
+
+
+def force_summary(day_iso: str, base: str, key: str) -> list[dict]:
+    """**立刻**生成当天的收尾三题（不等 SUMMARY_AT），返回还没答的那些。
+
+    ⚠️ 为什么需要它：「一天什么时候结束」只有你自己知道。原来收尾由**时钟**
+       决定（21:30），而你在飞书发一句命令，就应该是现在。
+
+    ⚠️ 已经生成过就不再生成，直接返回**还挂着**的那几道 —— 否则重复按会
+       生成第二套，题号不同、内容几乎一样。
+    """
+    day = Day.parse(day_iso, TZ)
+    known = load_asked(day_iso)
+    prefix = f"summary-{day_iso}"
+
+    if not any(str(q.get("_key") or "").startswith(prefix) for q in known):
+        events = relay_phone_events(day_iso, base, key)
+        stays = today_stays(day)
+        snap = relay_desktop(base, key)
+        qs = summary_questions(day_iso, stays, events, snap)
+        ok, detail = push(day_iso, base, key, known + qs)
+        if not ok:
+            raise RuntimeError(detail)
+
+    return [q for q in fetch_pending(base, key)
+            if str(q.get("kind") or "") == "summary"]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="服务器侧：根据当天数据生成实时提问")
     ap.add_argument("--date", default="today")
@@ -469,30 +528,11 @@ def main() -> int:
         print("  . 没有新题，不重复推")
         return 0
 
-    # ⚠️ 顺序：**先推中继、成功了再落本地**。
-    #    反过来的话，一次推送失败会让这条规则当天再也不发（本地记着「已发」），
-    #    而服务器上看不出任何异常 —— 正是这个项目一路在打的那类静默失效。
-    payload = {"day": day.iso, "generated_at": now.isoformat(timespec="seconds"),
-               "questions": [{k: v for k, v in q.items() if k != "_key"}
-                             for q in questions]}
-    try:
-        r = httpx.post(f"{base}/questions/live", json=payload,
-                       headers={"X-API-Key": key}, timeout=30.0)
-    except Exception as e:  # noqa: BLE001
-        print(f"  ⚠️  推不到中继 {base}：{e}")
+    ok, detail = push(day.iso, base, key, questions)
+    if not ok:
+        print(f"  ⚠️  {detail}")
         return 1
-    if r.status_code == 404:
-        # ⚠️ 404 几乎只有一个原因：服务器上跑的还是**旧版中继**，没有
-        #    /questions/live 这条路由。实测踩到过 —— 报错本身看不出这个。
-        print("  ⚠️  中继没有 /questions/live —— 服务器上跑的还是旧版代码。")
-        print("     在服务器上：sudo /opt/lifelogging/repo/server/deploy.sh")
-        return 1
-    if r.status_code != 200:
-        print(f"  ⚠️  中继返回 {r.status_code}：{r.text[:200]}")
-        return 1
-
-    save_asked(day.iso, questions)
-    print(f"  OK  {r.json().get('count')} 条已推（本次新增 {len(new)}）")
+    print(f"  OK  {detail} 条已推（本次新增 {len(new)}）")
     return 0
 
 
