@@ -219,6 +219,30 @@ def build_payload(day: Day) -> dict:
     now = datetime.now(TZ)
     aw_base = (CFG.get("sources") or {}).get("activitywatch", {}).get("api_base", "")
 
+    # ── 过去一小时 ──
+    #
+    # ⚠️ 服务器那边要做**每小时的**实时提问，而「今天累计」答不了「刚才在干嘛」。
+    #    服务器看不到 ActivityWatch（它在笔记本上），所以这一小时的事实必须由
+    #    这里算好带上去。
+    #
+    #    用**原始切片**而不是时间块：块是合并过的，可能跨过这一小时的边界，
+    #    拿它算「过去一小时」会多算或少算。
+    hour_start = now - timedelta(minutes=60)
+    lh_apps: dict[str, float] = {}
+    lh_cats: dict[str, float] = {}
+    for s in slices:
+        if s["ts"] < hour_start:
+            continue
+        app = str(s.get("app") or "")
+        title = str(s.get("title") or "")
+        cat, _conf = classify(app, title)
+        if cat == "__drop__":
+            continue
+        secs = float(s.get("dur") or 0.0)
+        if app:
+            lh_apps[app] = lh_apps.get(app, 0.0) + secs
+        lh_cats[cat] = lh_cats.get(cat, 0.0) + secs
+
     return {
         "day": day.iso,
         "pushed_at": now.isoformat(timespec="seconds"),
@@ -229,6 +253,17 @@ def build_payload(day: Day) -> dict:
                        if slices else None),
         "afk": afk_now(aw_base, now) if aw_base else None,
         "current": current_activity(slices, blocks),
+        # 给「每小时问一次」用：上一小时电脑上到底在干嘛。
+        # 单位统一成**分钟**，服务器那边不用再换算。
+        "last_hour": {
+            "from": hour_start.isoformat(timespec="seconds"),
+            "to": now.isoformat(timespec="seconds"),
+            "total_minutes": round(sum(lh_apps.values()) / 60.0, 1),
+            "top_apps": [[k, round(v / 60.0, 1)] for k, v in
+                         sorted(lh_apps.items(), key=lambda x: -x[1])[:5]],
+            "by_category": [[k, round(v / 60.0, 1)] for k, v in
+                            sorted(lh_cats.items(), key=lambda x: -x[1])],
+        },
         "today": {
             "total_hours": round(sum(by_cat.values()), 2),
             "by_category": [[k, round(v, 2)] for k, v in

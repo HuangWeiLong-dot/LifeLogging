@@ -7,9 +7,12 @@
     它问的是**昨天**的事，而且是「拿你自己写的话堵你」——那很有用，但它
     看不见今天正在发生的事。
 
-    这个脚本补的就是那一块：白天在服务器上扫今天的数据，发现值得一嘴的
-    片段就问。比如「你 14:05–16:30 在某个地方待了两小时半，那是在做什么？」
-    ——**在它还新鲜的时候问**，而不是等明天。
+    这个脚本补的就是那一块：白天在服务器上，**每个小时问一次**
+    「刚才这一小时你在干嘛」——在它还新鲜的时候问，而不是等明天。
+
+    题是**固定节拍**的，不是「够阈值才问」：哪怕过去一小时很平淡，也会照实
+    说「电脑上没记录、手机没解锁」，然后问你那段时间在做什么。阈值（停留
+    ≥30 分钟等）只用来决定**这一小时里哪件事最值得提**，不是发问的门槛。
 
 **两条线共同存在，互不替代**
 
@@ -28,9 +31,12 @@
     也不会编一个不存在的地名出来。开放式的自由问答是另一件事（那个走 LLM，
     并且受每日额度约束）。
 
-**同一件事不重复问**
+**同一小时不重复问**
 
-    每条规则有个稳定的 key；当天发过就记进 `live-asked-<day>.json`，不再发。
+    题的 key 里带着年份日期和小时（`hour-2026-10-17T14`）；发过就记进
+    `live-asked-<day>.json`，同一小时不再生成第二条。timer 每 30 分钟拉一次，
+    所以一小时里会跑两次 —— 第二次看到 key 已经存在，什么都不做。
+
     每次运行都把**当天已生成的全部**实时题重新推一遍（中继那边是覆写），
     所以那份本地记录是权威副本，不是缓存。
 
@@ -46,6 +52,7 @@ import argparse
 import hashlib
 import json
 import sys
+from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -66,11 +73,10 @@ ASK_UNTIL_HOUR = 22
 
 # 当天最多问几条。实时题是**补充**，不是主力 —— 一天刷十几条会让人把
 # 整条通道静音，那样问责批也一起收不到了。
-MAX_PER_DAY = 3
-
-MIN_STAY_MIN = 90        # 停留多久才值得问
-MIN_SILENCE_MIN = 90     # 手机静默多久才值得问
-MIN_APP_MIN = 150        # 某个应用前台多久才值得问
+# 停留多久才值得在那一小时的题里提一句。
+# ⚠️ 这**不是**「够久才问」的门槛 —— 每小时必问，这个值只决定
+#    「这一小时里哪件事最值得提」。路过、等红灯不算。
+MIN_STAY_MIN = 30
 
 
 def _unfilled(v: str) -> bool:
@@ -188,15 +194,6 @@ def today_stays(day: Day) -> list[dict]:
         return []
 
 
-def _hhmm(iso: str | None) -> str:
-    if not iso:
-        return ""
-    try:
-        return datetime.fromisoformat(str(iso)).astimezone(TZ).strftime("%H:%M")
-    except (TypeError, ValueError):
-        return ""
-
-
 def _hm(minutes: float) -> str:
     total = int(round(minutes))
     h, m = divmod(total, 60)
@@ -206,119 +203,138 @@ def _hm(minutes: float) -> str:
 
 
 # ── 规则 ────────────────────────────────────────────────────────────
-def rule_long_stay(day_iso: str, stays: list[dict], _events: list[dict]) -> dict | None:
-    """在某地待了很久 —— 那是在干什么？"""
-    best = None
-    for s in stays:
-        if s["minutes"] >= MIN_STAY_MIN and (best is None or s["minutes"] > best["minutes"]):
-            best = s
-    if not best:
+def _parse_iso(v: Any) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(v)).astimezone(TZ)
+    except (TypeError, ValueError):
         return None
 
-    where = best["place"]
-    span = f"{_hhmm(best['start'])}–{_hhmm(best['end'])}"
-    # ⚠️ 正文里**不要写「今天」**。这题可能隔天才被读到，而「昨天的事」用
-    #    「今天」的口吻说出来，看着完全正常但它是错的。日期由渲染那一层按
-    #    题目真实的 day 补上（见 feishu_bot.render_question）。
-    if best["is_coord"]:
-        # 反查不出地名时**别装作认识那个地方**，直接用坐标，
-        # 并在证据里说明为什么是坐标。
-        text = f"{span} 你在 {where} 待了 {_hm(best['minutes'])}，那是在做什么？"
-        evidence = ("位置来自手机 GPS / Dawarich；服务器上没有城市数据表，"
-                    f"所以只有坐标。（{day_iso}）")
-    else:
-        text = f"{span} 你在{where}待了 {_hm(best['minutes'])}，那是在做什么？"
-        evidence = f"位置来自手机 GPS / Dawarich 的停留推导（{where}，{day_iso}）。"
-    return make(day_iso, text, evidence, f"longstay-{best['start']}")
 
+def rule_hourly(day_iso: str, stays: list[dict], events: list[dict],
+                snap: dict | None, now: datetime) -> dict | None:
+    """**每小时一题**：从过去一小时的数据里挑最值得问的那件事。
 
-def rule_phone_silence(day_iso: str, _stays: list[dict], events: list[dict]) -> dict | None:
-    """手机长时间没解锁 —— 那段时间在干嘛？"""
-    unlocks = []
+    ⚠️ 这是**固定节拍**，不是「够阈值才问」。
+
+        最早的版本是三条阈值规则（长停留 ≥90 分 / 手机静默 ≥90 分 / 单应用
+        ≥150 分）。它们一天可能一次都不触发，于是「实时提问」实际上很少发生。
+        使用者要的是「每一个小时至少问一次，根据当前的数据」—— 所以改成：
+        **每小时一定有题**，阈值降级成「选材依据」（这一小时里哪件事最值得提）。
+
+        合并成一个规则还有个好处：一天不会冒出几条互相重叠的题
+        （比如同时问「你上午在哪」和「你上午手机怎么没动」）。
+
+    选材优先级：有位置 → 电脑有活动 → 手机有活动 → 都没有就照实说很平淡。
+    """
+    start = now - timedelta(hours=1)
+    span = f"{start.strftime('%H:%M')}–{now.strftime('%H:%M')}"
+
+    unlocks: list[datetime] = []
+    switches: list[str] = []
     for e in events:
-        if e.get("metric") != "unlock":
+        dt = _parse_iso(e.get("ts_utc"))
+        if dt is None or dt < start:
             continue
-        ts = e.get("ts_utc")
+        if e.get("metric") == "unlock":
+            unlocks.append(dt)
+        elif e.get("metric") == "app_switch":
+            sw = str(e.get("value_text") or "").strip()
+            if sw:
+                switches.append(sw)
+
+    # 电脑：笔记本每 10 分钟推一次的快照里带着「过去一小时」。
+    lh = (snap or {}).get("last_hour") or {}
+    d_apps = [(str(a), float(m)) for a, m in (lh.get("top_apps") or [])]
+    d_total = float(lh.get("total_minutes") or 0.0)
+
+    # 位置：这一小时里还在持续的停留（≥30 分钟才算「在那儿」，
+    # 路过不算 —— 否则每条题都会带上「你在某条路上」）。
+    stay = None
+    for s in stays:
+        if float(s.get("minutes") or 0) < MIN_STAY_MIN:
+            continue
+        end = _parse_iso(s.get("end"))
+        if end is not None and end < start:
+            continue          # 一小时前就结束了
+        if stay is None or s["minutes"] > stay["minutes"]:
+            stay = s
+
+    bits: list[str] = []
+    if stay:
+        where = str(stay.get("place") or "")
+        tag = "坐标 " if stay.get("is_coord") else ""
+        bits.append(f"位置：{tag}{where}（停留 {_hm(float(stay['minutes']))}）")
+    if d_apps:
+        bits.append("电脑：" + " · ".join(f"{a} {_hm(m)}" for a, m in d_apps[:3]))
+    elif d_total <= 0:
+        bits.append("电脑：没有记录到活动")
+
+    if unlocks:
+        line = f"手机：解锁 {len(unlocks)} 次"
+        # ⚠️ 桌面 / 系统界面不是「在用的应用」。不滤掉的话「切换最多」永远是
+        #    启动器（实测第一次跑就报了个 `com.miui.home`）——那这条信息就废了。
+        #    名单直接复用 normalize 里现成的那张，不另立一份。
         try:
-            dt = datetime.fromisoformat(str(ts)).astimezone(TZ)
-        except (TypeError, ValueError):
-            continue
-        unlocks.append(dt)
-    if len(unlocks) < 2:
-        return None
-    unlocks.sort()
+            from normalize import PHONE_NOT_AN_APP, phone_app_name
+        except Exception:  # noqa: BLE001
+            PHONE_NOT_AN_APP = set()
+            phone_app_name = lambda x: x      # noqa: E731
+        real = [s for s in switches if s not in PHONE_NOT_AN_APP]
+        if real:
+            top = Counter(real).most_common(1)[0][0]
+            line += f"，{phone_app_name(top)} 切换最多"
+        bits.append(line)
+    else:
+        bits.append("手机：一次都没解锁")
 
-    best = None
-    for a, b in zip(unlocks, unlocks[1:]):
-        gap = (b - a).total_seconds() / 60.0
-        # 只看白天到睡前的空档：凌晨那八小时本来就不解锁，
-        # 拿它发问是噪音（而且每天早上都会发一条）。
-        if a.hour < ASK_FROM_HOUR or a.hour >= ASK_UNTIL_HOUR:
-            continue
-        if gap >= MIN_SILENCE_MIN and (best is None or gap > best[2]):
-            best = (a, b, gap)
-    if not best:
-        return None
+    if not bits:
+        bits.append("这一小时没有任何记录")
 
-    a, b, gap = best
-    # 同上：不写「今天」，日期交给渲染层。
-    text = (f"{a.strftime('%H:%M')}–{b.strftime('%H:%M')} 手机一次都没解锁"
-            f"（{_hm(gap)}），那段时间在干嘛？")
-    return make(day_iso, text,
-                f"来自中继上的手机解锁事件（Tasker 上报），间隔是实测的。（{day_iso}）",
-                f"silence-{a.isoformat()}")
+    # ⚠️ 正文不写「今天」（这题可能隔天才被读到，见 feishu_bot.render_question）。
+    #    这里写的是**具体的小时区间**，本身就没有歧义。
+    text = (f"{span} 这一段：\n"
+            + "\n".join(f"· {b}" for b in bits)
+            + "\n\n主要在忙什么？")
+    evidence = ("位置来自 Dawarich；电脑来自笔记本每 10 分钟推的快照；"
+                f"手机来自中继。（{day_iso}）")
+    return make(day_iso, text, evidence,
+                f"hour-{day_iso}T{now.strftime('%H')}")
 
 
-def rule_heavy_app(day_iso: str, _stays: list[dict], events: list[dict]) -> dict | None:
-    """某个应用今天用了很久 —— 值得一嘴。"""
+def relay_desktop(base: str, key: str) -> dict | None:
+    """笔记本每 10 分钟推上来的快照。
+
+    拿不到**不是错误** —— 笔记本一天只醒几小时，睡着时就是没有新快照。
+    位置和手机数据仍然能用，所以不该因为电脑这块缺席就整题不发。
+    """
     try:
-        from normalize import summarize_phone
+        r = httpx.get(f"{base}/desktop", headers={"X-API-Key": key}, timeout=20.0)
+        r.raise_for_status()
+        snap = r.json().get("snapshot")
+        return snap if isinstance(snap, dict) else None
     except Exception:  # noqa: BLE001
         return None
-    try:
-        s = summarize_phone(events)
-    except Exception:  # noqa: BLE001
-        return None
-
-    top = s.get("top_apps") or []
-    if not top:
-        return None
-    name, minutes = top[0]
-    if minutes < MIN_APP_MIN:
-        return None
-    # 同上：不写「今天」。
-    text = f"{name} 用了 {_hm(minutes)}，是整天都开着，还是真的在用它？"
-    return make(day_iso, text,
-                f"来自手机前台时长（相邻两次应用切换的时间差推导，是**下界**）："
-                f"{day_iso} 合计前台 {_hm(s.get('foreground_minutes') or 0)}。",
-                f"heavyapp-{name}")
-
-
-RULES = (rule_long_stay, rule_phone_silence, rule_heavy_app)
 
 
 def build(day: Day, base: str, key: str) -> list[dict]:
     events = relay_phone_events(day.iso, base, key)
     stays = today_stays(day)
+    snap = relay_desktop(base, key)
+    now = datetime.now(TZ)
 
-    # 已经发过的（按 key）—— 同一条规则当天只发一次
+    # 已经发过的（按小时 key）—— 同一小时只问一次
     known = load_asked(day.iso)
     fired = {str(q.get("_key") or "") for q in known}
 
-    fresh: list[dict] = []
-    for rule in RULES:
-        if len(known) + len(fresh) >= MAX_PER_DAY:
-            break
-        try:
-            q = rule(day.iso, stays, events)
-        except Exception as e:  # noqa: BLE001
-            # 一条规则炸了不该让别的规则也不跑。
-            print(f"  ⚠️  规则 {rule.__name__} 出错：{type(e).__name__}: {e}")
-            continue
-        if q and q["_key"] not in fired:
-            fresh.append(q)
+    try:
+        q = rule_hourly(day.iso, stays, events, snap, now)
+    except Exception as e:  # noqa: BLE001
+        print(f"  ⚠️  生成失败：{type(e).__name__}: {e}")
+        q = None
 
-    return known + fresh
+    if q and q["_key"] not in fired:
+        return known + [q]
+    return known
 
 
 def main() -> int:
