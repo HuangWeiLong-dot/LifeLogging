@@ -153,6 +153,18 @@ $sid = ([Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
 #    注册后 Export 出来是 Delay / StateChange / UserId。）
 # ⚠️ Delay 不是可有可无：任务设了 RunOnlyIfNetworkAvailable = True，
 #    而解锁那一刻 Wi-Fi / Tailscale 往往还没就绪。给 30 秒让网络起来。
+#
+# ⚠️ 还要一个**登录**触发器 —— 解锁和登录是两种不同的「醒来」方式。
+#
+#    实测（2026-10-17）：10-16 23:00 那次任务被关机打断
+#    （LastTaskResult 1073807364 = 0x40010004 = DBG_TERMINATE_PROCESS），
+#    第二天开机后水位线仍停在 10-15 —— 因为它没有「登录」这个触发点。
+#
+#    合盖睡一晚 → 开盖**解锁** → 解锁触发器生效。
+#    关机/重启 → 开机**登录** → 只有登录触发器能接住。
+#
+#    只配前一条的话，日志上看不出任何异常：任务状态 Ready、上次运行成功，
+#    只是那天再也不会被补跑。要两个合起来才覆盖机器的两种醒来方式。
 $unlockTriggerXml = @(
     "  <SessionStateChangeTrigger>"
     "    <Enabled>true</Enabled>"
@@ -160,6 +172,11 @@ $unlockTriggerXml = @(
     "    <UserId>$sid</UserId>"
     "    <StateChange>SessionUnlock</StateChange>"
     "  </SessionStateChangeTrigger>"
+    "  <LogonTrigger>"
+    "    <Enabled>true</Enabled>"
+    "    <Delay>PT45S</Delay>"
+    "    <UserId>$sid</UserId>"
+    "  </LogonTrigger>"
 ) -join "`r`n"
 
 $closeIdx = $xmlText.IndexOf("</Triggers>")
@@ -181,8 +198,9 @@ try {
 $registered = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 $trigCount = 0
 if ($registered) { $trigCount = @($registered.Triggers).Count }
-if ($trigCount -lt 2) {
-    Write-Host "FAIL registered, but only $trigCount trigger(s) came back -- expected 2" -ForegroundColor Red
+# 3 个：每日 23:00 + 解锁 + 登录。少一个就意味着某种「醒来方式」没有触发点。
+if ($trigCount -lt 3) {
+    Write-Host "FAIL registered, but only $trigCount trigger(s) came back -- expected 3 (daily + unlock + logon)" -ForegroundColor Red
     exit 1
 }
 
@@ -280,7 +298,7 @@ if (-not $drep -or -not $drep.Interval) {
 }
 
 Write-Host "OK  Registered" -ForegroundColor Green
-Write-Host "    Triggers: $trigCount  (daily $Time  +  unlock, 30s delay)"
+Write-Host "    Triggers: $trigCount  (daily $Time  +  unlock 30s  +  logon 45s)"
 Write-Host "    Refresh:  every $($rep.Interval) (=$RefreshHours h), task '$RefreshTaskName'"
 Write-Host "    Desktop:  every $($drep.Interval) (=$DesktopMinutes min), task '$DesktopTaskName'"
 Write-Host
