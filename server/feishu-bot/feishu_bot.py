@@ -908,6 +908,25 @@ def handle_text(open_id: str, text: str) -> None:
         advance(open_id)
         return
 
+    # ⚠️ **实时题只属于它那一天。**
+    #
+    #    如果昨晚的实时题一直没答，`awaiting` 会跨夜挂着。第二天你发的第一句话
+    #    ——哪怕是一个「?」、或者一条想记下来的笔记——会被当成**那道题的答案**。
+    #    而实时题是 text 格式，`canonicalise()` 什么都收，所以**不会报错**，
+    #    只会静默地把你的话记到昨天的题上，笔记也就没了。
+    #
+    #    问责批（笔记本生成的）不适用这条：它本来就是「问昨天」，第二天早上答
+    #    才是正常用法。所以这里只按 source=live 判。
+    today_iso = datetime.now(TZ).date().isoformat()
+    if (str(q.get("source") or "") == "live"
+            and str(q.get("day") or "") != today_iso):
+        state["awaiting"] = None
+        save_state(state)
+        print(f"[expire] 昨天的实时题没答，清掉 awaiting：{awaiting}")
+        # 这条消息不是答案 —— 按普通消息重新走一遍（现在 awaiting 已经空了）。
+        handle_text(open_id, stripped)
+        return
+
     value, note, hint = canonicalise(q, stripped)
     if value is None:
         send_text(open_id, hint)

@@ -1746,6 +1746,69 @@ check("questions: 笔记/昨日回答/漂了几天/时间黑洞都进 prompt，�
       t_question_prompt_enrichment)
 
 
+def t_live_question_expiry():
+    """跨夜没答的实时题，**不能吃掉第二天的第一句话**。
+
+    ⚠️ 这个缺陷很隐蔽：`awaiting` 只是一个题号，没有时间。昨晚的实时题一直没答，
+       它就跨夜挂着；第二天你发的第一句话（哪怕是一个「?」或一条笔记）会被当成
+       **那道题的答案**。而实时题是 text 格式，canonicalise 什么都收 ——
+       所以不报错，只是静默地把话记到昨天，笔记也就没了。
+
+    问责批（source=laptop）不适用这条：它本来就是「问昨天」，第二天早上答才对。
+    """
+    import importlib.util
+    from datetime import timedelta
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "fb_exp", root / "server" / "feishu-bot" / "feishu_bot.py")
+    fb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fb)
+
+    today = datetime.now(fb.TZ).date()
+    yesterday = (today - timedelta(days=1)).isoformat()
+
+    live_old = {"id": f"{yesterday}-aaa111", "day": yesterday, "source": "live",
+                "kind": "routine", "format": "text", "text": "昨天那道实时题"}
+    laptop_old = {"id": f"{yesterday}-bbb222", "day": yesterday,
+                  "source": "laptop", "kind": "commitment",
+                  "format": "yes_no", "text": "昨天那道问责题"}
+
+    calls = {"note": [], "answer": [], "sent": []}
+    state: dict = {}
+
+    fb.load_state = lambda: state
+    fb.save_state = lambda s: state.update(s)
+    fb.relay_note = lambda t: (calls["note"].append(t) or {"inserted": 1})
+    fb.relay_answer = lambda qid, v, n="": (
+        calls["answer"].append((qid, v, n)) or {"inserted": 1})
+    fb.send_text = lambda oid, t: calls["sent"].append(t)
+    fb.advance = lambda oid: calls["sent"].append("ADVANCE")
+
+    # ① 昨天没答的实时题 → 今天这句话不该被当成答案
+    state.clear()
+    state["awaiting"] = live_old["id"]
+    fb.relay_pending = lambda: [live_old]
+    fb.handle_text("ou_x", "记：今天见了老王")
+    assert calls["answer"] == [], f"被当成答案了：{calls['answer']}"
+    assert calls["note"] == ["记：今天见了老王"], calls["note"]
+    assert state.get("awaiting") is None, "旧的 awaiting 该被清掉"
+
+    # ② 问责批不受影响 —— 它本来就是问昨天，第二天答是正常的
+    calls["note"].clear()
+    calls["answer"].clear()
+    state.clear()
+    state["awaiting"] = laptop_old["id"]
+    fb.relay_pending = lambda: [laptop_old]
+    fb.handle_text("ou_x", "做了")
+    assert calls["answer"], "问责题该照常被当成答案"
+    assert calls["answer"][0][0] == laptop_old["id"], calls["answer"]
+
+
+check("feishu: 跨夜的实时题不会吃掉第二天的第一句话（问责批不受影响）",
+      t_live_question_expiry)
+
+
 # ── 7d-3. 日记中继 ──────────────────────────────────────────────────
 print("\n[21] Journal relay")
 
