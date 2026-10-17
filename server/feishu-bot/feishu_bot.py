@@ -793,7 +793,7 @@ END_DAY_COMMANDS = ("/收尾", "/结束", "/收工", "/end")
 
 
 def handle_end_day(open_id: str) -> None:
-    """「我现在要结束这一天」—— 立刻出收尾三题，不等 21:30。
+    """「我现在要结束这一天」—— 立刻出收尾题，不等自动时间。
 
     ⚠️ 一天什么时候结束只有你自己知道。`SUMMARY_AT` 是服务器按钟点猜的，
        而这个命令把它变成一件由你发起的事。
@@ -867,7 +867,7 @@ def handle_text(open_id: str, text: str) -> None:
                   "【白天与晚上】\n"
                   "  白天每个小时问你一次「刚才这一小时在干嘛」；\n"
                   "  发「/收尾」→ 立刻开始问三条收尾题，答完我给你写一段今天的总结。\n"
-                  "  （21:30 也会自动问一次，如果你还没发过）\n"
+                  "  （23:00 也会自动问一次，如果你还没发过）\n"
                   "\n"
                   "⚠️ 电脑数据来自笔记本每 10 分钟推的快照，答案里会写明\n"
                   "   「最后上报是几点」—— 是几小时前的就直说，别当成此刻。\n"
@@ -1073,9 +1073,10 @@ def push_next_live(open_id: str) -> bool:
         「在等一题用户没见过的题」的状态。
     """
     now = datetime.now(TZ)
-    if in_quiet_hours(now):
-        # 睡觉时间。题留在中继上，早上再看 —— 但**只留当天的**（见下面的过滤）。
-        return False
+    # ⚠️ 夜间静音**不能一刀切**：自动收尾（默认 23:00）落在静音时段里，
+    #    挡住就等于「到点不收尾」，而实时题过零点就作废了。
+    #    所以静音只拦小时题，收尾题照发 —— 那是你自己把一天的结束定在这个点上的。
+    quiet = in_quiet_hours(now)
 
     state = load_state()
     if state.get("awaiting"):
@@ -1096,6 +1097,10 @@ def push_next_live(open_id: str) -> bool:
     live_qs = [q for q in pending
                if str(q.get("source") or "") == "live"
                and str(q.get("day") or "") == today]
+    if quiet:
+        # 静音时段只放行收尾题（见上面的说明）。
+        live_qs = [q for q in live_qs
+                   if str(q.get("kind") or "") == "summary"]
     if not live_qs:
         return False
 

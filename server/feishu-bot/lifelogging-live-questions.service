@@ -32,10 +32,14 @@ WorkingDirectory=/opt/lifelogging/repo
 #    退回坐标（问出来的是「你在 (39.9042,116.4074) 待了两小时」）。
 Environment=LIFELOGGING_DATA_DIR=/var/lib/lifelogging/geo
 
-# 晚上几点开始「一天的收尾」。到点之后不再发小时题，改发三条总结题；
+# 晚上几点开始「一天的收尾」。到点之后不再发小时题，改发收尾题；
 # 答完之后机器人会写一段当天总结（LLM，走每日额度）。
 # 留空 = 不做收尾，只发小时题。
-Environment=LIVE_SUMMARY_AT=21:30
+#
+# ⚠️ 改这个时间要一起看 live_questions.py 的 ASK_UNTIL_HOUR ——
+#    那是开区间上界（`hour < ASK_UNTIL_HOUR`）。定在 23 点的话它必须是 24，
+#    写成 23 会让 23 点那一轮在窗口检查处直接返回，收尾永远等不到。
+Environment=LIVE_SUMMARY_AT=23:00
 
 ExecStart=/opt/lifelogging/venv/bin/python /opt/lifelogging/repo/scripts/live_questions.py
 

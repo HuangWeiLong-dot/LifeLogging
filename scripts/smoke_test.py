@@ -1393,6 +1393,15 @@ def t_feishu_live_push():
     pending["qs"] = [live]
     assert fb.push_next_live("ou_x") is False, "夜里不该推消息"
     assert box["sent"] == []
+
+    # ⚠️ 但**收尾题要放行** —— 自动收尾（默认 23:00）就落在静音时段里，
+    #    挡住了就等于「到点不收尾」，而实时题过零点就作废。
+    summary = {"id": f"{day}-sum9", "day": day, "source": "live",
+               "kind": "summary", "format": "text", "text": "收尾题"}
+    box["state"] = {}
+    pending["qs"] = [summary]
+    assert fb.push_next_live("ou_x") is True, "夜间该放行收尾题"
+    assert len(box["sent"]) == 1
     fb.in_quiet_hours = lambda now: False
 
     # ⚠️ 隔了夜的实时题也不推：早上收到「昨天 21:00–22:00 这一段…」只会困惑。
@@ -1401,6 +1410,7 @@ def t_feishu_live_push():
     old = {"id": f"{yesterday}-old", "day": yesterday, "source": "live",
            "format": "text", "text": "昨天那道实时题"}
     box["state"] = {}
+    box["sent"] = []
     pending["qs"] = [old]
     assert fb.push_next_live("ou_x") is False, "隔夜的实时题不该在早上推出来"
     assert box["sent"] == []
