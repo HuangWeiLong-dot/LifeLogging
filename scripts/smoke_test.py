@@ -10,11 +10,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+# ⚠️ 测试**不能**读真实的学习表 `state/app_map.json`。
+#    否则 `classify()` 的结果会取决于你上周学过什么 —— 换台机器、换个时间，
+#    同一批测试时红时绿。指到一个空的临时文件，等于「没有学到的映射」。
+os.environ["LIFELOGGING_APP_MAP"] = str(
+    Path(tempfile.mkdtemp(prefix="lifelogging-test-")) / "app_map.json")
 
 # 本脚本在 import common 之前就要打印，所以这里单独修一次编码
 if sys.platform == "win32":
@@ -1519,6 +1526,54 @@ def t_notes_into_journal():
 
 check("notes: 飞书记的一笔真的进了日记提示词和 vault",
       t_notes_into_journal)
+
+
+def t_app_map_learning():
+    """学到的「应用 → 分类」：查得到、不覆盖人工修正、分类时和规则同等待遇。
+
+    ⚠️ 这里锁的是「学习」最容易出问题的地方 —— 它**静默**。
+       学错一个分类，从此那段时间永远算错，而且没有人会再检查。
+       所以：手改过的条目绝不能被自动学习盖回去。
+    """
+    import importlib.util
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "app_map_t", root / "scripts" / "app_map.py")
+    am = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(am)
+    import normalize as nz
+
+    app = "eldenring.exe"
+    assert am.lookup(app) is None, "还没学过，不该查得到"
+
+    assert am.remember(app, "Leisure", sample_titles=["ELDEN RING"],
+                       minutes_seen=42.0) is True
+    # 大小写不敏感（Windows 进程名）
+    assert am.lookup("EldenRing.EXE") == "Leisure"
+    # ⚠️ 已存在的不覆盖 —— 人工修正比模型判的可信
+    assert am.remember(app, "Work", sample_titles=["x"], minutes_seen=1) is False
+    assert am.lookup(app) == "Leisure", "自动学习把人工修正盖掉了"
+
+    # 分类时和手写规则同等待遇，置信度标 learned
+    cat, conf = nz.classify(app, "ELDEN RING")
+    assert (cat, conf) == ("Leisure", "learned"), (cat, conf)
+
+    # 手写规则仍然优先、仍然标 rule
+    assert nz.classify("Code.exe", "normalize.py")[1] == "rule"
+    # 没学过的未知应用还是 default
+    assert nz.classify("totally-unknown.exe", "") == ("Other", "default")
+
+    # 学习器的输出解析
+    import learn_apps as la
+    assert la.parse_category("Leisure") == "Leisure"
+    assert la.parse_category("  work\n") == "Work"
+    assert la.parse_category("Other") == "Other"
+    assert la.parse_category("我看不出来") is None
+
+
+check("app_map: 学到的分类能用 / 不覆盖人工修正 / 未知仍是 default",
+      t_app_map_learning)
 
 
 # ── 7d-3. 日记中继 ──────────────────────────────────────────────────

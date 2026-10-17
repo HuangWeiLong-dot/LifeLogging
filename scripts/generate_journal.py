@@ -231,7 +231,10 @@ def build_user_prompt(tl: dict, day: Day, carryover: list[str]) -> str:
             f"{b['confidence']} | {b.get('app','')[:18]} | {titles} |"
         )
     lines.append("")
-    lines.append("（rule = decided by rules; ambiguous = rules could not decide, **you must judge these yourself**; "
+    lines.append("（rule = decided by rules; "
+                 "learned = categorised once by a model and cached, treat it like a rule "
+                 "unless the titles clearly say otherwise; "
+                 "ambiguous = rules could not decide, **you must judge these yourself**; "
                  "default = rules did not recognise the app, almost certainly Other）")
     lines.append("")
 

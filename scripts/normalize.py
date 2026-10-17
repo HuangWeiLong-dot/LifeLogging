@@ -28,6 +28,7 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import Day, EventsClient, header, load_config  # noqa: E402
+import app_map  # noqa: E402  （学到的「应用 → 分类」映射，见 app_map.py）
 
 CFG = load_config()
 TZ = ZoneInfo(CFG["timezone"])
@@ -225,6 +226,21 @@ def classify(app: str, title: str) -> tuple[str, str]:
                 ambiguous = k in ("bilibili", "youtube", "wechat", "weixin", "qq",
                                   "telegram", "discord", "reddit", "zhihu", "weibo")
                 return (cat, "ambiguous" if ambiguous else "rule")
+
+    # 手写表没命中 → 查**学到的**映射（app_map.py）。
+    #
+    # 学到的分类和手写规则享受同等待遇：它就是一个本地查表，不是又一次推理。
+    # 查不到才是真的「没认出来」。
+    #
+    # ⚠️ 兜住异常：这张表是运行时产物，坏了/权限不对都不该让整条流水线停下 ——
+    #    退回「只有手写规则」是可接受的降级，报错并继续。
+    try:
+        learned = app_map.lookup(app)
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN 查 app_map 失败：{type(e).__name__}: {e}", file=sys.stderr)
+        learned = None
+    if learned:
+        return (learned, "learned")
 
     return ("Other", "default")
 
