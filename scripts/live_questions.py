@@ -101,7 +101,12 @@ def _summary_due(now: datetime) -> bool:
 
 
 def _summary_soon(now: datetime) -> bool:
-    """离收尾不到一小时了吗？到了就别再发小时题 —— 否则晚上连着两条。"""
+    """离收尾不到**半小时**了吗？到了就别再发小时题。
+
+    ⚠️ 原来写的是「不到一小时」，那是在收尾定在 21:30 的时候。收尾挪到 23:00
+       之后，一小时就变成了 **22:00 起停发** —— 而使用者要的是「每小时一条」，
+       于是 22 点那个小时凭空没了。改成半小时：22:04 照常发，22:34 起才停。
+    """
     if not SUMMARY_AT:
         return False
     try:
@@ -110,7 +115,7 @@ def _summary_soon(now: datetime) -> bool:
                           second=0, microsecond=0)
     except (TypeError, ValueError):
         return False
-    return now >= due - timedelta(hours=1)
+    return now >= due - timedelta(minutes=30)
 
 
 def _unfilled(v: str) -> bool:

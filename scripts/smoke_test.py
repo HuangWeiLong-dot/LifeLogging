@@ -1528,12 +1528,15 @@ def t_summary_questions():
 
     # 到点判定
     lq.SUMMARY_AT = "21:30"
-    assert not lq._summary_due(now.replace(hour=21, minute=29))
-    assert lq._summary_due(now.replace(hour=21, minute=30))
+    lq.SUMMARY_AT = "23:00"
+    assert not lq._summary_due(now.replace(hour=22, minute=59))
     assert lq._summary_due(now.replace(hour=23))
-    # 收尾前一小时不再发小时题
-    assert lq._summary_soon(now.replace(hour=20, minute=40))
-    assert not lq._summary_soon(now.replace(hour=19))
+    # ⚠️ 收尾前**半小时**停发小时题，不是一小时 —— 原来一小时是从 21:30 那个
+    #    收尾时间推出来的；收尾挪到 23:00 之后，一小时会让 22 点那个小时空掉，
+    #    而使用者要的是每小时一条。
+    assert not lq._summary_soon(now.replace(hour=22, minute=0))
+    assert lq._summary_soon(now.replace(hour=22, minute=30))
+    assert not lq._summary_soon(now.replace(hour=21))
 
     # 留空 = 不做收尾
     lq.SUMMARY_AT = ""
@@ -1748,6 +1751,39 @@ def t_weekly_review_parse():
 
 check("weekly: 没有依据的事实被丢掉 / 周一~周日边界正确 / 渲染带出处",
       t_weekly_review_parse)
+
+
+def t_day_recap():
+    """答完之后返回「今日复盘」：数据 + 你的回答 + 总结。
+
+    ⚠️ 数据和回答是**确定性拼的**，只有总结走模型。所以即使 LLM 挂了，
+       复盘里仍然有今天的事实和你自己说的话 —— 那才是主体。
+    """
+    import importlib.util
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "live_recap", root / "server" / "feishu-bot" / "live.py")
+    lv = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lv)
+
+    lv.data_snapshot = lambda d, b, k: ["电脑：9.5 小时（Work 6h）",
+                                        "手机：解锁 16 次"]
+    qa = [("今天体力怎么样？", "还行"), ("今天学到了什么？", "SQLite FTS5")]
+
+    out = lv.day_recap("2026-10-17", "http://x", "k", qa, "今天主要在写代码。")
+    assert "【数据】" in out and "电脑：9.5 小时" in out, out
+    assert "【你的回答】" in out and "SQLite FTS5" in out, out
+    assert "【总结】" in out and "写代码" in out, out
+
+    # 没有总结时，数据和回答照样要发
+    out2 = lv.day_recap("2026-10-17", "x", "k", qa, "")
+    assert "【数据】" in out2 and "【你的回答】" in out2, out2
+    assert "【总结】" not in out2, out2
+
+
+check("feishu: 今日复盘 = 数据 + 你的回答 + 总结（没有总结也照发）",
+      t_day_recap)
 
 
 def t_question_prompt_enrichment():

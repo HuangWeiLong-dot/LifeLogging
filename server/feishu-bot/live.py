@@ -270,6 +270,79 @@ def render_phone(events: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def data_snapshot(day_iso: str, base: str, key: str) -> list[str]:
+    """当天数据的**紧凑**快照（几行）。每一块各自兜错，缺哪块少哪行。"""
+    out: list[str] = []
+
+    try:
+        events = relay_events(day_iso, base, key)
+    except Exception as e:  # noqa: BLE001
+        events = []
+        print(f"[recap] 手机事件拿不到：{type(e).__name__}: {e}", file=sys.stderr)
+    if events:
+        try:
+            s = deps()["summarize_phone"](events)
+            line = f"手机：解锁 {s['unlocks']} 次 · 切换 {s['app_switches']} 次"
+            if s.get("screen_minutes"):
+                line += f" · 亮屏 {_hm(s['screen_minutes'])}"
+            out.append(line)
+        except Exception:  # noqa: BLE001
+            pass
+
+    try:
+        snap = relay_desktop(base, key) or {}
+        today = snap.get("today") or {}
+        total = today.get("total_hours")
+        if total:
+            cats = " / ".join(f"{k} {v}h" for k, v in
+                              (today.get("by_category") or [])[:4])
+            out.append(f"电脑：{total} 小时（{cats}）")
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        stays = location_stays(day_iso)
+        if stays:
+            best = max(stays, key=lambda s: s["minutes"])
+            out.append(f"位置：{len(stays)} 处，最久 {best['place']}"
+                       f"（{_hm(best['minutes'])}）")
+    except Exception:  # noqa: BLE001
+        pass
+
+    return out
+
+
+def day_recap(day_iso: str, base: str, key: str,
+              qa: list[tuple[str, str]], prose: str) -> str:
+    """一天的收尾回执：**数据 + 你的回答 + 一段总结**。
+
+    ⚠️ 数据和回答都是**确定性的**（直接拼），只有最后的总结走模型。
+       这样即使 LLM 挂了、额度用完了，复盘里仍然有今天的事实和你自己说的话 ——
+       那才是这份东西的主体。
+    """
+    lines = [f"今日复盘 · {day_iso}", ""]
+
+    snap = data_snapshot(day_iso, base, key)
+    if snap:
+        lines.append("【数据】")
+        lines += [f"· {x}" for x in snap]
+        lines.append("")
+
+    if qa:
+        lines.append("【你的回答】")
+        for q, a in qa:
+            qt = " ".join(str(q).split())[:56]
+            at = " ".join(str(a).split())[:80]
+            lines.append(f"· {qt} → {at}")
+        lines.append("")
+
+    if prose:
+        lines.append("【总结】")
+        lines.append(prose)
+
+    return "\n".join(lines).strip()
+
+
 def _parse_dt(v: Any) -> datetime | None:
     if not v:
         return None

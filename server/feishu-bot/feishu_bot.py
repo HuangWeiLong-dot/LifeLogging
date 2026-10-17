@@ -731,17 +731,19 @@ def maybe_write_summary(open_id: str, day_iso: str) -> bool:
     except Exception as e:  # noqa: BLE001
         print(f"ERROR 写总结失败：{type(e).__name__}: {e}", file=sys.stderr)
         return False
+    # ⚠️ 即使总结没写成，也要把「数据 + 你的回答」发出去 —— 那才是复盘的主体，
+    #    模型那一段只是收尾。整条链路里最不该因为 LLM 挂了就什么都不给。
+    recap = live.day_recap(day_iso, RELAY_BASE, RELAY_API_KEY, qa, text or "")
     if text is None:
-        send_text(open_id, f"今天的总结没写成：{err}")
-        return True
+        recap += f"\n\n（总结没写成：{err}）"
+    send_text(open_id, recap)
 
-    send_text(open_id, "今天的总结：\n\n" + text)
-    # ⚠️ 总结**也存成一条笔记** —— 明天写日记时它会作为「你说过的话」进提示词。
-    #    不然它就只是聊天记录里的一句话，不属于这套系统的记忆。
+    # ⚠️ **整份复盘存成一条笔记** —— 明天写日记时它会作为「你说过的话」进提示词。
+    #    不然它就只是聊天记录里的一段，不属于这套系统的记忆。
     try:
-        relay_note("【今日总结】" + text)
+        relay_note("【今日复盘】" + recap)
     except Exception as e:  # noqa: BLE001
-        print(f"WARN 总结存笔记失败：{type(e).__name__}: {e}", file=sys.stderr)
+        print(f"WARN 复盘存笔记失败：{type(e).__name__}: {e}", file=sys.stderr)
     return True
 
 
