@@ -336,11 +336,15 @@ def relay_pending() -> list[dict]:
     return [q for q in (r.json().get("questions") or []) if isinstance(q, dict)]
 
 
-def relay_answer(qid: str, value: str) -> dict:
-    """把答案交给中继。编码（`<题号>|<答案>|<备注>`）由中继拼，这里不碰。"""
+def relay_answer(qid: str, value: str, note: str = "") -> dict:
+    """把答案交给中继。编码（`<题号>|<答案>|<备注>`）由中继拼，这里不碰。
+
+    `note` 是用户自己写的那半句 —— 以前永远传空串，等于把「想说的话」丢了。
+    """
     r = httpx.post(f"{RELAY_BASE}/answer",
                    headers={"X-API-Key": RELAY_API_KEY},
-                   json={"answers": [{"id": qid, "value": value, "note": ""}]},
+                   json={"answers": [{"id": qid, "value": value,
+                                      "note": note[:500]}]},
                    timeout=10.0)
     r.raise_for_status()
     return r.json()
@@ -375,47 +379,105 @@ def _norm_word(s: str) -> str:
     return s.strip().lower().replace(" ", "")
 
 
-def canonicalise(q: dict, raw: str) -> tuple[str | None, str]:
-    """把用户那句话变成**契约要求的那几个字**。返回 (值, 给用户的说明)。
+# 用来把「答案」和「用户自己说的话」分开的字符。
+# 答案必须在最前面 —— 见 _split_answer() 的注释。
+_SEPS = " \t\r\n，,。;；、:：!！?？()（）[]【】\"'“”‘’「」『』"
+
+
+def _split_answer(text: str) -> tuple[str, str]:
+    """把「答案 + 自己的话」拆成两段。答案必须在**最前面**。
+
+    ⚠️ 为什么不让答案出现在任意位置。
+
+       二值题/选择题最终写进 `value` 的只有 yes/no 或选项原文，`apply_answers`
+       靠它决定「勾不勾任务」。而一旦勾了，任务表就被改了 —— 那个动作**不可逆**。
+       所以这里宁可要求「答案先说」，也不去猜「哪一段才是答案」：
+       猜错会把任务勾反，而且不会有人发现。
+
+       用户想说的话进 `note`，原样带着走。
+
+        做了，花了两小时        → ("做了", "花了两小时")
+        1 整条做完了（其实差一点） → ("1", "整条做完了（其实差一点）")
+        没做                    → ("没做", "")
+    """
+    t = text.strip().strip(_SEPS)
+    for i, ch in enumerate(t):
+        if ch in _SEPS:
+            return t[:i].strip(), t[i:].strip(_SEPS)
+    return t, ""
+
+
+def _match_label(text: str, opts: list[str]) -> str | None:
+    """把一句话对到某个选项原文上。逐字（或忽略大小写/空白）相等才认。"""
+    for label in opts:
+        if text == label or _norm_word(text) == _norm_word(label):
+            return label
+    return None
+
+
+def canonicalise(q: dict, raw: str) -> tuple[str | None, str, str]:
+    """把用户那句话变成 (值, 备注, 给用户的说明)。
 
     值必须是：
       · yes_no  → 恰好 "yes" 或 "no"（apply_answers 比的是 `== "yes"`）
       · choice  → **问题文件里那条选项的原文，逐字**（比的是字符串相等）
-      · text    → 原样
-    对不上就返回 (None, 提示)，由调用方重问 —— **绝不猜**。
+      · text    → 原样（这时「备注」留空，「值」本身就是内容）
+    对不上就返回 (None, "", 提示)，由调用方重问 —— **绝不猜**。
+
+    **可以带自己的话**：答案写前面，后面随便写，进 `note`。中继和
+    apply_answers 一直都支持这个字段，只是以前这里从来没填过。
     """
     fmt = str(q.get("format") or "yes_no")
     text = raw.strip()
 
     if fmt == "text":
-        return (text, "") if text else (None, "这题要回内容，不能是空的。")
+        return (text, "", "") if text else (None, "", "这题要回内容，不能是空的。")
 
     if fmt == "choice":
         opts = [str(o.get("label") or "") for o in (q.get("options") or [])
                 if isinstance(o, dict)]
         if not opts:
-            return None, "这题标了选择题，但问题文件里没有选项 —— 跳过它。"
-        n = _norm_word(text)
-        # 回数字：按列表顺序取**选项原文**，不是数字本身。
-        if n.isdigit():
-            i = int(n) - 1
+            return None, "", "这题标了选择题，但问题文件里没有选项 —— 跳过它。"
+
+        # 先试整句：选项原文里**可能**含分隔符（比如「做完了，但很勉强」），
+        # 先拆的话会把一条合法选项拆坏。
+        hit = _match_label(text, opts)
+        if hit:
+            return hit, "", ""
+
+        head, rest = _split_answer(text)
+        if head.isdigit():
+            i = int(head) - 1
             if 0 <= i < len(opts):
-                return opts[i], ""
-            return None, f"只有 {len(opts)} 个选项，回 1 到 {len(opts)}。"
-        # 回原文：照样要**逐字对上**才认，不做模糊匹配。
-        for label in opts:
-            if text == label or _norm_word(text) == _norm_word(label):
-                return label, ""
+                return opts[i], rest, ""
+            return None, "", f"只有 {len(opts)} 个选项，回 1 到 {len(opts)}。"
+
+        hit = _match_label(head, opts)
+        if hit:
+            return hit, rest, ""
+
         lines = "\n".join(f"  {i}) {o}" for i, o in enumerate(opts, 1))
-        return None, f"没认出这个选项。回数字就行：\n{lines}"
+        return None, "", (
+            f"没认出这个选项。回数字就行：\n{lines}\n"
+            "想补充就写在答案后面，比如「1 其实只做了一半」。")
 
     # yes_no
     n = _norm_word(text)
     if n in _YES:
-        return "yes", ""
+        return "yes", "", ""
     if n in _NO:
-        return "no", ""
-    return None, "回「做了」或「没做」。"
+        return "no", "", ""
+
+    head, rest = _split_answer(text)
+    n = _norm_word(head)
+    if n in _YES:
+        return "yes", rest, ""
+    if n in _NO:
+        return "no", rest, ""
+
+    return None, "", (
+        "回「做了」或「没做」。\n"
+        "想补充就写在后面，比如「做了，花了两小时」—— 后半句会记成备注。")
 
 
 # ── 渲染 ────────────────────────────────────────────────────────────
@@ -447,11 +509,12 @@ def render_question(q: dict, remaining: int) -> str:
         for i, o in enumerate((q.get("options") or []), 1):
             if isinstance(o, dict):
                 lines.append(f"  {i}) {o.get('label') or ''}")
-        lines += ["", f"回一个数字（1-{len(q.get('options') or [])}）"]
+        lines += ["", f"回一个数字（1-{len(q.get('options') or [])}），"
+                      "后面可以接着写自己的话"]
     elif fmt == "text":
         lines += ["", "直接回内容就行"]
     else:
-        lines += ["", "回「做了」或「没做」"]
+        lines += ["", "回「做了」或「没做」；后面可以接着写自己的话"]
     return "\n".join(lines)
 
 
@@ -590,6 +653,9 @@ def handle_text(open_id: str, text: str) -> None:
                   "【要我出题】\n"
                   "  回「?」或者随便一句 → 今天还没答的题\n"
                   "  一题一题问：二值题回「做了 / 没做」，选择题回数字\n"
+                  "  答案后面可以接着写自己的话：\n"
+                  "    「做了，花了两小时」→ 答案是「做了」，后半句记成备注\n"
+                  "    「1 其实只做了一半」→ 选项 1，后半句记成备注\n"
                   "  /skip 跳过这题（不记成答案） · /pending 重新拉一遍\n"
                   "\n"
                   "【问我今天】\n"
@@ -674,19 +740,26 @@ def handle_text(open_id: str, text: str) -> None:
         advance(open_id)
         return
 
-    value, hint = canonicalise(q, stripped)
+    value, note, hint = canonicalise(q, stripped)
     if value is None:
         send_text(open_id, hint)
         return
 
     try:
-        res = relay_answer(str(awaiting), value)
+        res = relay_answer(str(awaiting), value, note)
     except Exception as e:  # noqa: BLE001
         send_text(open_id, f"答案没存进去：{e}")
         return
 
-    stored = f"已记下：{value}" if value != stripped else "已记下"
-    print(f"[answer] {awaiting} = {value!r} -> relay {res}")
+    # 回显「记下了什么」：有备注的时候尤其要回显，否则用户不知道
+    # 自己写的那半句是被收下了还是被丢了。
+    if str(q.get("format") or "yes_no") == "text":
+        stored = "已记下。"
+    else:
+        stored = f"已记下：{value}"
+        if note:
+            stored += f"\n备注：{note}"
+    print(f"[answer] {awaiting} = {value!r} note={note!r} -> relay {res}")
     send_text(open_id, stored)
     advance(open_id)
 

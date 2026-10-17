@@ -1537,17 +1537,41 @@ def t_feishu_canonicalise():
 
     # ── 二值题 ──
     for said in ("做了", "是", "好", "对", "有", "嗯", "yes", "Y", "1", "✓"):
-        v, _ = fb.canonicalise(yesno, said)
+        v, note, _ = fb.canonicalise(yesno, said)
         assert v == "yes", f"{said!r} 应该归一成 yes，得到 {v!r}"
+        assert note == "", f"{said!r} 后面没写东西，备注该是空的"
         assert answered_done(yesno, v), f"{said!r} → {v!r} 但 answered_done 不认"
     for said in ("没做", "没", "否", "没有", "无", "no", "N", "0", "×"):
-        v, _ = fb.canonicalise(yesno, said)
+        v, note, _ = fb.canonicalise(yesno, said)
         assert v == "no", f"{said!r} 应该归一成 no，得到 {v!r}"
         assert not answered_done(yesno, v)
 
+    # ── **可以带自己的话**：答案在前，后半句进备注 ──
+    v, note, _ = fb.canonicalise(yesno, "做了，花了两小时")
+    assert (v, note) == ("yes", "花了两小时"), (v, note)
+    assert answered_done(yesno, v), "带备注不影响「算不算做到」"
+
+    v, note, _ = fb.canonicalise(yesno, "没做 在开会")
+    assert (v, note) == ("no", "在开会"), (v, note)
+    assert not answered_done(yesno, v)
+
+    # 分隔符不止逗号：空格、句号、括号、问号都要认
+    for said, want in (("做了。花了两小时", "花了两小时"),
+                       ("做了（花了两小时）", "花了两小时"),
+                       ("做了?好吧", "好吧")):
+        v, note, _ = fb.canonicalise(yesno, said)
+        assert v == "yes", f"{said!r} 应该认出 yes，得到 {v!r}"
+        assert note == want, f"{said!r} 的备注该是 {want!r}，得到 {note!r}"
+
+    # ⚠️ 答案**不能**出现在后半句 —— 那意味着要猜「哪段才是答案」，
+    #    猜错会把任务勾反，而且不可逆。
+    v, note, hint = fb.canonicalise(yesno, "花了两小时，做了")
+    assert v is None, f"答案不在最前面时不能猜，实际 {v!r} / {note!r}"
+    assert hint
+
     # 认不出来必须返回 None（重问），**不能猜**
     for said in ("大概吧", "", "  ", "42"):
-        v, hint = fb.canonicalise(yesno, said)
+        v, note, hint = fb.canonicalise(yesno, said)
         assert v is None, f"{said!r} 不该被猜成一个答案"
         assert hint, "认不出来时要给出重问的话"
 
@@ -1556,33 +1580,38 @@ def t_feishu_canonicalise():
           "options": [{"label": "整条做完了", "done": True},
                       {"label": "做了一半", "done": False},
                       {"label": "压根没碰", "done": False}]}
-    v, _ = fb.canonicalise(ch, "1")
-    assert v == "整条做完了", f"回 1 要变成选项原文，得到 {v!r}"
+    v, note, _ = fb.canonicalise(ch, "1")
+    assert v == "整条做完了" and note == "", (v, note)
     assert answered_done(ch, v), "选了标 done 的那项，应该勾掉任务"
 
-    v, _ = fb.canonicalise(ch, "2")
-    assert v == "做了一半"
-    assert not answered_done(ch, v)
+    v, note, _ = fb.canonicalise(ch, "2")
+    assert v == "做了一半" and not answered_done(ch, v)
 
     # 直接回原文也认（但要逐字对上）
-    v, _ = fb.canonicalise(ch, "整条做完了")
-    assert v == "整条做完了" and answered_done(ch, v)
+    v, note, _ = fb.canonicalise(ch, "整条做完了")
+    assert v == "整条做完了" and note == "" and answered_done(ch, v)
+
+    # 带自己的话：数字或原文后面接一段
+    v, note, _ = fb.canonicalise(ch, "1 其实只做了一半")
+    assert (v, note) == ("整条做完了", "其实只做了一半"), (v, note)
+    v, note, _ = fb.canonicalise(ch, "整条做完了，但很勉强")
+    assert (v, note) == ("整条做完了", "但很勉强"), (v, note)
 
     # 越界 / 认不出的选项 → None
     for said in ("4", "0", "做完了", "第一个"):
-        v, hint = fb.canonicalise(ch, said)
+        v, note, hint = fb.canonicalise(ch, said)
         assert v is None, f"{said!r} 不该被认成某个选项（不做模糊匹配）"
         assert hint
 
-    # ── 文字题：原样透传 ──
+    # ── 文字题：原样透传（备注为空，内容本身就是值）──
     tx = {"id": "2026-10-14-cafe9012", "format": "text", "text": "随便说点什么"}
-    v, _ = fb.canonicalise(tx, "  今天有点累  ")
-    assert v == "今天有点累", "文字题要原样（只去首尾空白）"
+    v, note, _ = fb.canonicalise(tx, "  今天有点累  ")
+    assert v == "今天有点累" and note == "", (v, note)
     assert not answered_done(tx, v), "文字题永远勾不了任务，这是有意的"
     assert fb.canonicalise(tx, "   ")[0] is None, "空白的文字题不算答案"
 
     # ── 缺 format 的老数据要当二值处理（和 answered_done 的默认一致）──
-    v, _ = fb.canonicalise({"id": "x"}, "做了")
+    v, note, _ = fb.canonicalise({"id": "x"}, "做了")
     assert v == "yes"
 
     # ── 渲染：三种形态都得给出**可回答**的提示 ──
