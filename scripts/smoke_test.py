@@ -1467,12 +1467,12 @@ def t_summary_questions():
         day, [], [],
         {"today": {"total_hours": 6.5,
                    "by_category": [["Work", 3.2], ["Life", 2.1]]}})
-    assert len(qs) == 5, qs
+    assert len(qs) == 10, qs
     assert all(q["kind"] == "summary" for q in qs), "必须带 kind=summary"
     assert all(q["format"] == "text" and q["ref"] == "" for q in qs), \
         "收尾题是文字题，不能去勾任务"
     keys = [q["_key"] for q in qs]
-    assert len(set(keys)) == 5, f"题号不能重：{keys}"
+    assert len(set(keys)) == 10, f"题号不能重：{keys}"
     assert all(k.startswith(f"summary-{day}") for k in keys), keys
     # 第二题要把当天的真实数字带进去，而不是空泛地问
     assert "6.5" in qs[1]["text"], qs[1]["text"]
@@ -1489,22 +1489,26 @@ def t_summary_questions():
                    "by_category": [["Work", 3.2]],
                    "top_apps": [["Code.exe", 2.1]]}},
     )
-    assert len(rich) == 7, [q["text"] for q in rich]
+    assert len(rich) == 12, [q["text"] for q in rich]
     assert any("解锁 1 次" in q["text"] for q in rich), "手机那题没出"
     assert any("望京" in q["text"] for q in rich), "位置那题没出"
     assert any("Code.exe" in q["text"] for q in rich), "电脑那题没带最久的应用"
 
     # 没有位置/手机数据时，**不能硬问** —— 只问有数据的那几块
     lean = lq.summary_questions(day, [], [], None)
-    assert len(lean) == 4, [q["text"] for q in lean]
+    assert len(lean) == 9, [q["text"] for q in lean]
     assert all("去过" not in q["text"] and "解锁" not in q["text"] for q in lean)
 
     # ── 常规题：数据看不见的维度 ──
     routines = [q for q in qs if q.get("routine")]
-    assert len(routines) == 2, [q["text"] for q in routines]
+    assert len(routines) == 7, [q["text"] for q in routines]
     # ⚠️ kind 必须仍是 summary —— 收尾流程靠它判断「答完了没有」。
     #    改成 routine 的话，答完第一道常规题就会误判成收尾结束、提前写总结。
     assert all(q["kind"] == "summary" for q in routines), [q["kind"] for q in routines]
+    # 七个维度**每天一个不少**
+    assert [q["dim"] for q in routines] == [
+        "体力", "心情", "人际", "睡眠", "吃饭", "休息", "学习"], \
+        [q["dim"] for q in routines]
 
     # 按天轮换：两天的常规题不该一样（否则连问一周就退化成「还行」）
     nxt = (date.fromisoformat(day) + timedelta(days=1)).isoformat()
