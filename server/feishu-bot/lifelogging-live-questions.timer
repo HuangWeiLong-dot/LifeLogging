@@ -23,6 +23,13 @@ Requires=lifelogging-live-questions.service
 [Timer]
 OnBootSec=12min
 OnUnitActiveSec=30min
+
+# ⚠️ **收尾必须有一个准点触发。**
+#    上面那条 30 分钟轮询是从开机时刻起算的，实际落点是 :20 / :50 ——
+#    23:00 永远不是触发点，下一次是 23:20。实测：使用者在 23:00 等到的是空，
+#    只能手动发 /收尾。
+#    改 LIVE_SUMMARY_AT 时，这一行要一起改（systemd 读不到那个环境变量）。
+OnCalendar=*-*-* 23:00:00
 # 精确到分钟：日志里好看，也避免每次开机都卡在同一个秒
 AccuracySec=1min
 Persistent=true

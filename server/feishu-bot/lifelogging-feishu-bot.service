@@ -37,6 +37,12 @@ EnvironmentFile=-/etc/lifelogging/feishu-bot.env
 # 中继那把 key 从它自己的文件里读，而不是在 feishu-bot.env 里再抄一份 ——
 # 这样轮换密钥只需要改一处。
 EnvironmentFile=-/etc/lifelogging/relay.env
+# ⚠️ **LLM 的 key 也在这里**（自由问答 + 每天的复盘总结都要用）。
+#    不加载这一份的话，机器人能出题、能收答案，但一到写总结就报
+#    「Env var DEEPSEEK_API_KEY is not set」—— 而且是在**答完 12 题之后**才报，
+#    最不该失败的时候失败。实测踩到过（2026-10-17 晚）。
+#    复用 close-day 那份而不是在 feishu-bot.env 里再抄一遍：轮换 key 只改一处。
+EnvironmentFile=-/etc/lifelogging/close-day.env
 
 # ⚠️ **这里刻意不写死中继地址。** 中继绑的是 **Tailscale 地址**（生产环境的
 #    设置，为了让手机连得上），而那个地址是机器相关的，写不进要进 git 的 unit。
@@ -62,8 +68,12 @@ Environment=FEISHU_PUSH_AT=08:30
 # 服务器每 30 分钟生成的**实时题**，尽快单独推给你（不必等到第二天早上）。
 # ⚠️ 只在没在等答案时才推，所以不会打断你正在答的那题。
 Environment=FEISHU_LIVE_PUSH=1
-# 多久去中继看一眼有没有新题（分钟）。生成器是 30 分钟一次。
-# Environment=FEISHU_LIVE_POLL_MIN=5
+# 多久去中继看一眼有没有新题（分钟）。
+#
+# ⚠️ **设成 1 是为了「23:00 准时」**：生成器在 23:00 产出收尾题，而这里是
+#    唯一的推送路径。默认 5 分钟意味着最晚 23:05 才发 —— 使用者要的是 23 点。
+#    查询是本机 HTTP，一天 1440 次，可以忽略。
+Environment=FEISHU_LIVE_POLL_MIN=1
 
 # ⚠️ 「别打扰」时段（小时，本地时间）。**推送这一层也需要**，不能只靠生成器：
 #    生成器只决定「生不生成」，题生成完还躺着等这里推 —— 少了这道闸，
