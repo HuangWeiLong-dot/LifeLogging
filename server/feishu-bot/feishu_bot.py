@@ -701,7 +701,8 @@ def _answers_today(day_iso: str) -> dict[str, str]:
     return out
 
 
-def maybe_write_summary(open_id: str, day_iso: str) -> bool:
+def maybe_write_summary(open_id: str, day_iso: str,
+                        force: bool = False) -> bool:
     """收尾三题**全答完**了吗？答完就写一段当天总结。返回是否处理了。
 
     ⚠️ 「答完」靠**中继**判断（再拉一次待答，看还有没有 kind=summary 的题），
@@ -712,7 +713,7 @@ def maybe_write_summary(open_id: str, day_iso: str) -> bool:
     except Exception as e:  # noqa: BLE001
         print(f"WARN 收尾：拉不到待答：{type(e).__name__}: {e}", file=sys.stderr)
         return False
-    if any(str(x.get("kind") or "") == "summary" for x in pending):
+    if not force and any(str(x.get("kind") or "") == "summary" for x in pending):
         return False                    # 还有没收尾的题
 
     state = load_state()
@@ -792,6 +793,9 @@ def advance(open_id: str) -> None:
 
 
 END_DAY_COMMANDS = ("/收尾", "/结束", "/收工", "/end")
+# 「重来一次复盘」。存在的理由是失败可恢复：总结那一步可能因为 LLM 挂了而失败，
+# 而答完的题不会再问一遍 —— 没有这个命令就永远补不回来。
+RECAP_COMMANDS = ("/复盘", "/复盘了", "/recap")
 
 
 def handle_end_day(open_id: str) -> None:
@@ -868,8 +872,9 @@ def handle_text(open_id: str, text: str) -> None:
                   "\n"
                   "【白天与晚上】\n"
                   "  白天每个小时问你一次「刚才这一小时在干嘛」；\n"
-                  "  发「/收尾」→ 立刻开始问三条收尾题，答完我给你写一段今天的总结。\n"
+                  "  发「/收尾」→ 立刻开始问收尾题，答完我给你一份今日复盘\n"
                   "  （23:00 也会自动问一次，如果你还没发过）\n"
+                  "  发「/复盘」→ 重新生成一次今日复盘（总结失败时用它补）\n"
                   "\n"
                   "⚠️ 电脑数据来自笔记本每 10 分钟推的快照，答案里会写明\n"
                   "   「最后上报是几点」—— 是几小时前的就直说，别当成此刻。\n"
@@ -879,6 +884,17 @@ def handle_text(open_id: str, text: str) -> None:
 
     if stripped in END_DAY_COMMANDS:
         handle_end_day(open_id)
+        return
+
+    if stripped in RECAP_COMMANDS:
+        # ⚠️ force=True：不检查「还有没有没收尾的题」。
+        #    存在的理由：总结那一步可能因为 LLM 挂了/额度用完而失败（实测过，
+        #    见 2026-10-17 那次 DEEPSEEK_API_KEY 缺失）。而**答完的题不会再
+        #    被问一遍**，没有这个命令就永远补不回来 —— 数据和回答都在，只差
+        #    那一段总结。
+        if not maybe_write_summary(open_id, datetime.now(TZ).date().isoformat(),
+                                   force=True):
+            send_text(open_id, "今天还没有可复盘的记录。")
         return
 
     if stripped == "/pending":

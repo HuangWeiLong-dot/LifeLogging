@@ -1958,6 +1958,38 @@ check("feishu: /收尾 立刻出收尾题（不等 21:30），答完会明说",
       t_end_day_command)
 
 
+def t_recap_command():
+    """/复盘：强制重做一次复盘。
+
+    ⚠️ 存在的理由是失败可恢复。总结那一步可能因为 LLM 挂了/额度用完而失败，
+       而答完的题不会再问一遍 —— 没有这个命令，数据和回答都在，只差那段总结，
+       却永远补不回来。实测过（2026-10-17，DEEPSEEK_API_KEY 没加载）。
+    """
+    import importlib.util
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "fb_recap", root / "server" / "feishu-bot" / "feishu_bot.py")
+    fb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fb)
+
+    called: dict = {}
+
+    def fake_summary(oid, day, force=False):
+        called["force"] = force
+        return True
+
+    fb.maybe_write_summary = fake_summary
+    fb.load_state = lambda: {}
+    fb.send_text = lambda oid, t: None
+
+    fb.handle_text("ou_x", "/复盘")
+    assert called.get("force") is True, "必须 force —— 否则有未答题时会直接返回"
+
+
+check("feishu: /复盘 强制重做复盘", t_recap_command)
+
+
 # ── 7d-3. 日记中继 ──────────────────────────────────────────────────
 print("\n[21] Journal relay")
 
