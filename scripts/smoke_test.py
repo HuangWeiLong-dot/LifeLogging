@@ -1576,6 +1576,68 @@ check("app_map: 学到的分类能用 / 不覆盖人工修正 / 未知仍是 def
       t_app_map_learning)
 
 
+def t_memory_retrieval():
+    """长期记忆的检索层 —— 重点钉**中文两字词**能不能查到。
+
+    ⚠️ 实测过的坑：
+      · FTS5 默认的 unicode61 把一整串汉字当一个 token → 搜「外包」命中 0。
+      · trigram 只对 **≥3 个字符**有效 → 搜「外包」「熬夜」仍然命中 0。
+        而中文里有意义的词大多正是两个字。
+      · 逐字切分 + unicode61 才能命中两字词 —— 这是零依赖下唯一靠谱的做法。
+
+    另一个坑：检索词是从今天的多个信号拼出来的，**AND 起来几乎永远命中 0**，
+    所以必须先 AND、失败再 OR。
+    """
+    import importlib.util
+
+    root = Path(__file__).resolve().parent.parent
+    tmpdir = Path(tempfile.mkdtemp(prefix="lifelogging-mem-"))
+    os.environ["LIFELOGGING_MEMORY_DB"] = str(tmpdir / "mem.db")
+    spec = importlib.util.spec_from_file_location(
+        "memory_t", root / "scripts" / "memory.py")
+    mem = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mem)
+
+    # ── 切分与查询构造 ──
+    assert mem.seg("外包") == " 外  包 ", repr(mem.seg("外包"))
+    assert '"外 包"' in mem.to_fts_query("外包"), mem.to_fts_query("外包")
+
+    # ── 建索引（手工写入两篇，不碰真实 vault / 事件表）──
+    conn = mem.connect()
+    mem.ensure_schema(conn)
+    docs = [
+        ("journal:2026-01-01", "2026-01-01", "journal",
+         "今年少接外包，把时间留给自己的项目。"),
+        ("note:2026-02-02", "2026-02-02", "note",
+         "又熬夜到两点，因为白天被杂事打断。"),
+    ]
+    for key, day, kind, text in docs:
+        conn.execute("INSERT OR REPLACE INTO memory_docs"
+                     " (doc_key, day, kind, text, source) VALUES (?,?,?,?,?)",
+                     (key, day, kind, text, "test"))
+        conn.execute("INSERT INTO memory_fts (doc_key, day, kind, seg)"
+                     " VALUES (?,?,?,?)", (key, day, kind, mem.seg(text)))
+    conn.commit()
+    conn.close()
+
+    # ⚠️ 核心断言：**两个字的词**必须查得到
+    hits = mem.search("外包", 5)
+    assert [h["doc_key"] for h in hits] == ["journal:2026-01-01"], hits
+    hits = mem.search("熬夜", 5)
+    assert [h["doc_key"] for h in hits] == ["note:2026-02-02"], hits
+
+    # 两个词 AND 起来没有共同文档 → 必须退回 OR，两个都召回
+    hits = mem.search("外包 熬夜", 5)
+    assert len(hits) == 2, f"AND 命中 0 时该退回 OR：{hits}"
+
+    # 查不到就是空，不猜
+    assert mem.search("完全不存在的词", 5) == []
+
+
+check("memory: 中文两字词查得到（逐字切分）/ AND 空时退回 OR",
+      t_memory_retrieval)
+
+
 # ── 7d-3. 日记中继 ──────────────────────────────────────────────────
 print("\n[21] Journal relay")
 

@@ -164,6 +164,17 @@ function Invoke-OneDay($d) {
     # 2. 归一化
     $normalized = Invoke-Step "normalize" "scripts\normalize.py" @("--date", $ds)
 
+    # 2b. 重建长期记忆的检索索引（日记正文 + 笔记 + 问答）。
+    #
+    # ⚠️ 放在**归一化之后、推输入之前**：push_journal_input 要用它检索相关历史，
+    #    而且必须包含刚采集到的笔记。全量重建三百来篇是毫秒级，不做增量 ——
+    #    增量要维护「哪些变了」的状态，那个状态一旦和现实对不上，索引就会
+    #    静默地缺内容。
+    # ⚠️ 它不花 AI 的钱，所以 `-SkipAI` 时照跑（刷新也要能检索）。
+    if (-not $DryRun) {
+        Invoke-Step "memory-index" "scripts\memory.py" @("reindex") | Out-Null
+    }
+
     # 3. 把「写日记需要的一切」推给服务器。
     #
     # ⚠️ 这一步**和调不调 AI 无关**（-SkipAI / -Refresh 时都要做）。服务器那边是

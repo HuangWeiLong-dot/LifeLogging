@@ -75,6 +75,24 @@ def main() -> None:
     carryover = read_carryover(day)
     tasks = read_open_tasks()
 
+    # ── 相关历史（长期记忆 · 检索层）──
+    #
+    # ⚠️ **必须在这里做，不能放到服务器上。**
+    #    索引在 state/events.db，日记正文在 vault/ 里 —— 两样都在笔记本上。
+    #    而 `build_user_prompt` 跑在服务器（close_day），它看不到这些。
+    #    所以检索结果跟着 payload 一起推过去。
+    history: list[dict] = []
+    try:
+        import memory
+
+        note_texts = [str(n.get("text") or "")
+                      for n in (timeline.get("notes") or [])]
+        q = memory.build_query(timeline, notes=note_texts)
+        history = memory.search(q, 5) if q else []
+    except Exception as e:  # noqa: BLE001
+        # 索引坏了/没建过都不该拦住推输入 —— 没有历史是退化，不是失败。
+        print(f"  ⚠️  历史检索失败，本次不带历史：{type(e).__name__}: {e}")
+
     # ⚠️ 这一行是整套东西的关键。见模块开头的说明 —— 没有它，服务器会拿
     #    笔记本 18:00 那次推送的半截数据去写一整天的日记。
     final = datetime.now(TZ) >= day.end_local
@@ -85,11 +103,14 @@ def main() -> None:
         "timeline": timeline,
         "carryover": carryover,
         "tasks": tasks,
+        "history": history,
     }
 
     print(f"-> timeline: {len(timeline.get('blocks') or [])} blocks, "
           f"{timeline.get('total_hours')}h")
     print(f"-> carryover: {len(carryover)}, tasks: {len(tasks)}")
+    print(f"-> history: {len(history)} 条"
+          + ("" if history else "  （没有召回相关的历史）"))
     print(f"-> final={final}"
           + ("" if final else f"  （{day.iso} 还没过完，服务器不会据此写日记）"))
 

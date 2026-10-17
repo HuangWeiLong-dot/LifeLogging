@@ -214,7 +214,8 @@ def _fmt_health(key: str, value) -> str:
     return f"{key}: {value} {unit}" if unit else f"{key}: {value}"
 
 
-def build_user_prompt(tl: dict, day: Day, carryover: list[str]) -> str:
+def build_user_prompt(tl: dict, day: Day, carryover: list[str],
+                      history: list[dict] | None = None) -> str:
     lines: list[str] = []
     lines.append(f"# Data for {day.iso} ({day.d.strftime('%A')})")
     lines.append("")
@@ -329,6 +330,30 @@ def build_user_prompt(tl: dict, day: Day, carryover: list[str]) -> str:
         lines.append(f"- {cat}: {h}h")
     lines.append(f"- TOTAL: {tl.get('total_hours', 0)}h")
     lines.append("")
+
+    # ── 相关历史（长期记忆 · 检索层）──
+    #
+    # ⚠️ 必须明说「可能是噪音」。检索是按关键词召回的，召回来的东西经常只是
+    #    字面重合；不提醒的话模型会把某篇旧日记里的一句硬套到今天。
+    #
+    # ⚠️ 也不能只堆素材不说用途。这里给的是**支撑上下文**，不是让它复述。
+    #
+    # ⚠️ 只取前 5 条、每条 400 字。注入越多越糟 —— 一份两万字的历史塞进去，
+    #    模型对今天的注意力会被稀释，主任务反而变差。
+    if history:
+        lines.append("## Related history (retrieved by keyword — may contain noise)")
+        lines.append("")
+        lines.append("Pulled from past journals, your own notes and your answers, based on")
+        lines.append("overlap with today's places/apps/notes. **Supporting context only**:")
+        lines.append("use one only if it genuinely explains something about today. Do not")
+        lines.append("force a connection, do not list them, and do not summarise them.")
+        lines.append("")
+        for h in history[:5]:
+            text = " ".join(str(h.get("excerpt") or "").split())
+            if not text:
+                continue
+            lines.append(f"- [{h.get('day', '')}] ({h.get('kind', '')}) {text}")
+        lines.append("")
 
     if carryover:
         lines.append("## Yesterday's unfinished tasks")

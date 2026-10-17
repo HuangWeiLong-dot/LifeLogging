@@ -112,7 +112,10 @@ def generate(day: Day, bundle: dict, dry_run: bool) -> bool:
     tl = bundle.get("timeline") or {}
     carryover = bundle.get("carryover") or []
 
-    user = build_user_prompt(tl, day, carryover)
+    # 相关历史由**笔记本**在推送前检索好（索引和 vault 都在那边）。
+    # 老版本推上来的输入包没有这个字段 —— 缺了就当没有，不用报错。
+    history = bundle.get("history") or []
+    user = build_user_prompt(tl, day, carryover, history)
     print(f"-> {day.iso}: prompt {len(user):,} chars, "
           f"{len(tl.get('blocks') or [])} blocks, {len(carryover)} carryover")
 
