@@ -133,6 +133,28 @@ LIVE_PUSH = os.environ.get("FEISHU_LIVE_PUSH", "1").lower() not in (
 # 多久去中继看一眼有没有新的实时题。生成器是 30 分钟一次，这里比它密，
 # 所以题生成后最多几分钟就到手机上。
 LIVE_POLL_MIN = max(1, int(os.environ.get("FEISHU_LIVE_POLL_MIN", "5") or 5))
+
+# 「别打扰」时段。**推送这一层也需要**，不能只靠生成器那边拦。
+#
+# ⚠️ 生成器（scripts/live_questions.py）有一个 8–22 的窗口，但那只管「生不生成」。
+#    题生成完还躺在中继上，等着这个循环来推 —— 而推送原来是**不看时间的**：
+#      · 21:58 生成的题，5 分钟轮询正好落在 22:03 → 你已经躺下了还被叫醒
+#      · 服务器半夜重启 → 待推的那题立刻发出去
+#    两种都不会报错，只会在不该响的时候响一声。
+#
+# ⚠️ 这两个值要和 live_questions.py 的 ASK_FROM_HOUR / ASK_UNTIL_HOUR 一起改，
+#    否则会出现「生成了但永远推不出去」。
+QUIET_FROM = int(os.environ.get("FEISHU_QUIET_FROM", "22"))
+QUIET_UNTIL = int(os.environ.get("FEISHU_QUIET_UNTIL", "8"))
+
+
+def in_quiet_hours(now: datetime) -> bool:
+    """现在是不是「别打扰」时段。支持跨午夜（默认 22 → 8）。"""
+    if QUIET_FROM == QUIET_UNTIL:
+        return False
+    if QUIET_FROM < QUIET_UNTIL:
+        return QUIET_FROM <= now.hour < QUIET_UNTIL
+    return now.hour >= QUIET_FROM or now.hour < QUIET_UNTIL
 TZ_NAME = os.environ.get("FEISHU_TZ", "Asia/Shanghai")
 
 try:
@@ -815,8 +837,11 @@ def push_next_live(open_id: str) -> bool:
         于是「实时提问」的实际效果是：第二天早上一次性看到一堆昨天的题。
         名字和效果差得很远。实测由用户指出。
 
-    三条约束：
+    五条约束：
 
+      · **别打扰时段不推**（默认 22:00–08:00）。生成器有窗口，但那只管
+        「生不生成」；题生成完还躺着等这里推，所以这里也必须看时间。
+      · **只推当天的题**。隔了夜的「过去一小时」没有意义，早上收到只会困惑。
       · **只在没在等答案时推**（`awaiting` 为空）。否则会把正在答的那题顶掉，
         用户刚打了一半的答案会被当成另一题的答案。
       · **只推 source="live" 的题**。笔记本那批问责题仍然每天整批推一次 ——
@@ -824,6 +849,11 @@ def push_next_live(open_id: str) -> bool:
       · **先发再落状态**，和 advance() 同一个理由：发送失败不该留下一个
         「在等一题用户没见过的题」的状态。
     """
+    now = datetime.now(TZ)
+    if in_quiet_hours(now):
+        # 睡觉时间。题留在中继上，早上再看 —— 但**只留当天的**（见下面的过滤）。
+        return False
+
     state = load_state()
     if state.get("awaiting"):
         return False
@@ -834,7 +864,15 @@ def push_next_live(open_id: str) -> bool:
         print(f"WARN: 实时题轮询失败：{type(e).__name__}: {e}", file=sys.stderr)
         return False
 
-    live_qs = [q for q in pending if str(q.get("source") or "") == "live"]
+    today = now.date().isoformat()
+    # ⚠️ 只要**当天**的实时题。
+    #    「过去一小时」的题隔了夜就完全没意义了 —— 早上八点收到一条
+    #    「昨天 21:00–22:00 这一段：…」只会让人困惑。中继那边留 1 天是为了
+    #    「晚上生成的、第二天早上还能看到」，但那是给**问责批**的余地；
+    #    实时题不该享受这个待遇。
+    live_qs = [q for q in pending
+               if str(q.get("source") or "") == "live"
+               and str(q.get("day") or "") == today]
     if not live_qs:
         return False
 

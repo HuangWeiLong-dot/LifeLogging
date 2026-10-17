@@ -65,6 +65,13 @@ Environment=FEISHU_LIVE_PUSH=1
 # 多久去中继看一眼有没有新题（分钟）。生成器是 30 分钟一次。
 # Environment=FEISHU_LIVE_POLL_MIN=5
 
+# ⚠️ 「别打扰」时段（小时，本地时间）。**推送这一层也需要**，不能只靠生成器：
+#    生成器只决定「生不生成」，题生成完还躺着等这里推 —— 少了这道闸，
+#    21:58 的题会在 22:03 被你收到，或者服务器半夜重启时把待推的题发出去。
+#    这两个值要和 live_questions.py 的 ASK_FROM_HOUR / ASK_UNTIL_HOUR 一起改。
+Environment=FEISHU_QUIET_FROM=22
+Environment=FEISHU_QUIET_UNTIL=8
+
 # 模板答不了的问题要不要花钱交给模型。设 0 = 纯模板、零成本。
 # ⚠️ 每天还有一道**硬上限**（默认 10 次，见 live.py 的 LLM_DAILY_CAP），
 #    而且每次调用都走 budget 那套预检，超了当日 daily_cap 就拒答。
