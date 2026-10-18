@@ -734,7 +734,7 @@ def maybe_write_summary(open_id: str, day_iso: str,
         return False
     # ⚠️ 即使总结没写成，也要把「数据 + 你的回答」发出去 —— 那才是复盘的主体，
     #    模型那一段只是收尾。整条链路里最不该因为 LLM 挂了就什么都不给。
-    recap = live.day_recap(day_iso, RELAY_BASE, RELAY_API_KEY, qa, text or "")
+    recap = live.day_recap(day_iso, RELAY_BASE, RELAY_API_KEY, qa, text)
     if text is None:
         recap += f"\n\n（总结没写成：{err}）"
     send_text(open_id, recap)

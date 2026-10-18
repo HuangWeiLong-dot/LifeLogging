@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -313,10 +314,10 @@ def data_snapshot(day_iso: str, base: str, key: str) -> list[str]:
 
 
 def day_recap(day_iso: str, base: str, key: str,
-              qa: list[tuple[str, str]], prose: str) -> str:
-    """一天的收尾回执：**数据 + 你的回答 + 一段总结**。
+              qa: list[tuple[str, str]], sections: dict | None) -> str:
+    """一天的收尾回执：数据 + 你的回答 + 总结 + 今天做了什么 + 明天的建议。
 
-    ⚠️ 数据和回答都是**确定性的**（直接拼），只有最后的总结走模型。
+    ⚠️ 数据和回答都是**确定性的**（直接拼），只有后三块走模型。
        这样即使 LLM 挂了、额度用完了，复盘里仍然有今天的事实和你自己说的话 ——
        那才是这份东西的主体。
     """
@@ -336,9 +337,23 @@ def day_recap(day_iso: str, base: str, key: str,
             lines.append(f"· {qt} → {at}")
         lines.append("")
 
-    if prose:
-        lines.append("【总结】")
-        lines.append(prose)
+    sec = sections or {}
+    summary = str(sec.get("summary") or "").strip()
+    did = [str(x).strip() for x in (sec.get("did") or []) if str(x).strip()]
+    advice = [str(x).strip() for x in (sec.get("advice") or []) if str(x).strip()]
+
+    if summary:
+        lines += ["【总结】", summary, ""]
+
+    if did:
+        lines.append("【今天做了什么】")
+        lines += [f"· {x}" for x in did]
+        lines.append("")
+
+    if advice:
+        # 编号而不是圆点 —— 这是**待办**，明天要照着做的。
+        lines.append("【明天的建议】")
+        lines += [f"{i}. {x}" for i, x in enumerate(advice, 1)]
 
     return "\n".join(lines).strip()
 
@@ -622,25 +637,73 @@ def answer_freeform(text: str, *, day_iso: str, base: str, key: str) -> str | No
     return out
 
 
-_SUMMARY_SYSTEM = """你在给用户写**今天的收尾总结**。
+_SUMMARY_SYSTEM = """你在给用户写**一天的收尾复盘**。
+
+输出**一个 JSON 对象**，不要任何代码块之外的文字：
+
+{
+  "summary": "3–5 句话，回顾今天",
+  "did": ["今天具体做了什么", "..."],
+  "advice": ["明天可以执行的一件事", "..."]
+}
 
 规则（必须遵守）：
+
 1. 只用下面给的数据，以及用户自己写下的东西。数据里没有的不要说，不要推测。
-2. 三到五句话。不分点、不加标题、不列清单、不罗列整张表。
-3. 语气平实，像朋友回顾一天。不要打气、不要评价好坏、不要给建议。
-4. 用户自己写的笔记和回答**优先于任何推断**。如果它们和统计数据冲突，
-   以用户说的为准。
-5. 如果今天记录很少，就照实说「今天记录不多」，不要编。"""
+2. `summary` 三到五句话。不分点、不加标题、不罗列整张表。语气平实，像朋友
+   回顾一天 —— 不要打气、不要评价好坏。
+3. `did` 是**事实清单**，3–6 条，每条一件具体的事：做了什么、去了哪、推进了什么。
+   不要写成「工作 / 生活」这种分类，要写「把飞书机器人的收尾题改成七个维度」。
+4. `advice` 是**明天可以执行的具体动作**，1–3 条。不要写「多休息」「保持专注」
+   这种空话 —— 要能直接照着做：比如「明天 15:00 前把 AE 的安装验证掉」、
+   「把学习通的网课刷完，别拖到周末」。优先参考他回答里「没做成、想留到明天」的那条。
+5. 用户自己写的笔记和回答**优先于任何推断**。两者冲突时以用户说的为准。
+6. 如果今天记录很少，照实说，不要编。"""
+
+
+def _extract_json_obj(raw: str) -> dict | None:
+    text = (raw or "").strip()
+    text = re.sub(r"^```(?:json)?\s*\n", "", text)
+    text = re.sub(r"\n```\s*$", "", text)
+    a, b = text.find("{"), text.rfind("}")
+    if a < 0 or b <= a:
+        return None
+    try:
+        obj = json.loads(text[a:b + 1])
+    except json.JSONDecodeError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def parse_day_summary(raw: str) -> dict:
+    """把模型输出解析成 {summary, did, advice}。
+
+    ⚠️ 解析不出来就**把原文当 summary**，不丢内容 —— 模型偶尔会忘了输出 JSON，
+       而那段话本身仍然是有用的。丢掉的代价比格式不规范大得多。
+    """
+    obj = _extract_json_obj(raw)
+    if obj is None:
+        return {"summary": (raw or "").strip(), "did": [], "advice": []}
+
+    def _list(v: Any) -> list[str]:
+        if not isinstance(v, list):
+            return []
+        return [str(x).strip() for x in v if str(x).strip()]
+
+    return {
+        "summary": str(obj.get("summary") or "").strip(),
+        "did": _list(obj.get("did"))[:8],
+        "advice": _list(obj.get("advice"))[:5],
+    }
 
 
 def write_day_summary(day_iso: str, base: str, key: str,
-                      qa: list[tuple[str, str]]) -> tuple[str | None, str]:
-    """晚上收尾：把今天的数据 + 刚答的三句，写成一段总结。
+                      qa: list[tuple[str, str]]) -> tuple[dict | None, str]:
+    """晚上收尾：把今天的数据 + 刚答的那些，写成总结 / 做了什么 / 明天建议。
 
-    返回 (总结正文, 给人看的话)。正文为 None 表示没写成，第二个值是原因。
+    返回 (三段内容, 给人看的话)。为 None 表示没写成，第二个值是原因。
 
-    ⚠️ 总结会**同时存成一条笔记**（调用方负责），所以它也是「记忆」的一部分 ——
-       以后翻日记能看到自己那天收尾时说的话。
+    ⚠️ 整份复盘会**同时存成一条笔记**（调用方负责），所以它也是「记忆」的一部分。
     """
     try:
         conf = cfg()
@@ -664,7 +727,7 @@ def write_day_summary(day_iso: str, base: str, key: str,
         stage="feishu_summary")
     if out is None:
         return None, err
-    return out, ""
+    return parse_day_summary(out), ""
 
 
 def answer_query(text: str, *, day_iso: str, base: str, key: str) -> str | None:

@@ -1771,15 +1771,27 @@ def t_day_recap():
                                         "手机：解锁 16 次"]
     qa = [("今天体力怎么样？", "还行"), ("今天学到了什么？", "SQLite FTS5")]
 
-    out = lv.day_recap("2026-10-17", "http://x", "k", qa, "今天主要在写代码。")
+    sections = {"summary": "今天主要在写代码。",
+                "did": ["把飞书机器人的收尾题改成七个维度"],
+                "advice": ["明天 15:00 前把 AE 的安装验证掉"]}
+    out = lv.day_recap("2026-10-17", "http://x", "k", qa, sections)
     assert "【数据】" in out and "电脑：9.5 小时" in out, out
     assert "【你的回答】" in out and "SQLite FTS5" in out, out
     assert "【总结】" in out and "写代码" in out, out
+    assert "【今天做了什么】" in out and "七个维度" in out, out
+    assert "【明天的建议】" in out and "1. 明天 15:00" in out, out
 
-    # 没有总结时，数据和回答照样要发
-    out2 = lv.day_recap("2026-10-17", "x", "k", qa, "")
+    # 模型什么都没给时，数据和回答照样要发
+    out2 = lv.day_recap("2026-10-17", "x", "k", qa, None)
     assert "【数据】" in out2 and "【你的回答】" in out2, out2
-    assert "【总结】" not in out2, out2
+    assert "【总结】" not in out2 and "【明天的建议】" not in out2, out2
+
+    # 解析：正常 JSON / 带围栏 / 没按 JSON 回（原文当总结，不丢内容）
+    p = lv.parse_day_summary('{"summary":"s","did":["a","b"],"advice":["x"]}')
+    assert p == {"summary": "s", "did": ["a", "b"], "advice": ["x"]}, p
+    assert lv.parse_day_summary("```json\n{\"summary\":\"s\"}\n```")["summary"] == "s"
+    p = lv.parse_day_summary("今天就这样吧。")
+    assert p["summary"] == "今天就这样吧。" and p["did"] == [], p
 
 
 check("feishu: 今日复盘 = 数据 + 你的回答 + 总结（没有总结也照发）",
