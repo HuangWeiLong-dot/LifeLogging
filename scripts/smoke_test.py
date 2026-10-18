@@ -1018,6 +1018,36 @@ check("live questions: 实时批不遮蔽笔记本批，手机链路冻结，实
       t_live_questions)
 
 
+def t_relay_now_timestamp():
+    """`"ts":"now"` 只认这一个字面量；**没写 ts 不能变成 now**。
+
+    ⚠️ 加这个是为了 OpenTasker —— 它的模板里没有内置的 Unix 秒变量。
+       但「没写 ts 也当 now」是另一种失败：批量补传历史数据时少一个字段，
+       所有事件会被压到收件那一刻。数据看起来都在，只是时间全错。
+    """
+    import importlib.util
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "pr_now", root / "server" / "phone-relay" / "phone_relay.py")
+    pr = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pr)
+
+    s = pr.to_utc_iso({"ts": "now", "metric": "unlock"})
+    assert s and s.endswith("Z"), s
+    assert s[:4] == str(datetime.now(timezone.utc).year), s
+
+    assert pr.to_utc_iso({"metric": "unlock"}) is None, "没写 ts 不能被当成 now"
+    assert pr.to_utc_iso({"ts": 1700000000000, "metric": "unlock"}) is None, \
+        "毫秒值必须丢掉，不能猜"
+    assert pr.to_utc_iso({"ts": 1700000000, "metric": "unlock"}) == \
+        "2023-11-14T22:13:20Z"
+
+
+check("relay: ts=now 可用，但没写 ts / 毫秒值仍然丢掉",
+      t_relay_now_timestamp)
+
+
 def t_live_question_rules():
     """每小时一题：**固定节拍**，数据再平淡也要问；且不勾任务、不写死「今天」。
 

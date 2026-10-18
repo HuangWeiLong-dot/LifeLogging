@@ -143,6 +143,15 @@ def to_utc_iso(e: dict) -> str | None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    # ⚠️ 允许显式写 `"ts": "now"` —— 给那些拿不到 Unix 秒的手机端用
+    #    （OpenTasker 的模板引擎里没有内置的 epoch 变量，而 Tasker 有 %TIMES）。
+    #
+    # ⚠️ **只认这一个字面量，不把「没写 ts」也当成 now。** 批量补传历史数据时
+    #    少一个字段就把所有事件压到收件那一刻 —— 那比丢掉更难发现，因为它
+    #    看起来「数据都在」，只是时间全错。
+    if str(e.get("ts") or "").strip().lower() == "now":
+        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     raw = e.get("ts")
     if raw is None or isinstance(raw, bool):
         return None
