@@ -33,7 +33,7 @@ import argparse
 import json
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -156,6 +156,55 @@ def read_answers(day: Day) -> dict[str, tuple[str, str, str]]:
     return latest
 
 
+def read_questions(day: Day) -> list[dict]:
+    """本地早晨批 + 中继上的实时任务题。
+
+    ⚠️ 实时任务题是在服务器上生成的，本地 `questions-<day>.json` 里没有。
+       `apply_answers` 要勾任务就必须拿到它的 `ref` / `options` / `format`，
+       所以这里通过 `/qa` 合并。中继不可用时退回本地那份 —— 实时题只是
+       勾不了，不会让整个脚本崩。
+    """
+    items: list[dict] = []
+    qfile = STATE / f"questions-{day.iso}.json"
+    if qfile.exists():
+        try:
+            items = json.loads(qfile.read_text(encoding="utf-8")).get("questions") or []
+        except (OSError, json.JSONDecodeError):
+            print(f"FAIL could not read {qfile}")
+            sys.exit(1)
+        print(f"-> {len(items)} local question(s) for {day.iso}")
+
+    try:
+        import qa_client
+
+        prefix = f"{day.iso}-"
+        # 实时题通常当天答；晚答的会落在下一天的事件里。两天都看。
+        for d in (day.iso, (day.d + timedelta(days=1)).isoformat()):
+            payload = qa_client.fetch(d)
+            for x in ((payload or {}).get("qa") or []):
+                if not isinstance(x, dict):
+                    continue
+                qid = str(x.get("id") or "")
+                if not qid.startswith(prefix) or not x.get("ref"):
+                    continue
+                items.append({
+                    "id": qid,
+                    "kind": x.get("kind") or "commitment",
+                    "format": x.get("format") or "yes_no",
+                    "text": x.get("text") or "",
+                    "ref": x.get("ref") or "",
+                    "options": x.get("options") or [],
+                })
+    except Exception as e:  # noqa: BLE001
+        print(f"  ⚠️  实时问题取不到，只用本地那份：{type(e).__name__}: {e}")
+
+    by_id: dict[str, dict] = {}
+    for q in items:
+        if isinstance(q, dict) and q.get("id"):
+            by_id.setdefault(str(q["id"]), q)
+    return list(by_id.values())
+
+
 def mark_done(done: list[tuple[str, str]]) -> None:
     """把 Open 里的条目挪到 Done 并勾上。**行级改写**，其余内容原样保留。
 
@@ -205,15 +254,10 @@ def main() -> None:
     day = Day.parse(args.date, TZ)
     header(f"Apply answers · {day.iso}")
 
-    qfile = STATE / f"questions-{day.iso}.json"
-    if not qfile.exists():
-        print(f"-> no questions were generated for {day.iso} ({qfile.name} missing)")
+    questions = read_questions(day)
+    if not questions:
+        print(f"-> no questions were generated for {day.iso}")
         return
-    try:
-        questions = json.loads(qfile.read_text(encoding="utf-8")).get("questions") or []
-    except (OSError, json.JSONDecodeError):
-        print(f"FAIL could not read {qfile}")
-        sys.exit(1)
     by_id = {q.get("id"): q for q in questions if isinstance(q, dict)}
 
     answers = read_answers(day)

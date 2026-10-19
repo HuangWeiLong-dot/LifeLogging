@@ -52,6 +52,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 from collections import Counter
 from datetime import date, datetime, timedelta
@@ -86,6 +87,14 @@ MIN_STAY_MIN = 30
 # 答完之后机器人会用 LLM 写一段当天总结（见 feishu_bot）。
 # 留空 = 不做收尾，只发小时题。
 SUMMARY_AT = os.environ.get("LIVE_SUMMARY_AT", "23:00")
+
+# 白天的**任务检查**时段。到这些小时，如果任务表里还有没问过的任务，
+# 就用一条「到现在做到了吗？」替换掉普通的小时题（不是额外加一条）。
+# 一天最多 4 条，避免刷屏；空字符串 = 关闭。
+COMMITMENT_HOURS: tuple[int, ...] = tuple(
+    int(x) for x in os.environ.get("LIVE_COMMITMENT_HOURS", "10,14,18,21").split(",")
+    if x.strip().isdigit() and 0 <= int(x) <= 23
+)
 
 
 def _summary_due(now: datetime) -> bool:
@@ -341,6 +350,113 @@ def rule_hourly(day_iso: str, stays: list[dict], events: list[dict],
                 f"hour-{day_iso}T{now.strftime('%H')}")
 
 
+# ── 任务检查（穿插在小时题里）──────────────────────────────────────
+
+_TIME_RANGE_RE = re.compile(
+    r"(?<!\d)(\d{1,2})[:：](\d{2})\s*(?:-|–|—|~|到|至)\s*"
+    r"(\d{1,2})[:：](\d{2})(?!\d)"
+)
+
+
+def _time_window(task: str) -> tuple[int, int] | None:
+    """从任务文本里抽 `HH:MM-HH:MM`。抽不到返回 None。"""
+    m = _TIME_RANGE_RE.search(task)
+    if not m:
+        return None
+    try:
+        start, end = int(m.group(1)), int(m.group(3))
+    except ValueError:
+        return None
+    if not (0 <= start <= 23 and 0 <= end <= 23):
+        return None
+    return start, end
+
+
+def load_commitment_tasks(day_iso: str) -> list[str]:
+    """读当天的 `journal-input-<day>.json`，取 `carryover` + `tasks`。
+
+    ⚠️ 笔记本还没推当天输入时，往前找最多 2 天。宁可拿一份稍旧的任务表，
+       也不要因为「今天还没推送」就一条任务检查都不发。
+    """
+    try:
+        d = date.fromisoformat(day_iso)
+    except ValueError:
+        return []
+
+    state = Path(CFG["state_dir"])
+    payload = None
+    for i in range(0, 3):
+        p = state / f"journal-input-{(d - timedelta(days=i)).isoformat()}.json"
+        if not p.exists():
+            continue
+        try:
+            payload = json.loads(p.read_text(encoding="utf-8"))
+            break
+        except (OSError, json.JSONDecodeError):
+            continue
+    if not isinstance(payload, dict):
+        return []
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for key in ("carryover", "tasks"):
+        for t in (payload.get(key) or []):
+            t = " ".join(str(t).split())
+            if t and t not in seen:
+                seen.add(t)
+                out.append(t)
+    return out
+
+
+def commitment_question(day_iso: str, tasks: list[str],
+                        now: datetime, known: list[dict]) -> dict | None:
+    """到了检查时段，挑一条没问过的任务生成问责题。
+
+    ⚠️ 它**替换**普通小时题，不是追加 —— 一天 4 条已经够多了，再加会让人
+       把整条通道静音，连带收尾题一起收不到。
+    """
+    if now.hour not in COMMITMENT_HOURS or not tasks:
+        return None
+
+    asked_refs = {str(q.get("ref") or "") for q in known if q.get("ref")}
+    candidates = [t for t in tasks if t not in asked_refs]
+    if not candidates:
+        return None
+
+    def score(t: str) -> tuple[int, int]:
+        idx = tasks.index(t)
+        w = _time_window(t)
+        if w is None:
+            return (2, idx)
+        start, end = w
+        if start <= now.hour < end:
+            return (0, idx)                  # 时段正在进行
+        if end == now.hour:
+            return (0, idx)                  # 时段刚结束
+        if end == (now.hour - 1) % 24:
+            return (1, idx)                  # 上一小时结束
+        return (3, idx)
+
+    task = min(candidates, key=score)
+    display = task if len(task) <= 90 else task[:87] + "…"
+    text = f"现在 {now:%H:%M}。任务表里还挂着「{display}」——到现在做到了吗？"
+    return {
+        "id": qid(day_iso, text),
+        "kind": "commitment",
+        "format": "choice",
+        "text": text,
+        "evidence": "来自任务表 Open 项 / 昨天日记里未完成的任务。",
+        "ref": task,
+        "options": [
+            {"label": "做了", "done": True},
+            {"label": "做了一部分", "done": False},
+            {"label": "没做", "done": False},
+        ],
+        "_key": (f"task-{day_iso}T{now:%H}-"
+                 f"{hashlib.sha1(task.encode('utf-8')).hexdigest()[:8]}"),
+    }
+
+
 def relay_desktop(base: str, key: str) -> dict | None:
     """笔记本每 10 分钟推上来的快照。
 
@@ -531,6 +647,17 @@ def build(day: Day, base: str, key: str) -> list[dict]:
     # 离收尾不到一小时就别再发小时题 —— 否则晚上连着两条。
     if _summary_soon(now):
         return known
+
+    # ── 固定时段的任务检查（替换这一小时的普通题）──
+    if now.hour in COMMITMENT_HOURS:
+        try:
+            cq = commitment_question(day.iso, load_commitment_tasks(day.iso),
+                                     now, known)
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠️  任务检查生成失败：{type(e).__name__}: {e}")
+            cq = None
+        if cq and cq["_key"] not in fired:
+            return known + [cq]
 
     # ── 每小时一题 ──
     try:
