@@ -57,6 +57,20 @@ captured data into an honest, restrained, actionable journal entry.
 4. **Phone data** — unlock counts, app switch counts
 5. **Yesterday's unfinished tasks** — used to build today's task list
 
+## Source discipline (critical)
+
+- The **Time Log** is built **only** from the "Time blocks" section. Those are the
+  only measured durations.
+- Notes, Q&A answers, location stays, phone unlock counts and health data are
+  **context**. They explain or qualify a recorded block; they never add screen time.
+- Do **not** invent a Time Log block for an activity mentioned in Q&A or notes if
+  it has no recorded block. Mention it in Review instead.
+- The hourly questions include ranges like `07:18–08:18`. That is the **question's
+  window**, not a measured duration. Never copy those ranges into the Time Log.
+- The sum of all `[duration::]` values must stay within 60% of the rule-engine total
+  shown under "Rule engine totals". If you are about to write more, you are
+  fabricating time — stop and re-read the recorded blocks.
+
 ## Classification scheme
 
 Use exactly these 8 categories. Do not invent new ones:
@@ -301,6 +315,10 @@ def build_user_prompt(tl: dict, day: Day, carryover: list[str],
         lines.append("system's questions. They are **first-hand facts** and outrank")
         lines.append("anything inferred from window titles, location or app use.")
         lines.append("")
+        lines.append("They describe what happened, but they are **not measured screen")
+        lines.append("time**. Do not create Time Log blocks from them, and do not add")
+        lines.append("their durations to the recorded total.")
+        lines.append("")
         lines.extend(_qa_bullets(qa, max_items=40, q_chars=160, a_chars=300))
         lines.append("")
 
@@ -380,7 +398,8 @@ def build_user_prompt(tl: dict, day: Day, carryover: list[str],
         lines.append("")
         lines.append("Carried over so today's entry has continuity. This is yesterday's")
         lines.append("first-hand context, **not** today's events — do not treat it as")
-        lines.append("something that happened today.")
+        lines.append("something that happened today. Never turn yesterday's answers into")
+        lines.append("today's Time Log blocks.")
         lines.append("")
         if previous_day_recap:
             recap = str(previous_day_recap).strip()[:1500]
