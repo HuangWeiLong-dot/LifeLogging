@@ -69,6 +69,10 @@ if (-not (Test-Path $Py)) { $Py = "python" }
 
 $StateFile = Join-Path $Root "state\last_processed.json"
 
+# 由 Invoke-OneDay 每天的 push-input 之后设置：这一天的输入包是不是
+# `final=true` 且真的推到了中继。只有它为 true 才推进水位线。
+$script:LastDayFinal = $false
+
 function Write-Log($msg) {
     $line = "[$(Get-Date -Format 'HH:mm:ss')] $msg"
     Write-Host $line
@@ -180,8 +184,26 @@ function Invoke-OneDay($d) {
     # ⚠️ 这一步**和调不调 AI 无关**（-SkipAI / -Refresh 时都要做）。服务器那边是
     #    独立的定时任务，靠这个输入包决定写不写日记 —— 本机做不做 AI 是另一回事。
     #    而且 `-Refresh`（每 2 小时）推的正是当天唯一的那份「非终版」数据。
+    $script:LastDayFinal = $false
     if ($normalized -and -not $DryRun) {
-        Invoke-Step "push-input" "scripts\push_journal_input.py" @("--date", $ds) | Out-Null
+        # 先删旧标记：推送脚本如果在中途崩了，绝不能读到上一次留下的
+        # final=true 而把这一天误判成已终版。
+        $marker = Join-Path $Root "state\journal-final-$ds.json"
+        Remove-Item $marker -ErrorAction SilentlyContinue
+        $pushed = Invoke-Step "push-input" "scripts\push_journal_input.py" @("--date", $ds)
+        if ($pushed -and (Test-Path $marker)) {
+            try {
+                $j = Get-Content $marker -Raw -Encoding UTF8 | ConvertFrom-Json
+                $script:LastDayFinal = ([bool]$j.final -and [bool]$j.relay_ok)
+                if (-not $script:LastDayFinal) {
+                    Write-Log "   day $ds is not final yet (final=$($j.final), relay_ok=$($j.relay_ok)); watermark will not advance"
+                }
+            } catch {
+                Write-Log "   WARN could not read $marker; treating as not final"
+            }
+        } else {
+            Write-Log "   WARN push-input failed or wrote no final marker; watermark will not advance"
+        }
     }
 
     # ⚠️ 「取日记」**不在这里**，见日循环之后那一段。把那一步放进来的话：
@@ -345,25 +367,40 @@ else {
 
     if ($fromDate -gt $toDate) {
         Write-Log "Nothing to do (watermark $($last), target $($toDate.ToString('yyyy-MM-dd')))"
-        exit 0
-    }
+        # ⚠️ 不要 exit。日循环后面的「取日记 / 生成提问 / 回收答案」仍然要跑：
+        #    前一天 23:10 才生成的复盘、服务器晚写好的日记，都靠这些步骤补上。
+        $targets = @()
+    } else {
+        $span = ($toDate - $fromDate).Days + 1
+        if ($span -gt $MaxBackfillDays) {
+            $fromDate = $toDate.AddDays(-($MaxBackfillDays - 1))
+            Write-Log "WARN $span days pending, over the $MaxBackfillDays cap; backfilling the most recent only"
+        }
 
-    $span = ($toDate - $fromDate).Days + 1
-    if ($span -gt $MaxBackfillDays) {
-        $fromDate = $toDate.AddDays(-($MaxBackfillDays - 1))
-        Write-Log "WARN $span days pending, over the $MaxBackfillDays cap; backfilling the most recent only"
+        $cursor = $fromDate
+        while ($cursor -le $toDate) {
+            $targets += $cursor
+            $cursor = $cursor.AddDays(1)
+        }
+        Write-Log "Auto mode: $($targets.Count) day(s) to process $($fromDate.ToString('yyyy-MM-dd')) -> $($toDate.ToString('yyyy-MM-dd'))"
     }
-
-    $cursor = $fromDate
-    while ($cursor -le $toDate) {
-        $targets += $cursor
-        $cursor = $cursor.AddDays(1)
-    }
-    Write-Log "Auto mode: $($targets.Count) day(s) to process $($fromDate.ToString('yyyy-MM-dd')) -> $($toDate.ToString('yyyy-MM-dd'))"
 }
 
 # 给「可见性」用的模式标签 —— 会写进 state\last_run.md 和系统通知。
 $modeLabel = if ($Refresh) { "定时刷新" } elseif ($manual) { "手动补跑" } else { "自动" }
+
+# ── 回拉前一天事件 ──────────────────────────────────────────────────
+#
+# 前一天的【今日复盘】是 23:10 左右才写下的，而当天 23:00 的采集已经过去了。
+# 不补拉的话，复盘笔记永远进不了 events.db / memory，第二天检索不到。
+if (-not $DryRun) {
+    $prevDay = $today.AddDays(-1).ToString("yyyy-MM-dd")
+    Invoke-Step "collect-phone-events-prev" "scripts\collect_phone_events.py" @("--date", $prevDay) | Out-Null
+    if ($targets.Count -eq 0) {
+        # 没有新的一天要处理时，日循环里的 memory-index 不会跑；这里补一次。
+        Invoke-Step "memory-index-prev" "scripts\memory.py" @("reindex") | Out-Null
+    }
+}
 
 Write-Log ("=" * 60)
 
@@ -373,7 +410,16 @@ $failDays = @()
 foreach ($d in $targets) {
     if (Invoke-OneDay $d) {
         $okDays++
-        if (-not $manual) { Set-LastProcessed $d }
+        if ($manual) {
+            # 手动补跑不碰水位线（保持原行为）
+        } elseif ($DryRun) {
+            Write-Log "   $($d.ToString('yyyy-MM-dd')): dry-run; watermark not advanced"
+        } elseif ($script:LastDayFinal) {
+            Set-LastProcessed $d
+        } else {
+            # 23:00 那次 final=false；停在这里，等午夜后的运行补推终版。
+            Write-Log "   $($d.ToString('yyyy-MM-dd')): not final yet; watermark stays put (will retry)"
+        }
     } else {
         $failDays += $d.ToString("yyyy-MM-dd")
     }
@@ -414,7 +460,7 @@ if (-not $DryRun) {
 #    学 5 遍。
 # ⚠️ `-SkipAI` 时跳过（它就是花钱的那部分）。所以白天的刷新不学，
 #    23:00 那次正式处理才学 —— 一天最多一次，且每次最多学 8 个。
-if (-not $SkipAI) {
+if (-not $SkipAI -and -not $DryRun) {
     Invoke-Step "learn-apps" "scripts\learn_apps.py" @("--days", "7") | Out-Null
 }
 
@@ -424,17 +470,21 @@ if (-not $SkipAI) {
 #   · 生成问题要花钱（一次 LLM 调用），补跑 5 天不该生成 5 份过期问题；
 #     何况中继只认**最新**那一份，生成一堆等于互相覆盖。
 #   · 回收答案只关心「刚过去的那一天问了什么」。
-if ($targets.Count -gt 0) {
-    # ⚠️ 必须 .ToString("yyyy-MM-dd")。直接把 DateTime 插进字符串会走本地化
-    #    格式（'10/14/2026 12:00:00 AM'），Python 那边 date.fromisoformat 直接炸。
-    $qDay = $targets[-1].ToString("yyyy-MM-dd")
-    if (-not $SkipAI) {
-        Invoke-Step "questions" "scripts\generate_questions.py" @("--date", $qDay) | Out-Null
-    }
-    # 问的是**前一天**的日记 —— 昨天推出去的问题，答案今早才答回来。
-    # 显式传日期，不让脚本自己去猜「昨天」：它的默认值是按日历算的，
-    # 而这里的 $targets 是水位线算出来的，两者在补跑时不是一回事。
-    $aDay = $targets[-1].AddDays(-1).ToString("yyyy-MM-dd")
+# 有 targets 就针对最后一天生成；没有（今天没有新数据要处理）就针对昨天，
+# 把漏掉的问责批补上。生成脚本自己会跳过已经存在的文件，所以多跑几次无副作用。
+$qDayDate = if ($targets.Count -gt 0) { $targets[-1] } else { $today.AddDays(-1) }
+# ⚠️ 必须 .ToString("yyyy-MM-dd")。直接把 DateTime 插进字符串会走本地化
+#    格式（'10/14/2026 12:00:00 AM'），Python 那边 date.fromisoformat 直接炸。
+$qDay = $qDayDate.ToString("yyyy-MM-dd")
+if (-not $SkipAI -and -not $DryRun) {
+    Invoke-Step "questions" "scripts\generate_questions.py" @("--date", $qDay) | Out-Null
+}
+
+# 答案今早才答回来：自动模式下永远回收「昨天」的问题。
+# 手动补跑保留原来的 targets[-1]-1 —— 补跑历史时，问的是那一天的前一天。
+$aDayDate = if ($manual) { $targets[-1].AddDays(-1) } else { $today.AddDays(-1) }
+$aDay = $aDayDate.ToString("yyyy-MM-dd")
+if (-not $DryRun) {
     Invoke-Step "answers" "scripts\apply_answers.py" @("--date", $aDay) | Out-Null
 }
 
@@ -446,7 +496,7 @@ if ($targets.Count -gt 0) {
 # ⚠️ 产物有两份：vault\07-Reviews\<年>-W<周>.md 给人看，
 #    state\weeks\<年>-W<周>.json 里的结构化事实留给模型用（第三层的画像吃它）。
 # ⚠️ `-SkipAI` 时跳过 —— 它是一次 LLM 调用。
-if (-not $SkipAI) {
+if (-not $SkipAI -and -not $DryRun) {
     Invoke-Step "weekly" "scripts\weekly_review.py" @("--max-weeks", "4") | Out-Null
 }
 

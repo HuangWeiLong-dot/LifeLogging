@@ -44,6 +44,28 @@ TZ = ZoneInfo(CFG["timezone"])
 STATE = Path(CFG["state_dir"])
 
 
+def write_final_marker(day_iso: str, final: bool, relay_ok: bool) -> Path:
+    """写 `state/journal-final-<day>.json`，让流水线知道这一天能不能推进水位线。
+
+    ⚠️ 只有 `final=true` **且** `relay_ok=true` 才算数。23:00 那次
+       `final=false`，水位线必须停住；否则第二天不会再补推终版，服务器
+       永远等不到 `final=true`，这一天的日记就永远不写。
+    """
+    dest = STATE / f"journal-final-{day_iso}.json"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    body = {
+        "day": day_iso,
+        "final": bool(final),
+        "relay_ok": bool(relay_ok),
+        "pushed_at": datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    tmp = dest.with_suffix(".tmp")
+    tmp.write_text(json.dumps(body, ensure_ascii=False, indent=2),
+                   encoding="utf-8")
+    tmp.replace(dest)
+    return dest
+
+
 def relay() -> tuple[str, str] | None:
     cfg = (CFG.get("sources") or {}).get("phone_relay") or {}
     if not cfg.get("enabled"):
@@ -142,18 +164,26 @@ def main() -> None:
 
     conn = relay()
     if conn is None:
+        write_final_marker(day.iso, final, relay_ok=False)
+        print("  ⚠️  relay not configured — final marker written with relay_ok=false")
         return
     base, key = conn
     try:
         r = httpx.post(f"{base}/journal/inputs", headers={"X-API-Key": key},
                        json=payload, timeout=60.0)
     except Exception as e:  # noqa: BLE001
+        write_final_marker(day.iso, final, relay_ok=False)
         print(f"  ⚠️  Could not reach the phone relay at {base}: {e}")
+        print("  ⚠️  final marker relay_ok=false — watermark must not advance")
         return
     if r.status_code != 200:
+        write_final_marker(day.iso, final, relay_ok=False)
         print(f"  ⚠️  relay returned {r.status_code}: {r.text[:200]}")
+        print("  ⚠️  final marker relay_ok=false — watermark must not advance")
         return
+    write_final_marker(day.iso, final, relay_ok=True)
     print(f"  OK  pushed ({r.json().get('detail')})")
+    print(f"  OK  final marker: final={final} relay_ok=true")
 
 
 if __name__ == "__main__":

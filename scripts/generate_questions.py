@@ -602,6 +602,8 @@ def main() -> None:
     ap.add_argument("--date", default="today")
     ap.add_argument("--dry-run", action="store_true", help="Print only, write nothing")
     ap.add_argument("--no-push", action="store_true", help="Skip the relay push")
+    ap.add_argument("--force", action="store_true",
+                    help="Regenerate even if the result file already exists")
     args = ap.parse_args()
 
     day = Day.parse(args.date, TZ)
@@ -620,27 +622,33 @@ def main() -> None:
         print(f"-> {day.iso} is more than {max_age} day(s) old; no questions generated")
         return
 
+    out = STATE / f"questions-{day.iso}.json"
+    if out.exists() and not args.force:
+        # ⚠️ 水位线修复后同一天可能被处理多次。已经生成过就别再调一次模型 ——
+        #    重复生成会覆盖掉手机可能已经收到的那批题，还白花钱。
+        print(f"-> already generated: {out} (use --force to regenerate)")
+        return
+
     n_commit = int(qcfg.get("commitment", 7))
     n_routine = int(qcfg.get("routine", 5))
 
-    # ⚠️ **日记不存在就直接不生成。**
+    # ⚠️ 日记缺失**不再直接放弃**。
     #
-    # 这个机器人的前提是「拿你昨天自己写的话堵你」，而那句话在日记的
-    # `### Adjustments for Tomorrow` 里。没有日记就只能拿任务表那几条凑数 ——
-    # 生成出来的东西看着像模像样，其实全是没有上下文的疑问句。
+    # 原来的逻辑是：日记里的 `### Adjustments for Tomorrow` 是问责题的
+    # 核心素材，没有它就等于没有上下文，宁愿不生成。
     #
-    # 什么时候会撞上：日记是**服务器**写的（close_day 每 15 分钟扫一次），
-    # 而「取日记」和「生成提问」在流水线的同一次运行里。这次运行刚推上去的
-    # 终版输入，服务器还没把它变成日记。以前这里会照常生成并**推上去**，
-    # 把第二天早上手机看到的那批顶掉，要等下一次运行才自愈成好的。
-    # 宁可不生成 —— 少问一天，也好过问一堆凑数的。
+    # 但日记由服务器写，而 23:00 的流水线跑在服务器写日记之前 —— 于是
+    # 「每天早上 7 条问责题」在正常作息下**永远生成不出来**（10-17、10-18
+    # 就是这么断的）。现在改成：日记在就用；不在就用任务表 + 时间线兜底，
+    # 并在 prompt 里明说这次没有日记。少一点上下文，也好过整条问责链断掉。
     journal = VAULT / "05-Journal" / f"{day.iso}.md"
-    if not journal.exists():
+    if journal.exists():
+        adjustments = read_journal_section(day, H_ADJUST)
+    else:
+        adjustments = []
         print(f"-> {day.iso} 的日记还没生成（{journal.name} 不在）")
-        print("   提问要靠它里面的 Adjustments，所以这次跳过；下次运行会再试")
-        return
+        print("   用任务表 + 时间线兜底生成，不等日记")
 
-    adjustments = read_journal_section(day, H_ADJUST)
     tasks = read_open_tasks()
     # 常规类是从**数据**里出的，不依赖日记里的承诺或任务表 —— 所以只有两类
     # 素材全空、且常规配额也是 0 的时候才真的没得问。
@@ -651,6 +659,9 @@ def main() -> None:
     print(f"-> Quota: {n_commit} commitment + {n_routine} routine")
 
     digest = data_digest(day)
+    if not journal.exists():
+        digest += ("\n- Note: this day's journal is not written yet; the questions "
+                   "below are based on the task list and the timeline only.")
     lang = str(qcfg.get("language", "zh")).lower()
     system = SYSTEM_PROMPT.replace(
         "__LANG_NAME__",
@@ -711,7 +722,6 @@ def main() -> None:
         print("-> dry run, nothing written or pushed")
         return
 
-    out = STATE / f"questions-{day.iso}.json"
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"  OK  Written: {out}")
 
