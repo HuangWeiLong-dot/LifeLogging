@@ -15,6 +15,29 @@
 把那天标成「终版」** —— 笔记本 18:00 关机的话，4:05 时服务器手里只有它 18:00
 那次推送的半截数据。所以 `close_day.py` 每 15 分钟幂等地扫一遍。
 
+## 输入包里有哪些东西
+
+`POST /journal/inputs` 的 payload 由笔记本的 `push_journal_input.py` 组装：
+
+| 字段 | 内容 |
+|---|---|
+| `timeline` | 当天的时间轴（归一化后的 blocks / 手机 / 位置 / 健康） |
+| `carryover` | 昨天日记里未完成的任务 |
+| `tasks` | `04-Tasks/Tasks.md` 的 Open 项 |
+| `history` | 笔记本按关键词检索出的历史片段 |
+| `qa` | **当天作答**的全部问答（早晨批 + 小时实时题 + 收尾批） |
+| `previous_day_qa` | 前一天作答的全部问答 |
+| `previous_day_recap` | 前一天【今日复盘】原文 |
+
+`close_day.py` 把这些全部传给 `build_user_prompt()`。老输入包缺
+`qa` / `previous_day_qa` / `previous_day_recap` 时按空处理，不报错。
+
+推送成功后笔记本还会写 `state/journal-final-<day>.json`
+（`{"final": bool, "relay_ok": bool}`）；`run_daily.ps1` **只有两者都为真**
+才推进水位线。23:00 那次 `final=false`（`end_local` 是 23:59:59.999999），
+所以水位线会停住，等午夜后的运行补推终版 —— 这是 2026-10-19 修的：
+之前水位线照常前进，10-17/10-18 的日记就永远没被写出来。
+
 ## 部署
 
 ### 0. 前置

@@ -1118,6 +1118,265 @@ check("live questions: 每小时必问（数据平淡也问）/ 不勾任务 / �
       t_live_question_rules)
 
 
+def t_qa_join():
+    """中继 /qa：按**作答日**把两份问题文件和答案对上。
+
+    ⚠️ 早晨批的问题日通常是 D-1（晚上生成、早上回答），实时批是 D。
+       只按同一份文件找题会把早晨批漏掉；只按提问日找答案又会把晚答漏掉。
+       这里锁住「加载 D 和 D-1 两份、按题号合并、重答取最新、保留备注」。
+    """
+    import importlib.util
+    import json as _json
+    import tempfile
+
+    path = (Path(__file__).resolve().parent.parent
+            / "server" / "phone-relay" / "phone_relay.py")
+    spec = importlib.util.spec_from_file_location("phone_relay_qa", path)
+    pr = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pr)
+
+    with tempfile.TemporaryDirectory() as td:
+        pr.DATA_DIR = Path(td)
+        (Path(td) / "questions-2026-10-17.json").write_text(_json.dumps({
+            "day": "2026-10-17",
+            "questions": [{"id": "2026-10-17-aaaa1111", "kind": "commitment",
+                           "format": "yes_no", "text": "任务 A 做了吗？",
+                           "evidence": "任务表", "ref": "Task A"}],
+        }, ensure_ascii=False), encoding="utf-8")
+        (Path(td) / "questions-live-2026-10-18.json").write_text(_json.dumps({
+            "day": "2026-10-18",
+            "questions": [
+                {"id": "2026-10-18-bbbb2222", "kind": "routine",
+                 "format": "text", "text": "07:00–08:00 在忙什么？",
+                 "evidence": "数据", "ref": ""},
+                {"id": "2026-10-18-cccc3333", "kind": "summary",
+                 "format": "text", "text": "今天最值得记住的事？",
+                 "evidence": "只有你知道", "ref": ""},
+            ],
+        }, ensure_ascii=False), encoding="utf-8")
+        rows = [
+            {"ts_utc": "2026-10-18T00:10:00Z", "domain": "question",
+             "metric": "answer", "source": "relay",
+             "value_text": "2026-10-17-aaaa1111|yes|早上完成了"},
+            {"ts_utc": "2026-10-18T01:00:00Z", "domain": "question",
+             "metric": "answer", "source": "relay",
+             "value_text": "2026-10-18-bbbb2222|在上课|"},
+            {"ts_utc": "2026-10-18T02:00:00Z", "domain": "question",
+             "metric": "answer", "source": "relay",
+             "value_text": "2026-10-18-bbbb2222|在图书馆|重答"},
+            {"ts_utc": "2026-10-18T15:00:00Z", "domain": "question",
+             "metric": "answer", "source": "relay",
+             "value_text": "2026-10-18-cccc3333|见到朋友|很好"},
+            {"ts_utc": "2026-10-18T15:01:00Z", "domain": "question",
+             "metric": "answer", "source": "relay",
+             "value_text": "2026-10-18-unknown|随便|"},
+        ]
+        (Path(td) / "phone-2026-10-18.jsonl").write_text(
+            "\n".join(_json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
+            encoding="utf-8")
+
+        out = pr.day_qa("2026-10-18")
+        assert len(out["qa"]) == 4, out
+        by = {x["id"]: x for x in out["qa"]}
+        assert by["2026-10-17-aaaa1111"]["source"] == "laptop"
+        assert by["2026-10-17-aaaa1111"]["note"] == "早上完成了"
+        assert by["2026-10-18-bbbb2222"]["source"] == "live"
+        assert by["2026-10-18-bbbb2222"]["answer"] == "在图书馆", "重答要取最新"
+        assert by["2026-10-18-bbbb2222"]["note"] == "重答"
+        assert by["2026-10-18-cccc3333"]["kind"] == "summary"
+        assert by["2026-10-18-unknown"].get("answer_only") is True, "没题文也不能丢答案"
+
+
+check("relay /qa: 作答日合并两份问题文件 / 保留备注 / 重答取最新 / answer-only",
+      t_qa_join)
+
+
+def t_commitment_questions():
+    """实时任务检查：固定时段、只问未问过的任务、ref 能对回 Tasks.md。"""
+    import importlib.util
+    import json as _json
+    import tempfile
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+
+    path = (Path(__file__).resolve().parent.parent
+            / "scripts" / "live_questions.py")
+    spec = importlib.util.spec_from_file_location("live_questions_commit", path)
+    lq = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lq)
+
+    tz = ZoneInfo("Asia/Shanghai")
+    now = _dt(2026, 10, 19, 14, 5, tzinfo=tz)
+    tasks = ["14:00-16:00 学习通网课", "Configure OBS", "买牛奶"]
+    q = lq.commitment_question("2026-10-19", tasks, now, [])
+    assert q and q["kind"] == "commitment" and q["format"] == "choice", q
+    assert q["ref"] == "14:00-16:00 学习通网课", q
+    assert q["options"][0] == {"label": "做了", "done": True}, q["options"]
+
+    # 不在固定时段就不生成
+    assert lq.commitment_question("2026-10-19", tasks,
+                                  _dt(2026, 10, 19, 15, 5, tzinfo=tz), []) is None
+    # 同一任务不重复问
+    q2 = lq.commitment_question("2026-10-19", tasks, now, [{"ref": q["ref"]}])
+    assert q2 and q2["ref"] != q["ref"], q2
+
+    old_state = lq.CFG.get("state_dir")
+    with tempfile.TemporaryDirectory() as td:
+        lq.CFG["state_dir"] = td
+        (Path(td) / "journal-input-2026-10-19.json").write_text(_json.dumps({
+            "tasks": ["B", "A", "B"], "carryover": ["C", "A"],
+        }, ensure_ascii=False), encoding="utf-8")
+        assert lq.load_commitment_tasks("2026-10-19") == ["C", "A", "B"], \
+            "carryover 在前、去重、保序"
+    lq.CFG["state_dir"] = old_state
+
+    # 日记提示词要把今天和昨天的问答都带上
+    import generate_journal as gj
+    from common import Day
+    day = Day.parse("2026-10-19", tz)
+    prompt = gj.build_user_prompt(
+        {"blocks": [], "total_hours": 0}, day, [],
+        qa=[{"text": "Q1", "answer": "A1", "note": "N1"}],
+        previous_day_qa=[{"text": "Q0", "answer": "A0"}],
+        previous_day_recap="RECAP")
+    assert "Questions you answered today" in prompt and "A1" in prompt
+    assert "N1" in prompt, "备注要进日记"
+    assert "What the user said yesterday" in prompt and "A0" in prompt
+    assert "RECAP" in prompt
+
+
+check("live commitment: 固定时段 / 同任务不重复 / ref 可勾任务 / 问答进日记提示词",
+      t_commitment_questions)
+
+
+def t_final_marker():
+    """final 标记：23:00 不是终版，午夜后才是；水位线只看它。"""
+    import importlib.util
+    import json as _json
+    import tempfile
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+
+    path = (Path(__file__).resolve().parent.parent
+            / "scripts" / "push_journal_input.py")
+    spec = importlib.util.spec_from_file_location("push_journal_final", path)
+    pji = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pji)
+
+    old_state = pji.STATE
+    with tempfile.TemporaryDirectory() as td:
+        pji.STATE = Path(td)
+        p = pji.write_final_marker("2026-10-18", False, True)
+        d = _json.loads(p.read_text(encoding="utf-8"))
+        assert d["final"] is False and d["relay_ok"] is True, d
+        p = pji.write_final_marker("2026-10-18", True, True)
+        assert _json.loads(p.read_text(encoding="utf-8"))["final"] is True
+    pji.STATE = old_state
+
+    from common import Day
+    tz = ZoneInfo("Asia/Shanghai")
+    day = Day.parse("2026-10-18", tz)
+    assert _dt(2026, 10, 18, 23, 0, tzinfo=tz) < day.end_local
+    assert _dt(2026, 10, 19, 0, 1, tzinfo=tz) >= day.end_local
+
+
+check("final marker: 23:00 仍是 final=false，午夜后才终版", t_final_marker)
+
+
+def t_apply_answers_live():
+    """apply_answers 要能看见服务器生成的实时任务题（否则 ref 永远对不上）。"""
+    import importlib.util
+    import json as _json
+    import sys as _sys
+    import tempfile
+    import types
+
+    path = (Path(__file__).resolve().parent.parent
+            / "scripts" / "apply_answers.py")
+    spec = importlib.util.spec_from_file_location("apply_answers_live", path)
+    aa = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(aa)
+
+    from common import Day
+    from zoneinfo import ZoneInfo
+    day = Day.parse("2026-10-18", ZoneInfo("Asia/Shanghai"))
+
+    old_state = aa.STATE
+    old_mod = _sys.modules.get("qa_client")
+    with tempfile.TemporaryDirectory() as td:
+        aa.STATE = Path(td)
+        (Path(td) / "questions-2026-10-18.json").write_text(_json.dumps({
+            "questions": [{"id": "2026-10-18-morning1", "kind": "commitment",
+                           "format": "yes_no", "text": "早晨题",
+                           "ref": "Task M", "options": []}],
+        }, ensure_ascii=False), encoding="utf-8")
+        fake = types.ModuleType("qa_client")
+        fake.fetch = lambda d: {"qa": [{
+            "id": "2026-10-18-live1", "kind": "commitment",
+            "format": "choice", "text": "任务 A 做了吗？", "ref": "Task A",
+            "options": [{"label": "做了", "done": True}],
+        }]} if d == "2026-10-19" else {"qa": []}
+        _sys.modules["qa_client"] = fake
+        try:
+            qs = aa.read_questions(day)
+            assert {q["id"] for q in qs} == {
+                "2026-10-18-morning1", "2026-10-18-live1"}, qs
+            live = [q for q in qs if q["id"] == "2026-10-18-live1"][0]
+            assert aa.answered_done(live, "做了") is True
+            assert aa.find_task(["Task A", "Task B"], live["ref"]) == "Task A"
+            assert aa.answered_done({"format": "text"}, "随便") is False
+        finally:
+            aa.STATE = old_state
+            if old_mod is not None:
+                _sys.modules["qa_client"] = old_mod
+            else:
+                _sys.modules.pop("qa_client", None)
+
+
+check("apply_answers: 合并实时任务题，答「做了」能对回任务", t_apply_answers_live)
+
+
+def t_memory_qa():
+    """长期记忆要能按**问题文本**搜到答案，而不是只有一句孤零零的回答。"""
+    import importlib.util
+    import json as _json
+    import os
+    import tempfile
+
+    path = (Path(__file__).resolve().parent.parent / "scripts" / "memory.py")
+    spec = importlib.util.spec_from_file_location("memory_qa", path)
+    mem = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mem)
+
+    state = Path(tempfile.mkdtemp(prefix="mem-qa-"))
+    db = Path(tempfile.mkdtemp(prefix="mem-db-")) / "events.db"
+    (state / "qa-2026-10-18.json").write_text(_json.dumps({
+        "day": "2026-10-18",
+        "qa": [{"id": "2026-10-18-b", "text": "任务 B 做了吗？",
+                "answer": "没做", "note": "太累", "kind": "commitment",
+                "source": "live", "ts_utc": "2026-10-18T10:00:00Z"}],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    old_db = os.environ.get("LIFELOGGING_MEMORY_DB")
+    old_state = mem.CFG.get("state_dir")
+    os.environ["LIFELOGGING_MEMORY_DB"] = str(db)
+    mem.CFG["state_dir"] = str(state)
+    try:
+        mem.reindex()
+        hits = mem.search("任务", 3)
+        assert any(h["doc_key"].startswith("qa:") for h in hits), hits
+        assert any("任务 B 做了吗" in h["excerpt"] for h in hits), hits
+    finally:
+        mem.CFG["state_dir"] = old_state
+        if old_db is None:
+            os.environ.pop("LIFELOGGING_MEMORY_DB", None)
+        else:
+            os.environ["LIFELOGGING_MEMORY_DB"] = old_db
+
+
+check("memory: 问答带问题原文入索引，可按题目搜到", t_memory_qa)
+
+
 def t_feishu_freeform_cap():
     """自由问答的每日封顶 —— 唯一挡住「随手问问变成花钱黑洞」的东西。
 

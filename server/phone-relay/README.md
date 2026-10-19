@@ -267,8 +267,15 @@ HTTP Request 配置：Method `POST`，Headers `X-API-Key: <key>`、
 | `POST /questions` | 笔记本把当天的问题推上来（JSON） |
 | `GET /ask/pending` | 手机轮询「有没有题」—— **纯文本，就一个数字** |
 | `GET /questions/pending` | 同上，但返回**题目内容**（JSON）——给飞书机器人用 |
+| `GET /qa?day=YYYY-MM-DD` | 某一天**作答**的全部问答：把早晨批 + 实时批的问题原文与答案按题号合并，保留备注、重答取最新 |
 | `GET /ask` | 手机浏览器打开的表单页（做了 / 没做 + 备注） |
 | `POST /answer` | 答案落成事件，随手机使用事件一起被笔记本拉走 |
+
+> `GET /qa` 是 2026-10-19 加的。它只**读**两份问题文件，绝不合并写回
+> （`questions-<day>.json` 与 `questions-live-<day>.json` 仍然分开存）。
+> 语义是「作答日」：早晨批的问题日通常是 D-1，答在 D 早上，所以
+> `/qa?day=D` 会同时加载 D 和 D-1 的问题文件。找不到问题原文的答案会标
+> `answer_only`，不会丢。
 
 > `GET /questions/pending` 是 2026-10-16 加的，给飞书机器人（`../feishu-bot/`）。
 > 它和 `/ask/pending` 的差别只在**返回什么**：那条给 Tasker，只能返回一个数字；
