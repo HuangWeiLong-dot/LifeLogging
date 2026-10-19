@@ -27,7 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import Day, header, load_config  # noqa: E402
 from generate_journal import read_carryover  # noqa: E402
 from generate_questions import read_open_tasks  # noqa: E402
+import qa_client  # noqa: E402
 
 CFG = load_config()
 TZ = ZoneInfo(CFG["timezone"])
@@ -93,6 +94,22 @@ def main() -> None:
         # 索引坏了/没建过都不该拦住推输入 —— 没有历史是退化，不是失败。
         print(f"  ⚠️  历史检索失败，本次不带历史：{type(e).__name__}: {e}")
 
+    # ── 当天问答（今天作答的 + 昨天作答的）──
+    #
+    # ⚠️ 答案在中继里只有 `<题号>|<答案>|<备注>`，问题原文要靠 /qa 合并。
+    #    中继不可用时返回 None，这里退化成空列表，不打断推送 —— 日记少了
+    #    问答是退化，不是失败。
+    prev_day = (day.d - timedelta(days=1)).isoformat()
+    qa_payload = qa_client.fetch(day.iso)
+    prev_qa_payload = qa_client.fetch(prev_day)
+    qa = (qa_payload or {}).get("qa") or []
+    previous_day_qa = (prev_qa_payload or {}).get("qa") or []
+    previous_day_recap = qa_client.fetch_previous_recap(prev_day)
+    if qa_payload:
+        qa_client.save_local(day.iso, qa_payload)
+    if prev_qa_payload:
+        qa_client.save_local(prev_day, prev_qa_payload)
+
     # ⚠️ 这一行是整套东西的关键。见模块开头的说明 —— 没有它，服务器会拿
     #    笔记本 18:00 那次推送的半截数据去写一整天的日记。
     final = datetime.now(TZ) >= day.end_local
@@ -104,6 +121,9 @@ def main() -> None:
         "carryover": carryover,
         "tasks": tasks,
         "history": history,
+        "qa": qa,
+        "previous_day_qa": previous_day_qa,
+        "previous_day_recap": previous_day_recap,
     }
 
     print(f"-> timeline: {len(timeline.get('blocks') or [])} blocks, "
@@ -111,6 +131,8 @@ def main() -> None:
     print(f"-> carryover: {len(carryover)}, tasks: {len(tasks)}")
     print(f"-> history: {len(history)} 条"
           + ("" if history else "  （没有召回相关的历史）"))
+    print(f"-> qa: {len(qa)} today / {len(previous_day_qa)} yesterday"
+          + ("" if (qa or previous_day_qa) else "  （中继没有 /qa 或没答过）"))
     print(f"-> final={final}"
           + ("" if final else f"  （{day.iso} 还没过完，服务器不会据此写日记）"))
 

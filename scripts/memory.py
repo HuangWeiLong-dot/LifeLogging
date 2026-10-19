@@ -154,7 +154,50 @@ def _journal_docs() -> list[dict[str, Any]]:
     return out
 
 
-def _event_docs(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+def _qa_docs() -> list[dict[str, Any]]:
+    """`state/qa-*.json` 里的问答原文（带问题文本）。
+
+    ⚠️ 事件表里的答案只有 `<题号>|<答案>|<备注>`，没有问题原文。检索时
+       「睡眠怎么样 → 还行」和「还行」差别很大，所以优先用 /qa 缓存。
+       同一个题号被重答时只留最后一次。
+    """
+    best: dict[str, dict[str, Any]] = {}
+    state = Path(CFG["state_dir"])
+    for p in sorted(state.glob("qa-*.json")):
+        try:
+            payload = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        day = str(payload.get("day") or p.stem[3:])
+        for x in (payload.get("qa") or []):
+            if not isinstance(x, dict):
+                continue
+            qid = str(x.get("id") or "")
+            answer = str(x.get("answer") or "").strip()
+            if not qid or not answer:
+                continue
+            ts = str(x.get("ts_utc") or "")
+            old = best.get(qid)
+            if old is not None and ts < str(old.get("_ts") or ""):
+                continue
+            q = " ".join(str(x.get("text") or "").split())
+            note = " ".join(str(x.get("note") or "").split())
+            text = (f"Q: {q}\nA: {answer}" if q else f"A: {answer}")
+            if note:
+                text += f"\nNote: {note}"
+            best[qid] = {"doc_key": f"qa:{qid}", "day": day,
+                         "kind": "qa", "text": text, "source": "qa",
+                         "_ts": ts}
+    out = [dict(v) for v in best.values()]
+    for d in out:
+        d.pop("_ts", None)
+    return out
+
+
+def _event_docs(conn: sqlite3.Connection,
+                skip_qids: set[str] | None = None) -> list[dict[str, Any]]:
     """飞书里记的笔记 + 问答答案 —— **第一手材料**，价值最高。"""
     out: list[dict[str, Any]] = []
     try:
@@ -183,6 +226,8 @@ def _event_docs(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         if len(parts) < 2:
             continue
         qid, value = parts[0], parts[1]
+        if skip_qids and qid in skip_qids:
+            continue          # 已经有带问题原文的 qa 文档，别索引两遍
         note = parts[2] if len(parts) > 2 else ""
         text = f"{value} {note}".strip()
         if text:
@@ -202,7 +247,10 @@ def reindex() -> tuple[int, int]:
     try:
         ensure_schema(conn)
         journals = _journal_docs()
-        docs = journals + _event_docs(conn)
+        qa_docs = _qa_docs()
+        qa_ids = {d["doc_key"].split(":", 1)[1] for d in qa_docs
+                  if d["doc_key"].startswith("qa:")}
+        docs = journals + _event_docs(conn, qa_ids) + qa_docs
 
         conn.execute("DELETE FROM memory_docs")
         conn.execute("DELETE FROM memory_fts")

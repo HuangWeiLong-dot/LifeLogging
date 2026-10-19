@@ -214,8 +214,35 @@ def _fmt_health(key: str, value) -> str:
     return f"{key}: {value} {unit}" if unit else f"{key}: {value}"
 
 
+def _qa_bullets(qa: list | None, max_items: int = 40,
+                q_chars: int = 160, a_chars: int = 300) -> list[str]:
+    """把问答压成 prompt 里的几行。兼容 `/qa` 字典和旧的 `(问, 答)`。"""
+    out: list[str] = []
+    for x in (qa or [])[:max_items]:
+        if isinstance(x, dict):
+            q = str(x.get("text") or "")
+            a = str(x.get("answer") or x.get("value") or "")
+            n = str(x.get("note") or "")
+        elif isinstance(x, (tuple, list)) and len(x) >= 2:
+            q, a = str(x[0] or ""), str(x[1] or "")
+            n = str(x[2]) if len(x) > 2 and x[2] else ""
+        else:
+            continue
+        q = " ".join(q.split())[:q_chars]
+        a = " ".join(a.split())[:a_chars]
+        n = " ".join(n.split())[:a_chars]
+        if not (q or a):
+            continue
+        out.append(f"- Q: {q or '(question text unavailable)'}")
+        out.append(f"  A: {a}" + (f"  ({n})" if n else ""))
+    return out
+
+
 def build_user_prompt(tl: dict, day: Day, carryover: list[str],
-                      history: list[dict] | None = None) -> str:
+                      history: list[dict] | None = None,
+                      qa: list | None = None,
+                      previous_day_qa: list | None = None,
+                      previous_day_recap: str = "") -> str:
     lines: list[str] = []
     lines.append(f"# Data for {day.iso} ({day.d.strftime('%A')})")
     lines.append("")
@@ -263,6 +290,18 @@ def build_user_prompt(tl: dict, day: Day, carryover: list[str],
             except (TypeError, ValueError):
                 hhmm = ""
             lines.append(f"- [{hhmm}] {text}" if hhmm else f"- {text}")
+        lines.append("")
+
+    # 今天亲自回答的题。和 Notes 同属第一手材料，所以紧挨着它放。
+    # 这是「实时回答也要算进当天数据」的落点：小时题 + 收尾题都在这里。
+    if qa:
+        lines.append("## Questions you answered today (first-hand)")
+        lines.append("")
+        lines.append("These are things the user said himself today, answering the")
+        lines.append("system's questions. They are **first-hand facts** and outrank")
+        lines.append("anything inferred from window titles, location or app use.")
+        lines.append("")
+        lines.extend(_qa_bullets(qa, max_items=40, q_chars=160, a_chars=300))
         lines.append("")
 
     health = tl.get("health") or {}
@@ -330,6 +369,32 @@ def build_user_prompt(tl: dict, day: Day, carryover: list[str],
         lines.append(f"- {cat}: {h}h")
     lines.append(f"- TOTAL: {tl.get('total_hours', 0)}h")
     lines.append("")
+
+    # ── 昨天亲口说的话（问答 + 复盘）──
+    #
+    # ⚠️ 不能只靠关键词检索：那是有损的、可能召回错的。用户明确要求
+    #    「昨天答的题要算到今天的数据里」，所以这里**显式**带上前一天的
+    #    全部问答和复盘。它提供的是连续性，不是今天的事件。
+    if previous_day_qa or previous_day_recap:
+        lines.append("## What the user said yesterday")
+        lines.append("")
+        lines.append("Carried over so today's entry has continuity. This is yesterday's")
+        lines.append("first-hand context, **not** today's events — do not treat it as")
+        lines.append("something that happened today.")
+        lines.append("")
+        if previous_day_recap:
+            recap = str(previous_day_recap).strip()[:1500]
+            if recap:
+                lines.append("### Yesterday's recap")
+                lines.append("")
+                lines.append(recap)
+                lines.append("")
+        if previous_day_qa:
+            lines.append("### Yesterday's questions and answers")
+            lines.append("")
+            lines.extend(_qa_bullets(previous_day_qa, max_items=30,
+                                     q_chars=120, a_chars=240))
+            lines.append("")
 
     # ── 相关历史（长期记忆 · 检索层）──
     #

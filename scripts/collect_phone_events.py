@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -33,6 +34,7 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import Day, Event, EventsClient, header, load_config  # noqa: E402
+import qa_client  # noqa: E402
 
 CFG = load_config()
 TZ = ZoneInfo(CFG["timezone"])
@@ -125,6 +127,16 @@ def main() -> None:
         # 连不上 / 没配好 —— 上面已经打印了具体原因，这里只收尾
         print("  ✗ Could not read from the phone relay (see the warning above).")
         return
+
+    # 当天的问答原文（含问题文本和备注）。供复盘、日记和长期记忆使用；
+    # 中继没有 /qa 或暂时不可达时只是少一份缓存，不影响下面的事件入库。
+    for qd in (day.iso, (day.d - timedelta(days=1)).isoformat()):
+        payload = qa_client.fetch(qd)
+        if payload:
+            qa_client.save_local(qd, payload)
+            print(f"  OK  Q&A cached for {qd}: "
+                  f"{len(payload.get('qa') or [])} answer(s)")
+
     if not raw:
         print("  . Relay reached, but it has no events for this day.")
         print("    Normal before Tasker is set up on the phone.")
