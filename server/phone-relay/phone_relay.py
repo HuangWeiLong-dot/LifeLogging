@@ -557,6 +557,107 @@ def load_latest_live_questions(within_days: int = 1) -> dict | None:
     return payload if day >= cutoff else None
 
 
+def _load_question_defs(question_day: str) -> dict[str, dict]:
+    """把某一天的两份问题文件读成 ``{id: question}``。
+
+    ⚠️ **只读合并**。两份文件在磁盘上继续分开存 —— 见
+       `live_questions_path()` 里那段「写进同一份会静默顶掉早晨批」的注释。
+    """
+    out: dict[str, dict] = {}
+    paths = ((questions_path(question_day), "laptop"),
+             (live_questions_path(question_day), "live"))
+    for path, source in paths:
+        if path is None or not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        for q in (payload.get("questions") or []):
+            if not isinstance(q, dict):
+                continue
+            qid = str(q.get("id") or "")
+            if not qid:
+                continue
+            item = dict(q)
+            item["question_day"] = question_day
+            item["source"] = source
+            out[qid] = item
+    return out
+
+
+def day_qa(day: str) -> dict:
+    """某一天**作答**的全部问答，按题号对回问题原文。
+
+    ⚠️ 语义是「作答日」，不是「提问日」：答案落在作答那天（见
+       `answers_to_events()`）。所以早晨批（问题日 D-1）在 D 早上答的，
+       会出现在 `day_qa("D")` 里；当天实时题也在里面。
+
+    重答取最后一次（`ts_utc` 最大）。找不到问题原文时标 `answer_only`，
+    不猜、不丢答案。
+    """
+    answers: dict[str, dict] = {}
+    for e in read_events(day):
+        if e.get("domain") != "question" or e.get("metric") != "answer":
+            continue
+        parts = str(e.get("value_text") or "").split("|", 2)
+        qid = parts[0].strip() if parts else ""
+        if not qid:
+            continue
+        ts = str(e.get("ts_utc") or "")
+        row = {
+            "id": qid,
+            "value": parts[1] if len(parts) > 1 else "",
+            "note": parts[2] if len(parts) > 2 else "",
+            "ts_utc": ts,
+        }
+        old = answers.get(qid)
+        if old is None or ts >= str(old.get("ts_utc") or ""):
+            answers[qid] = row
+
+    defs: dict[str, dict] = {}
+    loaded_days: set[str] = set()
+    for qid in answers:
+        qday = qid[:10]
+        if _DAY_RE.match(qday) and qday not in loaded_days:
+            loaded_days.add(qday)
+            defs.update(_load_question_defs(qday))
+
+    qa: list[dict] = []
+    for qid, ans in answers.items():
+        d = defs.get(qid) or {}
+        item = {
+            "id": qid,
+            "question_day": str(d.get("question_day") or qid[:10]),
+            "source": str(d.get("source") or ""),
+            "kind": str(d.get("kind") or ""),
+            "format": str(d.get("format") or "yes_no"),
+            "text": d.get("text"),
+            "evidence": str(d.get("evidence") or ""),
+            "ref": str(d.get("ref") or ""),
+            "options": d.get("options") or [],
+            "answer": ans["value"],
+            "note": ans["note"],
+            "ts_utc": ans["ts_utc"],
+        }
+        if not d:
+            item["answer_only"] = True
+        qa.append(item)
+
+    qa.sort(key=lambda x: (str(x.get("ts_utc") or ""), str(x.get("id") or "")))
+    ans_list = sorted(answers.values(),
+                      key=lambda x: (str(x.get("ts_utc") or ""),
+                                     str(x.get("id") or "")))
+    return {
+        "day": day,
+        "answers": ans_list,
+        "questions": list(defs.values()),
+        "qa": qa,
+    }
+
+
 def pending_questions(include_live: bool = False) -> tuple[dict | None, list[dict]]:
     """返回 (那份问题, 其中还没答的)。
 
@@ -852,6 +953,18 @@ class Handler(BaseHTTPRequestHandler):
                 return
             evs = read_events(day)
             self._send(200, {"day": day, "count": len(evs), "events": evs})
+            return
+
+        if u.path == "/qa":
+            # 某一天作答的全部问答，按题号对回问题原文。
+            # 只读：两份问题文件仍然分开存，绝不在这里写回。
+            if not self._authed():
+                return
+            day = (parse_qs(u.query).get("day") or [""])[0]
+            if not day or len(day) != 10:
+                self._send(400, {"error": "?day=YYYY-MM-DD is required"})
+                return
+            self._send(200, day_qa(day))
             return
 
         if u.path.startswith("/files/"):
