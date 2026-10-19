@@ -542,7 +542,11 @@ def render_question(q: dict, remaining: int) -> str:
     # 实时题 / 收尾题单独标出来：它们和晚上批量生成的问责批性质不同，
     # 混在一起会让人以为系统在乱问。
     # ⚠️ 收尾题也带 source="live"，所以必须先判 kind。
-    if str(q.get("kind") or "") == "summary":
+    if str(q.get("kind") or "") == "commitment":
+        # 实时问责题也带 source=live；必须在 source 判断之前标成「问责」，
+        # 否则它会显示成「实时」，和每小时的数据题混在一起。
+        kind = "问责"
+    elif str(q.get("kind") or "") == "summary":
         # 收尾流程里的「常规题」（体力/心情/人际…）单独标出来 —— 它们和
         # 数据拼出来的题性质不同，混在一起会让人以为系统在瞎问。
         kind = "常规" if q.get("routine") else "收尾"
@@ -681,8 +685,12 @@ def _asked_map(state: dict, day_iso: str) -> dict:
     return m if isinstance(m, dict) else {}
 
 
-def _answers_today(day_iso: str) -> dict[str, str]:
-    """今天答过的题：qid → 值。答案就在中继的当天事件流里。"""
+def _answers_today(day_iso: str) -> dict[str, tuple[str, str]]:
+    """今天答过的题：qid → (答案, 备注)。答案就在中继的当天事件流里。
+
+    ⚠️ 备注要一起带出来 —— 「为什么没做到」往往比 yes/no 本身有价值。
+       这是 /qa 不可用时的降级路径。
+    """
     try:
         r = httpx.get(f"{RELAY_BASE}/events", params={"day": day_iso},
                       headers={"X-API-Key": RELAY_API_KEY}, timeout=15.0)
@@ -691,13 +699,16 @@ def _answers_today(day_iso: str) -> dict[str, str]:
     except Exception as e:  # noqa: BLE001
         print(f"WARN 读答案失败：{type(e).__name__}: {e}", file=sys.stderr)
         return {}
-    out: dict[str, str] = {}
+    out: dict[str, tuple[str, str]] = {}
     for e in evs:
         if e.get("domain") != "question" or e.get("metric") != "answer":
             continue
         parts = str(e.get("value_text") or "").split("|", 2)
         if parts and parts[0]:
-            out[parts[0]] = parts[1] if len(parts) > 1 else ""
+            out[parts[0]] = (
+                parts[1] if len(parts) > 1 else "",
+                parts[2] if len(parts) > 2 else "",
+            )
     return out
 
 
@@ -716,15 +727,27 @@ def maybe_write_summary(open_id: str, day_iso: str,
     if not force and any(str(x.get("kind") or "") == "summary" for x in pending):
         return False                    # 还有没收尾的题
 
-    state = load_state()
-    asked = state.get("asked") if isinstance(state.get("asked"), dict) else {}
-    answers = _answers_today(day_iso)
-    qa = [(str(v.get("text") or ""), answers[qid])
-          for qid, v in asked.items()
-          if isinstance(v, dict) and str(v.get("kind") or "") == "summary"
-          and qid in answers]
-    # 按出题顺序排（key 里带 -1/-2/-3）
-    qa.sort(key=lambda x: x[0])
+    # 优先从 /qa 取**当天全部**回答（早晨批 + 实时批 + 收尾批），
+    # 不再只挑 kind=summary。旧版中继没有 /qa 时退回原来的 summary-only。
+    qa = live.relay_qa(day_iso, RELAY_BASE, RELAY_API_KEY)
+    if not qa:
+        state = load_state()
+        asked = state.get("asked") if isinstance(state.get("asked"), dict) else {}
+        answers = _answers_today(day_iso)
+        for qid, v in asked.items():
+            if not isinstance(v, dict) or str(v.get("kind") or "") != "summary":
+                continue
+            if qid not in answers:
+                continue
+            val, note = answers[qid]
+            qa.append({
+                "text": str(v.get("text") or ""),
+                "answer": val,
+                "note": note,
+                "kind": "summary",
+                "source": "live",
+                "id": qid,
+            })
 
     try:
         text, err = live.write_day_summary(day_iso, RELAY_BASE,

@@ -125,6 +125,30 @@ def relay_events(day_iso: str, base: str, key: str) -> list[dict]:
     return r.json().get("events") or []
 
 
+def relay_qa(day_iso: str, base: str, key: str) -> list[dict]:
+    """当天作答的全部问答（早晨批 + 实时批 + 收尾批）。
+
+    ⚠️ 旧版中继没有 /qa，返回 404 —— 这时返回空列表，让调用方退回
+       summary-only 的老行为，而不是把复盘整条弄挂。
+    """
+    try:
+        r = httpx.get(f"{base}/qa", params={"day": day_iso},
+                      headers={"X-API-Key": key}, timeout=30.0)
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN 读 /qa 失败：{type(e).__name__}: {e}", file=sys.stderr)
+        return []
+    if r.status_code == 404:
+        print("WARN 中继没有 /qa（服务器还是旧版）", file=sys.stderr)
+        return []
+    try:
+        r.raise_for_status()
+        qa = r.json().get("qa")
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN /qa 返回不可用：{type(e).__name__}: {e}", file=sys.stderr)
+        return []
+    return [x for x in (qa or []) if isinstance(x, dict) and x.get("answer")]
+
+
 def relay_desktop(base: str, key: str) -> dict | None:
     """笔记本高频推上来的「电脑上今天到目前」快照。没推过返回 None。"""
     r = httpx.get(f"{base}/desktop", headers={"X-API-Key": key}, timeout=20.0)
@@ -313,8 +337,62 @@ def data_snapshot(day_iso: str, base: str, key: str) -> list[str]:
     return out
 
 
+_QA_BUCKETS = ("白天的实时回答", "早晨的问责与常规", "收尾回答", "其他回答")
+
+
+def _norm_qa(qa: list[Any] | None) -> list[dict]:
+    """把旧版 `(问, 答)` 和新版 `/qa` 字典统一成一种形状。
+
+    ⚠️ 保留备注。备注里常常是「为什么没做到」，比 yes/no 本身有价值得多。
+    """
+    out: list[dict] = []
+    for x in qa or []:
+        if isinstance(x, dict):
+            item = {
+                "text": str(x.get("text") or ""),
+                "answer": str(x.get("answer") or x.get("value") or ""),
+                "note": str(x.get("note") or ""),
+                "kind": str(x.get("kind") or ""),
+                "source": str(x.get("source") or ""),
+                "id": str(x.get("id") or ""),
+            }
+        elif isinstance(x, (tuple, list)) and len(x) >= 2:
+            item = {
+                "text": str(x[0] or ""),
+                "answer": str(x[1] or ""),
+                "note": str(x[2]) if len(x) > 2 and x[2] else "",
+                "kind": "", "source": "", "id": "",
+            }
+        else:
+            continue
+        if item["text"].strip() or item["answer"].strip():
+            out.append(item)
+    return out
+
+
+def _qa_bucket(x: dict) -> str:
+    if x.get("kind") == "summary":
+        return "收尾回答"
+    if x.get("source") == "laptop":
+        return "早晨的问责与常规"
+    if x.get("source") == "live":
+        return "白天的实时回答"
+    return "其他回答"
+
+
+def _one_line(s: Any, limit: int) -> str:
+    return " ".join(str(s or "").split())[:limit]
+
+
+def _qa_line(x: dict, q_limit: int = 56, a_limit: int = 120) -> str:
+    q = _one_line(x.get("text") or "(题号不在问题文件里)", q_limit)
+    a = _one_line(x.get("answer") or "", a_limit)
+    n = _one_line(x.get("note") or "", a_limit)
+    return f"{q} → {a}" + (f"（{n}）" if n else "")
+
+
 def day_recap(day_iso: str, base: str, key: str,
-              qa: list[tuple[str, str]], sections: dict | None) -> str:
+              qa: list[Any], sections: dict | None) -> str:
     """一天的收尾回执：数据 + 你的回答 + 总结 + 今天做了什么 + 明天的建议。
 
     ⚠️ 数据和回答都是**确定性的**（直接拼），只有后三块走模型。
@@ -329,12 +407,16 @@ def day_recap(day_iso: str, base: str, key: str,
         lines += [f"· {x}" for x in snap]
         lines.append("")
 
-    if qa:
+    q_all = _norm_qa(qa)
+    if q_all:
         lines.append("【你的回答】")
-        for q, a in qa:
-            qt = " ".join(str(q).split())[:56]
-            at = " ".join(str(a).split())[:80]
-            lines.append(f"· {qt} → {at}")
+        for label in _QA_BUCKETS:
+            group = [x for x in q_all if _qa_bucket(x) == label]
+            if not group:
+                continue
+            lines.append(f"· {label}")
+            for x in group:
+                lines.append(f"  {_qa_line(x)}")
         lines.append("")
 
     sec = sections or {}
@@ -658,7 +740,10 @@ _SUMMARY_SYSTEM = """你在给用户写**一天的收尾复盘**。
    这种空话 —— 要能直接照着做：比如「明天 15:00 前把 AE 的安装验证掉」、
    「把学习通的网课刷完，别拖到周末」。优先参考他回答里「没做成、想留到明天」的那条。
 5. 用户自己写的笔记和回答**优先于任何推断**。两者冲突时以用户说的为准。
-6. 如果今天记录很少，照实说，不要编。"""
+6. 如果今天记录很少，照实说，不要编。
+7. `【白天的实时回答】` 是**当时发生的事实**（每小时问的），`【收尾回答】` 是
+   晚上回顾。两者都要用：不要只看收尾那几条，也不要用收尾的概括覆盖掉
+   白天更具体的细节。冲突时以时间更近、更具体的那条为准。"""
 
 
 def _extract_json_obj(raw: str) -> dict | None:
@@ -698,7 +783,7 @@ def parse_day_summary(raw: str) -> dict:
 
 
 def write_day_summary(day_iso: str, base: str, key: str,
-                      qa: list[tuple[str, str]]) -> tuple[dict | None, str]:
+                      qa: list[Any]) -> tuple[dict | None, str]:
     """晚上收尾：把今天的数据 + 刚答的那些，写成总结 / 做了什么 / 明天建议。
 
     返回 (三段内容, 给人看的话)。为 None 表示没写成，第二个值是原因。
@@ -713,8 +798,21 @@ def write_day_summary(day_iso: str, base: str, key: str,
         raise LiveUnavailable(f"总结不可用：{type(e).__name__}: {e}") from None
 
     digest = _digest(day_iso, base, key)
-    if qa:
-        answers = "\n".join(f"- 问：{q}\n  答：{a}" for q, a in qa)
+    q_all = _norm_qa(qa)
+    if q_all:
+        chunks: list[str] = []
+        for label in _QA_BUCKETS:
+            group = [x for x in q_all if _qa_bucket(x) == label]
+            if not group:
+                continue
+            chunks.append(f"【{label}】")
+            for x in group:
+                qt = _one_line(x.get("text") or "(题号不在问题文件里)", 200)
+                at = _one_line(x.get("answer") or "", 300)
+                nt = _one_line(x.get("note") or "", 200)
+                chunks.append(f"- 问：{qt}\n  答：{at}"
+                              + (f"\n  备注：{nt}" if nt else ""))
+        answers = "\n".join(chunks)
     else:
         answers = "（今天没有回答记录）"
 
