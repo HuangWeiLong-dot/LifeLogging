@@ -476,7 +476,10 @@ $qDayDate = if ($targets.Count -gt 0) { $targets[-1] } else { $today.AddDays(-1)
 # ⚠️ 必须 .ToString("yyyy-MM-dd")。直接把 DateTime 插进字符串会走本地化
 #    格式（'10/14/2026 12:00:00 AM'），Python 那边 date.fromisoformat 直接炸。
 $qDay = $qDayDate.ToString("yyyy-MM-dd")
-if (-not $SkipAI -and -not $DryRun) {
+# 没有 targets 时只在**上午**补生成：下午/晚上生成会把「昨天的题」推到明天
+# 早上，题号仍是昨天的，读起来就是过期题。23:00 那次有 targets（今天），不受影响。
+$shouldGenerate = ($targets.Count -gt 0 -or (Get-Date).Hour -lt 12)
+if ($shouldGenerate -and -not $SkipAI -and -not $DryRun) {
     Invoke-Step "questions" "scripts\generate_questions.py" @("--date", $qDay) | Out-Null
 }
 
