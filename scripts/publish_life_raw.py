@@ -304,6 +304,45 @@ def build_weekly(state_dir: Path) -> list[dict[str, Any]]:
     return docs
 
 
+def slugify(value: str) -> str:
+    s = re.sub(r"[^a-zA-Z0-9]+", "-", value or "").strip("-").lower()
+    return (s[:80] or "untitled")
+
+
+def build_vault(vault_dir: Path) -> list[dict[str, Any]]:
+    """vault 里不属于“某一天事件”的内容：主任务清单、周回顾、AI 会话日志。
+
+    01-03 的每日面板是 Dataview 派生视图，底层数据已经在 events/blocks 里；
+    08-Projects 是项目文档，99-Templates 是模板 —— 都不在这里重复发。
+    """
+    items: list[tuple[str, Path]] = []
+
+    tasks = vault_dir / "04-Tasks" / "Tasks.md"
+    if tasks.exists():
+        items.append(("tasks-master", tasks))
+
+    for path in sorted((vault_dir / "07-Reviews").glob("*.md")):
+        items.append((f"review-{slugify(path.stem)}", path))
+
+    for path in sorted((vault_dir / "06-AI-Sessions").glob("*.md")):
+        items.append((f"ai-session-{slugify(path.stem)}", path))
+
+    docs = []
+    for doc_id, path in items:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            print(f"  ⚠️  {path} 读取失败：{exc}")
+            continue
+        docs.append({
+            "kind": "vault",
+            "id": doc_id,
+            "format": "md",
+            "content": redact_text(text),
+        })
+    return docs
+
+
 def available_days(conn: sqlite3.Connection, state_dir: Path, vault_dir: Path) -> list[str]:
     days = {row[0] for row in conn.execute("SELECT DISTINCT day_local FROM events")}
     for path in (vault_dir / "05-Journal").glob("*.md"):
@@ -486,6 +525,11 @@ def main() -> int:
     if weekly:
         docs.extend(weekly)
         print(f"  ✓ weekly  {len(weekly)} 份")
+
+    vault_docs = build_vault(vault_dir)
+    if vault_docs:
+        docs.extend(vault_docs)
+        print(f"  ✓ vault  {len(vault_docs)} 份")
 
     conn.close()
 

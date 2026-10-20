@@ -61,6 +61,7 @@ Obsidian 里的是**展示层**。底下是一份标准的结构化存储，任�
 |---|---|---|
 | `/life` | 分类时长、步数/心率/跑步、城市级位置、手机计数、AI 花费 | 只发聚合数字 |
 | `/life/archive` | **完整日记、随手记、任务、问答、原始事件、分类时间块、周总结** | **不脱敏**；坐标、窗口标题、URL、包名、日记正文全部公开 |
+| `/life/archive/vault` | **主任务清单 Tasks.md、周回顾、成本台账、AI 会话日志** | **不脱敏** |
 
 原始归档唯一会改的是**凭证**：URL 里像 token/state/code/part 的 query 值、
 `sk-`/`ghp_`/`AKIA` 这类 key、`Bearer` 头和 `password=...` 会替换成 `REDACTED`。
@@ -81,6 +82,11 @@ python scripts/publish_life_site.py --days 90                 # 聚合回填
 python scripts/publish_life_raw.py --all                     # 全量原始回填
 python scripts/publish_life_raw.py --all --dry-run --dump C:/tmp/raw.json
 ```
+
+`publish_life_raw.py` 除按天的数据外，还会发 `vault/04-Tasks/Tasks.md`、
+`vault/07-Reviews/*.md`、`vault/06-AI-Sessions/*.md`（VAULT 视图）。
+01–03 的每日面板是 Dataview 派生视图，底层数据已在 events/blocks 里；
+08-Projects 是项目文档，99-Templates 是模板，都不重复发。
 
 `run_daily.ps1` 在 `ai-usage` 之后依次调用两者；`-SkipAI` 的白天刷新不会发布，
 避免把半天的数据当成整天。聚合 payload 在 Worker 侧有字段白名单；
