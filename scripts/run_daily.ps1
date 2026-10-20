@@ -524,6 +524,17 @@ Invoke-Step "cost-events" "scripts\cost_guard.py" @("emit-events", "--days", "90
 # 只是没有精确金额。
 Invoke-Step "ai-usage" "scripts\collect_ai_usage.py" @("--days", "3") | Out-Null
 
+# ── 发布脱敏汇总到个人站点（liveinpassion.me/life）─────────────────
+#
+# 只发聚合数字：分类时长、步数/心率/跑步、城市级位置、手机计数、AI 花费。
+# 不发坐标、轨迹、窗口标题/URL、包名、余额。字段白名单在 Worker 侧再校验一次。
+#
+# 放在日循环外面：每晚重发近 30 天，幂等 upsert，顺带自愈漏跑的日子。
+# 白天 `-Refresh` / 更新数据.cmd 会带 -SkipAI，此时不发半天的数据。
+if (-not $DryRun -and -not $SkipAI) {
+    Invoke-Step "publish-life" "scripts\publish_life_site.py" @("--days", "30") | Out-Null
+}
+
 # ── 每周日核对成本 ──────────────────────────────────────────────────
 if ((Get-Date).DayOfWeek -eq "Sunday") {
     Invoke-Step "cost-reconcile" "scripts\reconcile_cost.py" @("--days", "7", "--write-vault") | Out-Null

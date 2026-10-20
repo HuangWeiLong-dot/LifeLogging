@@ -53,6 +53,36 @@ Obsidian 里的是**展示层**。底下是一份标准的结构化存储，任�
 的调用（一天约 ¥0.02），而你白天用 Claude Code 花掉的钱走的是同一把 key、同一个余额，
 却完全不进台账 —— 实测两者差 **100 倍**。那页的面板以 DeepSeek 平台的用量接口为准。
 
+### 发布到个人站点（可选）
+
+每晚流水线会把**脱敏后的日汇总**发到 `liveinpassion.me/life`（站点仓库里的
+Cloudflare Worker + D1）。页面只显示聚合数字：
+
+| 发送 | 不发送 |
+|---|---|
+| 分类时长、常用桌面应用（友好名） | 窗口标题、URL、原始路径 |
+| 步数、心率、跑步、VO2max | — |
+| 城市 + 区级停留时长 | 坐标、轨迹、精确地点 |
+| 解锁 / 亮灭屏 / 常用应用（显示名） | Android 包名 |
+| AI 花费与来源（平台 / 估算 / 台账） | 账号余额、日记正文 |
+
+配置在 `config.yaml` 的 `life_site:`；token 只放环境变量：
+
+```bash
+setx LIFE_INGEST_TOKEN "<与 Worker secret 相同的值>"
+```
+
+手动回填 / 试跑：
+
+```bash
+python scripts/publish_life_site.py --days 90          # 回填
+python scripts/publish_life_site.py --days 30 --dry-run --print-json
+```
+
+`run_daily.ps1` 在 `ai-usage` 之后调用；`-SkipAI` 的白天刷新不会发布，
+避免把半天的数据当成整天。站点仓库的 `worker/src/routes/life.js` 还有一道
+字段白名单校验，改 payload 契约时两边要同步。
+
 ---
 
 ## 目录说明

@@ -274,3 +274,16 @@ litellm:
 geocoding:
   dataset: "cities500"
   enabled: true
+
+# ── 发布到个人站点（liveinpassion.me/life，可选）─────────────────
+# 每晚把近 N 天的**脱敏聚合**（分类时长、步数、城市级位置、手机计数、
+# AI 花费）POST 给站点 Worker。不发送坐标、轨迹、窗口标题/URL、包名、余额。
+#
+# token 只放环境变量，不写在这里：
+#   setx LIFE_INGEST_TOKEN "<与 Cloudflare Worker secret 相同的值>"
+life_site:
+  enabled: false
+  ingest_url: "https://cms.liveinpassion.me/api/life/ingest"
+  token_env: "LIFE_INGEST_TOKEN"
+  days: 30
+  chunk_size: 14
