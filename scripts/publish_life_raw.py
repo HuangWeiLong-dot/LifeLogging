@@ -149,7 +149,14 @@ def redact_obj(value: Any) -> Any:
     if isinstance(value, list):
         return [redact_obj(v) for v in value]
     if isinstance(value, dict):
-        return {k: redact_obj(v) for k, v in value.items()}
+        out = {}
+        for key, item in value.items():
+            # 像 {"token": "..."} / {"password": "..."} 这种，连值一起遮
+            if is_sensitive_key(str(key)):
+                out[key] = "REDACTED"
+            else:
+                out[key] = redact_obj(item)
+        return out
     return value
 
 
