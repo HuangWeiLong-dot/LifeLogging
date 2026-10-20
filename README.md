@@ -55,33 +55,36 @@ Obsidian 里的是**展示层**。底下是一份标准的结构化存储，任�
 
 ### 发布到个人站点（可选）
 
-每晚流水线会把**脱敏后的日汇总**发到 `liveinpassion.me/life`（站点仓库里的
-Cloudflare Worker + D1）。页面只显示聚合数字：
+每晚流水线会发两份数据到 `liveinpassion.me`（站点仓库的 Cloudflare Worker + D1/R2）：
 
-| 发送 | 不发送 |
-|---|---|
-| 分类时长、常用桌面应用（友好名） | 窗口标题、URL、原始路径 |
-| 步数、心率、跑步、VO2max | — |
-| 城市 + 区级停留时长 | 坐标、轨迹、精确地点 |
-| 解锁 / 亮灭屏 / 常用应用（显示名） | Android 包名 |
-| AI 花费与来源（平台 / 估算 / 台账） | 账号余额、日记正文 |
+| 页面 | 内容 | 脱敏 |
+|---|---|---|
+| `/life` | 分类时长、步数/心率/跑步、城市级位置、手机计数、AI 花费 | 只发聚合数字 |
+| `/life/archive` | **完整日记、随手记、任务、问答、原始事件、分类时间块、周总结** | **不脱敏**；坐标、窗口标题、URL、包名、日记正文全部公开 |
+
+原始归档唯一会改的是**凭证**：URL 里像 token/state/code/part 的 query 值、
+`sk-`/`ghp_`/`AKIA` 这类 key、`Bearer` 头和 `password=...` 会替换成 `REDACTED`。
+这是防止登录凭证被永久公开，不是生活数据脱敏。
 
 配置在 `config.yaml` 的 `life_site:`；token 只放环境变量：
 
 ```bash
 setx LIFE_INGEST_TOKEN "<与 Worker secret 相同的值>"
+# 或 PowerShell：
+[Environment]::SetEnvironmentVariable('LIFE_INGEST_TOKEN','<...>','User')
 ```
 
 手动回填 / 试跑：
 
 ```bash
-python scripts/publish_life_site.py --days 90          # 回填
-python scripts/publish_life_site.py --days 30 --dry-run --print-json
+python scripts/publish_life_site.py --days 90                 # 聚合回填
+python scripts/publish_life_raw.py --all                     # 全量原始回填
+python scripts/publish_life_raw.py --all --dry-run --dump C:/tmp/raw.json
 ```
 
-`run_daily.ps1` 在 `ai-usage` 之后调用；`-SkipAI` 的白天刷新不会发布，
-避免把半天的数据当成整天。站点仓库的 `worker/src/routes/life.js` 还有一道
-字段白名单校验，改 payload 契约时两边要同步。
+`run_daily.ps1` 在 `ai-usage` 之后依次调用两者；`-SkipAI` 的白天刷新不会发布，
+避免把半天的数据当成整天。聚合 payload 在 Worker 侧有字段白名单；
+原始 payload 走 R2，不在 Worker 做隐私过滤。
 
 ---
 

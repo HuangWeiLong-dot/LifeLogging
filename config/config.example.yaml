@@ -284,6 +284,7 @@ geocoding:
 life_site:
   enabled: false
   ingest_url: "https://cms.liveinpassion.me/api/life/ingest"
+  raw_ingest_url: "https://cms.liveinpassion.me/api/life/raw/ingest"
   token_env: "LIFE_INGEST_TOKEN"
   days: 30
   chunk_size: 14

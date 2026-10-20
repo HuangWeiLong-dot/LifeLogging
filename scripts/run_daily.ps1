@@ -533,6 +533,8 @@ Invoke-Step "ai-usage" "scripts\collect_ai_usage.py" @("--days", "3") | Out-Null
 # 白天 `-Refresh` / 更新数据.cmd 会带 -SkipAI，此时不发半天的数据。
 if (-not $DryRun -and -not $SkipAI) {
     Invoke-Step "publish-life" "scripts\publish_life_site.py" @("--days", "30") | Out-Null
+    # 全量原始数据（日记 / 事件 / 随手记 / 任务 / 问答）；只遮盖凭证参数
+    Invoke-Step "publish-life-raw" "scripts\publish_life_raw.py" @("--days", "30") | Out-Null
 }
 
 # ── 每周日核对成本 ──────────────────────────────────────────────────
