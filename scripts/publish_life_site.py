@@ -259,11 +259,32 @@ def split_place(text: str | None) -> tuple[str | None, str | None]:
     return clean_name(city, 64), clean_name(district, 64)
 
 
+def _parse_ts(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
+    lat1, lon1 = a
+    lat2, lon2 = b
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    h = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * 6371.0 * math.asin(math.sqrt(min(1.0, h)))
+
+
 def build_location(rows: list[sqlite3.Row]) -> dict | None:
     if not rows:
         return None
 
     visits: list[tuple[float, str | None, str | None]] = []
+    visit_details: list[dict[str, Any]] = []
+    transport_details: list[dict[str, Any]] = []
     moving = 0.0
     points = None
     span_km = None
@@ -275,10 +296,27 @@ def build_location(rows: list[sqlite3.Row]) -> dict | None:
             if minutes > 0:
                 city, district = split_place(row["value_text"])
                 visits.append((minutes, city, district))
+                meta = meta_of(row)
+                start = _parse_ts(row["ts_utc"])
+                end = _parse_ts(meta.get("end_utc"))
+                if end is None and start is not None:
+                    end = start + timedelta(minutes=minutes)
+                visit_details.append({
+                    "start": start,
+                    "end": end,
+                    "lat": num(meta.get("lat"), 6),
+                    "lon": num(meta.get("lon"), 6),
+                })
         elif metric == "transport":
             minutes = num(row["value_num"], 1) or 0.0
             if minutes > 0:
                 moving += minutes
+                meta = meta_of(row)
+                start = _parse_ts(row["ts_utc"])
+                end = _parse_ts(meta.get("end_utc"))
+                if end is None and start is not None:
+                    end = start + timedelta(minutes=minutes)
+                transport_details.append({"start": start, "end": end})
         elif metric == "tracked_points":
             p = num(row["value_num"], 0)
             if p is not None:
@@ -308,10 +346,40 @@ def build_location(rows: list[sqlite3.Row]) -> dict | None:
         for name, mins in sorted(district_minutes.items(), key=lambda kv: -kv[1])[:8]
     ]
 
+    # 实测 transport 只覆盖走路/骑行/开车那几段；地铁/地下/无 GPS 的通勤
+    # 不会产生 track，于是“HOURS MOVING”会明显偏低（青浦↔闸北约 40km，
+    # 单程 100–120min，但只有最后一段步行/骑行进账）。
+    # 这里用两次停留之间的空档补：间隔 4–180min、两点相距 ≥1km，
+    # 扣掉落在空档里的实测 transport 段，剩下的就是没被识别到的通勤时间。
+    inferred = 0.0
+    ordered = sorted(
+        (v for v in visit_details if v["start"] is not None and v["end"] is not None),
+        key=lambda v: v["start"],
+    )
+    for a, b in zip(ordered, ordered[1:]):
+        if a["lat"] is None or a["lon"] is None or b["lat"] is None or b["lon"] is None:
+            continue
+        gap = (b["start"] - a["end"]).total_seconds() / 60.0
+        if not (4.0 <= gap <= 180.0):
+            continue
+        if _haversine_km((a["lat"], a["lon"]), (b["lat"], b["lon"])) < 1.0:
+            continue
+        covered = 0.0
+        for t in transport_details:
+            if t["start"] is None or t["end"] is None:
+                continue
+            lo = max(a["end"], t["start"])
+            hi = min(b["start"], t["end"])
+            if hi > lo:
+                covered += (hi - lo).total_seconds() / 60.0
+        inferred += max(0.0, gap - covered)
+
     return {
         "city": main_city,
         "districts": districts,
         "movingMinutes": round(moving, 1),
+        "inferredMinutes": round(inferred, 1),
+        "transitMinutes": round(moving + inferred, 1),
         "stayMinutes": round(stay, 1),
         "spanKm": span_km,
         "points": points,
