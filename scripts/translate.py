@@ -215,7 +215,8 @@ class Translator:
         for translated, tokens in zip(data, maps):
             if not isinstance(translated, str):
                 return None
-            restored = normalize_punctuation(self._restore(translated, tokens))
+            # 先规范标点，再还原 URL/包名 —— 否则 URL 里如果有中文标点也会被改掉
+            restored = self._restore(normalize_punctuation(translated), tokens)
             # 占位符没被原样保留 → 这一批不可信，交给上层重试/回退
             if PLACEHOLDER_RE.search(restored):
                 return None
@@ -307,7 +308,7 @@ class Translator:
             print(f"  ⚠️  still not English: {source[:60]!r}")
             self.failed += 1
             return
-        self.cache[self._key(source)] = normalize_punctuation(translated[0])
+        self.cache[self._key(source)] = translated[0]
         self._dirty = True
         self._save()
 
