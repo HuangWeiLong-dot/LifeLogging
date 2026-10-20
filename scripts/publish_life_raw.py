@@ -44,6 +44,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import header, load_config  # noqa: E402
 from publish_life_site import open_db  # noqa: E402
+from translate import Translator, has_cjk  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -387,6 +388,49 @@ def build_day(conn: sqlite3.Connection, day: str, state_dir: Path, vault_dir: Pa
 
 # ── 发送 ──────────────────────────────────────────────────────
 
+def translate_answer_event(text: str, translator: Translator) -> str:
+    """`<id>|<answer>|<note>` —— 只翻后两段，ID 保持原样。"""
+    parts = text.split("|")
+    if len(parts) < 2:
+        return translator.translate_text(text)
+    return "|".join([parts[0]] + [translator.translate_text(p) for p in parts[1:]])
+
+
+def translate_doc(doc: dict[str, Any], translator: Translator) -> dict[str, Any]:
+    """把一份已序列化的文档翻成英文；结构/键保持不变。"""
+    if not translator.enabled:
+        return doc
+    content = doc["content"]
+    if not has_cjk(content):
+        return doc
+
+    kind = doc["kind"]
+    if kind in ("journal", "vault"):
+        content = translator.translate_markdown(content)
+    else:
+        try:
+            data = json.loads(content)
+        except ValueError:
+            return doc
+        if kind == "events" and isinstance(data, list):
+            events = []
+            for event in data:
+                event = dict(event)
+                if (
+                    event.get("domain") == "question"
+                    and event.get("metric") == "answer"
+                    and has_cjk(event.get("value_text"))
+                ):
+                    event["value_text"] = translate_answer_event(event["value_text"], translator)
+                events.append(translator.translate_object(event))
+            data = events
+        else:
+            data = translator.translate_object(data)
+        content = json_text(data)
+
+    return {**doc, "content": content}
+
+
 def doc_bytes(doc: dict[str, Any]) -> int:
     return len(doc["content"].encode("utf-8")) + 256
 
@@ -480,6 +524,7 @@ def main() -> int:
     parser.add_argument("--api-base", default=None, help="覆盖 raw ingest 地址")
     parser.add_argument("--dry-run", action="store_true", help="只聚合不发送")
     parser.add_argument("--dump", default=None, help="把完整 {v,docs} 写到文件（调试/本地测试）")
+    parser.add_argument("--no-translate", action="store_true", help="不翻译（调试用；会发布中文）")
     args = parser.parse_args()
 
     cfg = load_config()
@@ -537,6 +582,40 @@ def main() -> int:
         print("· 没有可发布的原始数据")
         return 0
 
+    translate_enabled = bool(site.get("translate_raw", True)) and not args.no_translate
+    translation_failed = 0
+    if translate_enabled:
+        try:
+            translator = Translator(
+                cfg,
+                state_dir,
+                max_calls=int(site.get("translate_max_calls") or 30),
+            )
+        except Exception as exc:  # noqa: BLE001 — 配置/台账问题
+            print(f"✗ 翻译器初始化失败：{exc}")
+            return 1
+        print(f"  · 翻译中（缓存 {len(translator.cache)} 条）…")
+        try:
+            docs = [translate_doc(doc, translator) for doc in docs]
+        except Exception as exc:  # noqa: BLE001 — 单份文档结构异常
+            print(f"✗ 翻译失败：{exc}")
+            return 1
+        translation_failed = translator.failed
+        remaining = [
+            f"{doc['kind']}/{doc['id']}"
+            for doc in docs
+            if has_cjk(doc["content"])
+        ]
+        if remaining:
+            translation_failed += len(remaining)
+            print(f"  ⚠️  仍含中文的文档：{', '.join(remaining[:6])}")
+        print(
+            f"  · 翻译完成（缓存 {len(translator.cache)} 条，"
+            f"失败 {translation_failed} 段）"
+        )
+    else:
+        print("  · 翻译已跳过（--no-translate 或 life_site.translate_raw=false）")
+
     total_bytes = sum(doc_bytes(d) for d in docs)
     print(f"  · {len(docs)} 份文档，共 {total_bytes / 1024 / 1024:.2f} MiB")
 
@@ -546,6 +625,13 @@ def main() -> int:
             encoding="utf-8",
         )
         print(f"  · 已写出 {args.dump}")
+
+    if translation_failed:
+        print(
+            f"✗ {translation_failed} 段翻译失败；本轮不发布，"
+            f"保留线上英文版（下一轮重试）"
+        )
+        return 1
 
     if args.dry_run:
         print("· dry-run：未发送")

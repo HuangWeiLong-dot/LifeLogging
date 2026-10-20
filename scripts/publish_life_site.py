@@ -44,6 +44,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import header, load_config  # noqa: E402
 from normalize import summarize_phone  # noqa: E402
+from translate import Translator, has_cjk  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 MAX_DAY_BYTES = 32 * 1024
@@ -547,6 +548,7 @@ def main() -> int:
     parser.add_argument("--chunk-size", type=int, default=None, help="每批发送天数")
     parser.add_argument("--dry-run", action="store_true", help="只聚合不发送")
     parser.add_argument("--print-json", action="store_true", help="与 --dry-run 一起，打印完整 JSON")
+    parser.add_argument("--no-translate", action="store_true", help="不翻译（调试用；会发布中文标签）")
     args = parser.parse_args()
 
     cfg = load_config()
@@ -597,11 +599,50 @@ def main() -> int:
         print("· 没有可发布的数据")
         return 0
 
+    translate_enabled = bool(site.get("translate_raw", True)) and not args.no_translate
+    translation_failed = 0
+    if translate_enabled:
+        try:
+            translator = Translator(
+                cfg,
+                state_dir,
+                max_calls=int(site.get("translate_max_calls") or 30),
+            )
+        except Exception as exc:  # noqa: BLE001 — 配置/台账问题
+            print(f"✗ 翻译器初始化失败：{exc}")
+            return 1
+        print(f"  · 翻译聚合标签（缓存 {len(translator.cache)} 条）…")
+        try:
+            payloads = [translator.translate_object(p) for p in payloads]
+            for p in payloads:
+                encode_day(p)
+        except Exception as exc:  # noqa: BLE001
+            print(f"✗ 翻译失败：{exc}")
+            return 1
+        translation_failed = translator.failed
+        if has_cjk(json.dumps(payloads, ensure_ascii=False)):
+            translation_failed += 1
+            print("  ⚠️  聚合 payload 仍含中文")
+        print(
+            f"  · 翻译完成（缓存 {len(translator.cache)} 条，"
+            f"失败 {translation_failed} 段）"
+        )
+    else:
+        print("  · 翻译已跳过（--no-translate 或 life_site.translate_raw=false）")
+
     total_bytes = len(json.dumps({"v": 1, "days": payloads}, ensure_ascii=False).encode("utf-8"))
     print(f"  · {len(payloads)} 天，共 {total_bytes / 1024:.1f} KiB")
 
     if args.print_json:
         print(json.dumps({"v": 1, "days": payloads}, ensure_ascii=False, indent=2))
+
+    if translation_failed:
+        print(
+            f"✗ {translation_failed} 段翻译失败；本轮不发布，"
+            f"保留线上英文版（下一轮重试）"
+        )
+        return 1
+
     if args.dry_run:
         print("· dry-run：未发送")
         return 0

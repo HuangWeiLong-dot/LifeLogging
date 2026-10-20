@@ -67,6 +67,12 @@ Obsidian 里的是**展示层**。底下是一份标准的结构化存储，任�
 `sk-`/`ghp_`/`AKIA` 这类 key、`Bearer` 头和 `password=...` 会替换成 `REDACTED`。
 这是防止登录凭证被永久公开，不是生活数据脱敏。
 
+**发布前会把中文内容翻成英文**（只改发出去的副本；本机 `events.db`、vault、
+qa 文件里的原文不动）。用现有的 DeepSeek 翻译，结果缓存在
+`state/translation_cache.json`，同一段只翻一次。`life_site.translate_raw` /
+`translate_max_calls` 控制。任何一段翻译失败都会中止本轮发布、保留线上已有的
+英文版，下一轮重试；`--no-translate` 只用于调试（会临时发布中文）。
+
 配置在 `config.yaml` 的 `life_site:`；token 只放环境变量：
 
 ```bash

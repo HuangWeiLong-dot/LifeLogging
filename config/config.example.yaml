@@ -285,6 +285,10 @@ life_site:
   enabled: false
   ingest_url: "https://cms.liveinpassion.me/api/life/ingest"
   raw_ingest_url: "https://cms.liveinpassion.me/api/life/raw/ingest"
+  # 发布前用 DeepSeek 把中文内容翻成英文（只改发出去的副本，本机原文不动）。
+  # 翻译结果缓存在 state/translation_cache.json；同一段只翻一次。
+  translate_raw: true
+  translate_max_calls: 80
   token_env: "LIFE_INGEST_TOKEN"
   days: 30
   chunk_size: 14
