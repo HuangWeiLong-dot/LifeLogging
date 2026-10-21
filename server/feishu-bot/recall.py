@@ -72,6 +72,8 @@ def _signature(state_dir: Path) -> str:
 
 def _load_docs(state_dir: Path) -> list[dict]:
     docs: list[dict] = []
+    days: set[str] = set()
+
     for p in sorted(state_dir.glob("journal-output-*.json"))[-MAX_DOCS:]:
         m = _DAY_RE.search(p.name)
         if not m:
@@ -86,9 +88,80 @@ def _load_docs(state_dir: Path) -> list[dict]:
         if not body:
             continue
         day = str(payload.get("day") or m.group(1))
+        days.add(day)
         docs.append({"doc_key": f"journal-{day}", "day": day,
                      "kind": "journal", "text": body})
+
+    # ⚠️ **日记正文是英文写的**（close_day 的产出），而用户是用中文问的。
+    #    只索引日记的话，「我上次觉得累是什么时候」一个字都匹配不上 ——
+    #    2026-10-21 在服务器上实测就是 0 条。所以把中继上他自己的**中文回答
+    #    和笔记**也索引进来：那才是和问题同一种语言的原话。
+    for p in sorted(state_dir.glob("phone-*.jsonl"))[-MAX_DOCS:]:
+        m = _DAY_RE.search(p.name)
+        if not m:
+            continue
+        day = m.group(1)
+        days.add(day)
+        text = _qa_doc(state_dir, day)
+        if text:
+            docs.append({"doc_key": f"qa-{day}", "day": day,
+                         "kind": "qa", "text": text})
     return docs
+
+
+def _question_texts(state_dir: Path, day: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for name in (f"questions-{day}.json", f"questions-live-{day}.json"):
+        p = state_dir / name
+        try:
+            payload = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        for q in payload.get("questions") or []:
+            if isinstance(q, dict) and q.get("id"):
+                out[str(q["id"])] = str(q.get("text") or "")
+    return out
+
+
+def _qa_doc(state_dir: Path, day: str) -> str:
+    """把一天的中文回答/笔记拼成一篇可检索的文档。
+
+    ⚠️ 跳过机器人自己写的「【今日复盘】」笔记：那是整份日报（上千字、
+       包含当天所有回答），索引进去会让每一天都命中一大堆关键词，
+       把真正的原话淹没。
+    """
+    p = state_dir / f"phone-{day}.jsonl"
+    try:
+        lines = p.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    qtexts = _question_texts(state_dir, day)
+    parts: list[str] = []
+    for line in lines:
+        try:
+            e = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(e, dict):
+            continue
+        dom, met = e.get("domain"), e.get("metric")
+        if dom == "manual" and met == "note":
+            text = str(e.get("value_text") or "").strip()
+            if text and not text.startswith("【今日复盘】"):
+                parts.append(f"笔记：{text}")
+        elif dom == "question" and met == "answer":
+            qid, _, rest = str(e.get("value_text") or "").partition("|")
+            value, _, note = rest.partition("|")
+            if not value.strip():
+                continue
+            q = qtexts.get(qid.strip(), "")
+            item = f"问：{q}\n答：{value.strip()}" if q else f"答：{value.strip()}"
+            if note.strip():
+                item += f"（备注：{note.strip()}）"
+            parts.append(item)
+    return "\n".join(parts)
 
 
 def _connect(db: Path) -> sqlite3.Connection:

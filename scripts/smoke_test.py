@@ -2346,26 +2346,56 @@ def t_recall():
                 json.dumps({"day": day, "body": body}, ensure_ascii=False),
                 encoding="utf-8")
 
-        write("2026-10-18", "今天见了老王，聊了外包项目。晚上很累。")
-        write("2026-10-19", "今天在家整理书架，读了一本书。")
+        def write_qa(day: str, rows: list[dict], questions: dict) -> None:
+            (state / f"questions-live-{day}.json").write_text(
+                json.dumps({"day": day, "questions": [
+                    {"id": k, "text": v} for k, v in questions.items()]},
+                    ensure_ascii=False), encoding="utf-8")
+            (state / f"phone-{day}.jsonl").write_text(
+                "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows),
+                encoding="utf-8")
+
+        # 真实日记正文是**英文**的（close_day 的产出）—— 故意用英文，
+        # 这样能测出「中文问题靠自己的中文回答命中」这条链路。
+        write("2026-10-18", "Met Lao Wang, discussed an outsourcing project. "
+                            "Very tired at night.")
+        write("2026-10-19", "Read a book at home.")
+        write_qa("2026-10-18", [
+            {"domain": "question", "metric": "answer",
+             "value_text": "2026-10-18-aaaa|很累，下午就撑不住了|"},
+            {"domain": "manual", "metric": "note",
+             "value_text": "今天见了老王，聊了外包项目"},
+            # 机器人自己写的整份复盘：必须跳过，否则每天都命中一堆词
+            {"domain": "manual", "metric": "note",
+             "value_text": "【今日复盘】今天打橄榄球很开心"},
+        ], {"2026-10-18-aaaa": "今天体力怎么样？"})
 
         hits = rc.search("外包", state_dir=state, db=db)
-        assert len(hits) == 1 and hits[0]["day"] == "2026-10-18", hits
-        assert "外包" in hits[0]["excerpt"], hits[0]["excerpt"]
+        assert hits and hits[0]["day"] == "2026-10-18", hits
+        assert any(h["kind"] == "qa" for h in hits), hits
+        assert "外包" in hits[0]["excerpt"] or "老王" in hits[0]["excerpt"], hits
 
         # 摘要里的汉字不能被切成「今 天 见 了」
-        assert "今天见了老王" in hits[0]["excerpt"], hits[0]["excerpt"]
+        assert any("今天见了老王" in h["excerpt"] for h in hits), hits
 
-        # 自然语言问句：删功能词后要能命中，不能把整句当一个短语
+        # 中文自然语言问句：靠中文回答命中英文日记对应的那一天
+        hits = rc.search("我上次觉得累是什么时候", state_dir=state, db=db)
+        assert hits and hits[0]["day"] == "2026-10-18", hits
         hits = rc.search("我上次聊外包项目是什么时候", state_dir=state, db=db)
         assert hits and hits[0]["day"] == "2026-10-18", hits
+
+        # 复盘笔记被跳过：它的内容不能被检索到
+        assert rc.search("橄榄球", state_dir=state, db=db) == []
 
         # 没有的词 → 空，不猜
         assert rc.search("不存在的词", state_dir=state, db=db) == []
         assert rc.search("", state_dir=state, db=db) == []
 
         # 新的一天写进来 → 下一次检索前自动重建
-        write("2026-10-20", "今天去跑步了，跑完很累。")
+        write("2026-10-20", "Went running after class.")
+        write_qa("2026-10-20", [
+            {"domain": "manual", "metric": "note", "value_text": "今天去跑步了，跑完很累"},
+        ], {})
         hits = rc.search("跑步", state_dir=state, db=db)
         assert hits and hits[0]["day"] == "2026-10-20", hits
 
