@@ -1986,9 +1986,84 @@ def t_reflex_rules():
     assert rx.evaluate(night, day, events=[], phone=phone, snap=snap,
                        state={}) == []
 
+    # 传感器哑了：14:00，最后一条手机活动在 00:30（13.5 小时前）→ 报
+    afternoon = dt(2026, 10, 21, 14, 0, tzinfo=tz)
+    stale = [{"metric": "unlock",
+              "ts_utc": iso(dt(2026, 10, 21, 0, 30, tzinfo=tz))}]
+    got = rx.evaluate(afternoon, day, events=stale, phone=None, snap=None,
+                      state={})
+    assert [a["key"] for a in got] == ["sensor_silent"], got
+    # 10 小时前还在用 → 不报（长睡不能被当成故障）
+    fresh = [{"metric": "unlock", "ts_utc": iso(afternoon - td(hours=10))}]
+    assert rx.evaluate(afternoon, day, events=fresh, phone=None, snap=None,
+                       state={}) == []
+    # 一条事件都没有 → 不报（多半是刚部署，不吓人）
+    assert rx.evaluate(afternoon, day, events=[], phone=None, snap=None,
+                       state={}) == []
+
 
 check("reflex: 熬夜/亮屏/娱乐/久坐 —— 边界、冷却、答题时不打断",
       t_reflex_rules)
+
+
+def t_reflex_outcomes():
+    """反馈回路：提醒发出后 +15/+60 分钟各记一次行为，窗口没到不提前记。
+
+    ⚠️ 这是**观测**，不是评价。这里只钉住计数和边界 —— 比如「窗口外的事件
+       不能被算进来」，否则以后会拿错窗口的数据去证明「提醒有效」。
+    """
+    import importlib.util
+    from datetime import datetime as dt
+    from datetime import timedelta as td
+    from zoneinfo import ZoneInfo
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "reflex_out", root / "server" / "feishu-bot" / "reflex.py")
+    rx = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rx)
+
+    tz = ZoneInfo("Asia/Shanghai")
+    base = dt(2026, 10, 21, 19, 0, tzinfo=tz)
+    iso = lambda d: d.astimezone(tz).isoformat()  # noqa: E731
+
+    alert = {"kind": "sent", "id": "x1", "rule": "screen_heavy", "ts": iso(base)}
+    events = [
+        {"metric": "unlock", "ts_utc": iso(base + td(minutes=5))},
+        {"metric": "app_switch", "ts_utc": iso(base + td(minutes=10))},
+        {"metric": "screen_off", "ts_utc": iso(base + td(minutes=12))},
+        {"metric": "unlock", "ts_utc": iso(base + td(minutes=40))},
+        # 窗口外的，不能被算进来
+        {"metric": "unlock", "ts_utc": iso(base - td(minutes=5))},
+        {"metric": "unlock", "ts_utc": iso(base + td(minutes=75))},
+    ]
+
+    # 15 分钟还没到 → 什么都不记
+    assert rx.pending_outcomes([alert], base + td(minutes=10), events) == []
+
+    rows = rx.pending_outcomes([alert], base + td(minutes=20), events)
+    assert len(rows) == 1 and rows[0]["window_min"] == 15, rows
+    r15 = rows[0]
+    assert (r15["unlocks"], r15["switches"], r15["screen_off"], r15["activity"]) \
+        == (1, 1, 1, 3), r15
+
+    rows = rx.pending_outcomes([alert], base + td(minutes=65), events)
+    assert sorted(r["window_min"] for r in rows) == [15, 60], rows
+    r60 = next(r for r in rows if r["window_min"] == 60)
+    assert (r60["unlocks"], r60["switches"], r60["screen_off"], r60["activity"]) \
+        == (2, 1, 1, 4), r60
+
+    # 记过的不再记（重启/多轮 tick 都不会重复写同一个窗口）
+    log = [alert] + rows
+    assert rx.pending_outcomes(log, base + td(minutes=90), events) == []
+
+    # 时间解析不出来 → 不记，也不崩
+    bad = {"kind": "sent", "id": "x2", "rule": "x", "ts": "not-a-time"}
+    assert rx.pending_outcomes([bad], base + td(hours=3), events) == []
+
+
+check("reflex: 提醒后的 +15/+60 观察只记一次、窗口外不算",
+      t_reflex_outcomes)
 
 
 def t_reflex_awaiting_gate():
@@ -2040,6 +2115,130 @@ def t_reflex_awaiting_gate():
 
 check("reflex: 只拦「一小时内的题」，挂了一晚的旧题不挡提醒",
       t_reflex_awaiting_gate)
+
+
+def t_features():
+    """状态向量：字段来自已算好的 timeline，缺的源**不补 0**。
+
+    这一层以后会喂给相关性和模型。补 0 的话，「那天没开电脑」和「那天电脑
+    数据没采到」在模型眼里会变成同一件事 —— 而这两件事的含义正相反。
+    """
+    import features
+
+    tl = {
+        "day": "2026-10-20", "total_hours": 4.76,
+        "by_category": {"Leisure": 2.17, "Work": 2.06},
+        "health": {"steps": 4426, "heart_rate_avg": 79.3},
+        "location": [{"place": "A", "minutes": 434.0},
+                     {"place": "B", "minutes": 270.6}],
+        "phone": {"unlocks": 109, "app_switches": 937,
+                  "top_apps": [["WeChat", 195.0], ["Pinduoduo", 73.9],
+                               ["DeepSeek", 53.5]],
+                  "screen_minutes": 597.7, "foreground_minutes": 543.1},
+        "web": [{"site": "chat.deepseek.com", "minutes": 166.6},
+                {"site": "other", "minutes": 25.9}],
+        "track": {"points": 1294, "span_km": 42.0},
+        "blocks": [
+            {"time": "17:41-17:47", "hours": 0.08, "app": "Weixin.exe"},
+            {"time": "23:10-23:40", "hours": 0.5, "app": "Weixin.exe"},
+            {"time": "09:00-10:00", "hours": 1.0, "app": "Code.exe"},
+            {"time": "坏时间", "hours": 0.2, "app": "Code.exe"},
+        ],
+    }
+    f = features.features_for("2026-10-20", tl, {"mood": 4, "energy": 2})
+    assert f["feature_version"] == features.FEATURE_VERSION, f
+    assert f["desktop"]["hours"] == 4.76, f["desktop"]
+    # 时间解析不出来的块：时长照算，但**不**算进「深夜使用」
+    assert f["desktop"]["top_app"] == "Code.exe", f["desktop"]
+    assert f["desktop"]["top_app_hours"] == 1.2, f["desktop"]
+    assert f["desktop"]["longest_block_hours"] == 1.0, f["desktop"]
+    assert f["desktop"]["late_hours"] == 0.5, f["desktop"]
+    assert f["phone"]["screen_hours"] == 9.96, f["phone"]
+    assert f["phone"]["leisure_top10_minutes"] == 268.9, f["phone"]
+    assert f["location"]["stays"] == 2 and f["location"]["stayed_hours"] == 11.74, \
+        f["location"]
+    assert f["web"]["minutes"] == 192.5 and f["web"]["top_site"] == "chat.deepseek.com"
+    assert f["labels"] == {"mood": 4, "energy": 2}, f["labels"]
+    assert all(f["sources"].values()), f["sources"]
+
+    # 什么都没采到的一天：null / False，不能是 0 或空字符串冒充「没有」
+    empty = features.features_for("2026-10-11", {"day": "2026-10-11"}, {})
+    assert empty["phone"] is None and empty["health"] is None, empty
+    assert empty["sources"]["phone"] is False and empty["sources"]["labels"] is False
+    assert empty["desktop"]["hours"] == 0.0, empty["desktop"]
+
+    # 自评维度 → 英文键的映射，必须覆盖打分表里的维度
+    import live_questions as lq
+    assert set(lq.RATED_DIMENSIONS) <= set(features.LABEL_KEYS), \
+        f"打分维度没有特征键：{set(lq.RATED_DIMENSIONS) - set(features.LABEL_KEYS)}"
+
+    # 娱乐名单两边必须一致（features 从 normalize 取，reflex 是服务器副本）
+    import importlib.util
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "reflex_leisure", root / "server" / "feishu-bot" / "reflex.py")
+    rx = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rx)
+    import normalize
+    assert rx.LEISURE_APPS == normalize.PHONE_LEISURE_APPS, \
+        "娱乐应用名单漂了：reflex 和 normalize 必须一致"
+
+
+check("features: 一天一行状态向量 / 缺源不补 0 / 版本号 / 名单不漂",
+      t_features)
+
+
+def t_baseline():
+    """个人基线：中位数 + MAD，样本不足/零波动就闭嘴。
+
+    这条的失败方式不是报错，是**给一个看起来很像真的偏离**。所以这里钉住：
+      · 今天不参与自己的基线
+      · 少于是 min_days 个历史值 → 不算
+      · MAD=0（过去每天一样）→ 不算「反常」
+    """
+    import baseline
+
+    def row(day, screen, steps=None):
+        return {"day": day,
+                "phone": {"screen_hours": screen},
+                "health": {"steps": steps} if steps is not None else None}
+
+    rows = [row(f"2026-10-{d:02d}", s) for d, s in [
+        (10, 5.0), (11, 6.0), (12, 7.0), (13, 6.0), (14, 5.0),
+        (15, 7.0), (16, 10.0)]]
+
+    out = baseline.deviations(rows, "2026-10-16", min_days=5)
+    assert out["baseline_days"] == 6, out
+    flagged = {d["key"]: d for d in out["flagged"]}
+    assert "phone_screen_hours" in flagged, out
+    d = flagged["phone_screen_hours"]
+    # 过去 6 天中位数 6、MAD 1 → z = 0.6745 * 4 ≈ 2.7
+    assert d["median"] == 6.0 and d["z"] == 2.7, d
+    assert "高于" in baseline.render(out, show_all=False)
+
+    # 今天不能出现在自己的基线里：把今天改成 100 也不该改变中位数
+    rows[-1] = row("2026-10-16", 100.0)
+    out = baseline.deviations(rows, "2026-10-16", min_days=5)
+    assert next(d for d in out["flagged"]
+                if d["key"] == "phone_screen_hours")["median"] == 6.0
+
+    # 历史不足 → 进 insufficient，不硬算
+    out = baseline.deviations(rows[:3], "2026-10-12", min_days=5)
+    assert out["flagged"] == [] and "手机亮屏" in out["insufficient"], out
+
+    # 过去每天一样（MAD=0）→ 不算反常
+    flat = [row(f"2026-10-{d:02d}", 6.0) for d in (10, 11, 12, 13, 14, 15)]
+    flat.append(row("2026-10-16", 10.0))
+    out = baseline.deviations(flat, "2026-10-16", min_days=5)
+    assert "手机亮屏" in out["no_variance"], out
+
+    # 目标日不在文件里 → 明确报错，不拿别的日子凑
+    out = baseline.deviations(rows, "2026-11-01")
+    assert out.get("error"), out
+
+
+check("baseline: 中位数/MAD / 今天不进自己的基线 / 样本不足与零波动不硬算",
+      t_baseline)
 
 
 def t_notes_into_journal():

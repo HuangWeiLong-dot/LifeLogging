@@ -716,6 +716,17 @@ PHONE_APPS = {
     "com.android.systemui": "System UI",
 }
 
+# 娱乐/社交类应用（手机端）。两处在用同一份语义：
+#   · scripts/features.py —— 每天的「娱乐时长」特征
+#   · server/feishu-bot/reflex.py —— 「娱乐超 3 小时」的提醒
+# ⚠️ reflex.py 在服务器上、不能 import 这个模块（它在 import 时就 load_config），
+#    所以那边有一份副本。smoke_test 里有一条测试钉住两份**必须相等** ——
+#    名单漂了会让「特征里说 3.2h、提醒说没超」这种矛盾静默出现。
+PHONE_LEISURE_APPS = frozenset({
+    "WeChat", "QQ", "Weibo", "Douyin", "Bilibili", "Xiaohongshu",
+    "Taobao", "JD", "Pinduoduo", "Xianyu", "NetEase Music",
+})
+
 # 看着像 Android 包名吗？至少两段、全小写字母数字下划线、点分隔。
 _PKG_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$")
 

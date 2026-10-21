@@ -173,6 +173,22 @@ function Invoke-OneDay($d) {
     # 2. 归一化
     $normalized = Invoke-Step "normalize" "scripts\normalize.py" @("--date", $ds)
 
+    # 2a. 状态向量：把已归一化的日汇总拍平成 state/features.jsonl（一天一行）。
+    #     不参与日记生成，但以后的相关性/基线/预测都只吃这一层 ——
+    #     它的字段定义带版本号，改了要 bump FEATURE_VERSION。
+    #     --coverage：顺手打一张「哪个源缺了」的表（传感器健康报告）。
+    if (-not $DryRun) {
+        $featArgs = @()
+        if (-not $Refresh) { $featArgs = @("--coverage") }
+        Invoke-Step "features" "scripts\features.py" $featArgs | Out-Null
+        # 今天和你自己的常态差多少（中位数 + MAD，不预测）。
+        # ⚠️ 只在正式跑（不是每 2 小时的刷新）做：拿只过了半天的今天
+        #    去和完整的历史比，偏离全是假的。
+        if (-not $Refresh) {
+            Invoke-Step "baseline" "scripts\baseline.py" @("--date", $ds) | Out-Null
+        }
+    }
+
     # 2b. 重建长期记忆的检索索引（日记正文 + 笔记 + 问答）。
     #
     # ⚠️ 放在**归一化之后、推输入之前**：push_journal_input 要用它检索相关历史，

@@ -45,6 +45,12 @@ ACTIVE_MIN = int(os.environ.get("REFLEX_ACTIVE_MIN", "20"))
 # 两条提醒之间至少隔这么久。连着响三次的提醒 = 噪音。
 MIN_GAP_MIN = int(os.environ.get("REFLEX_MIN_GAP_MIN", "60"))
 
+# 传感器哑了：白天（>=13 点）最近一次手机活动已经过去这么久。
+# ⚠️ 这个阈值要能容忍一次长睡。8 小时睡眠是常态，13 小时才值得怀疑 ——
+#    而 Tasker 半夜被杀的话，到下午正好就是这个数。
+SENSOR_STALE_HOURS = float(os.environ.get("REFLEX_SENSOR_STALE_HOURS", "13"))
+SENSOR_CHECK_FROM_HOUR = 13
+
 # 夜里这几个小时只有「熬夜」能说话；其余规则白天才有意义。
 QUIET_FROM_HOUR = 23
 QUIET_TO_HOUR = 8
@@ -53,12 +59,22 @@ QUIET_TO_HOUR = 8
 LATE_FROM = (0, 30)
 LATE_TO_HOUR = 4
 
+# ⚠️ 和 `normalize.PHONE_LEISURE_APPS` **必须一致**。这里不能 import 那份：
+#    normalize.py 在 import 时就 load_config()，而机器人要能在配置坏掉时
+#    照样起得来（见 live.py 开头的「惰性依赖」）。smoke_test 钉住两份相等。
 LEISURE_APPS = frozenset({
     "WeChat", "QQ", "Weibo", "Douyin", "Bilibili", "Xiaohongshu",
     "Taobao", "JD", "Pinduoduo", "Xianyu", "NetEase Music",
 })
 
 _ACTIVITY_METRICS = frozenset({"unlock", "screen_on", "app_switch"})
+
+# 提醒发出后，在这些时间点各记一次「后来发生了什么」。
+#
+# ⚠️ 只记录，不评价。15 分钟后解锁 0 次可能表示「你听了」，也可能表示
+#    「你把手机放桌上走了」—— 现在下结论就是编故事。等积累了足够的
+#    「提醒 → 行为」配对，才谈得上「哪条提醒有效」。
+OUTCOME_WINDOWS = (15, 60)
 
 
 def _dt(v: Any) -> datetime | None:
@@ -204,5 +220,105 @@ def evaluate(now: datetime, day_iso: str, *, events: list[dict],
                 ])
             take("long_desktop", _desktop_alert)
 
+        # 5. 传感器哑了 —— 先让系统感知自己的感官。
+        #
+        # ⚠️ 这是唯一一条「关于系统自己」的规则。没有它，Tasker 半夜被杀
+        #    这种事只会表现为「今天数据很少」，然后被当成「今天很安静」。
+        if now.hour >= SENSOR_CHECK_FROM_HOUR:
+            def _sensor_alert() -> dict | None:
+                if not events:
+                    return None       # 一条都没有：多半是刚部署，不吓人
+                last = _last_activity(events)
+                if last is None:
+                    return None
+                gap = now - last
+                if gap < timedelta(hours=SENSOR_STALE_HOURS):
+                    return None
+                return _alert("sensor_silent", "传感器", [
+                    f"手机事件已经 {_hm(gap.total_seconds() / 60)} 没更新"
+                    f"（最后一条 {last:%H:%M}）。",
+                    "要么手机没电，要么 Tasker 被系统杀了 —— 查一下。",
+                ])
+            take("sensor_silent", _sensor_alert)
+
     # 一次只发一条：同一轮堆三条会像系统坏了。其余的下一轮再看。
     return alerts[:1]
+
+
+# ── 提醒之后的观察（反馈回路）────────────────────────────────────────
+def outcome_row(alert: dict, window_min: int, now: datetime,
+                events: list[dict]) -> dict | None:
+    """一条已发出的提醒，在 +N 分钟时观察到的手机行为。
+
+    窗口没到就返回 None（**不提前记**）；提醒本身没有可解析的时间也返回
+    None（不猜）。窗口是左闭右闭：[发出, 发出+N 分钟]。
+    """
+    start = _dt(alert.get("ts"))
+    if start is None:
+        return None
+    end = start + timedelta(minutes=window_min)
+    if now < end:
+        return None
+
+    unlocks = switches = screen_off = activity = 0
+    for e in events:
+        if not isinstance(e, dict):
+            continue
+        t = _dt(e.get("ts_utc"))
+        if t is None or not (start <= t <= end):
+            continue
+        metric = e.get("metric")
+        if metric == "unlock":
+            unlocks += 1
+        elif metric == "app_switch":
+            switches += 1
+        if metric == "screen_off":
+            screen_off += 1
+        if metric in _ACTIVITY_METRICS or metric == "screen_off":
+            activity += 1
+
+    return {
+        "kind": "outcome",
+        "id": str(alert.get("id") or ""),
+        "rule": str(alert.get("rule") or ""),
+        "window_min": window_min,
+        "window_start": start.isoformat(timespec="seconds"),
+        "window_end": end.isoformat(timespec="seconds"),
+        "recorded_at": now.isoformat(timespec="seconds"),
+        "unlocks": unlocks,
+        "switches": switches,
+        "screen_off": screen_off,
+        "activity": activity,
+    }
+
+
+def pending_outcomes(log_rows: list[dict], now: datetime,
+                     events: list[dict]) -> list[dict]:
+    """从日志里找出「该观察但还没观察」的提醒 → 要追加的 outcome 行。
+
+    已经记过的 (id, window) 不重复记。日志坏了、id 缺了都跳过 ——
+    这是观测数据，宁可少一行，也不要在同一窗口上写两次。
+    """
+    done: set[tuple[str, int]] = set()
+    sent: list[dict] = []
+    for r in log_rows:
+        if not isinstance(r, dict):
+            continue
+        if r.get("kind") == "outcome":
+            try:
+                w = int(r.get("window_min"))
+            except (TypeError, ValueError):
+                continue
+            done.add((str(r.get("id") or ""), w))
+        elif r.get("kind") == "sent" and r.get("id"):
+            sent.append(r)
+
+    out: list[dict] = []
+    for s in sent:
+        for w in OUTCOME_WINDOWS:
+            if (str(s["id"]), w) in done:
+                continue
+            row = outcome_row(s, w, now, events)
+            if row:
+                out.append(row)
+    return out

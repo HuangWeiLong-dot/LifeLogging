@@ -441,6 +441,7 @@ sudo /opt/lifelogging/venv/bin/python \
 | `screen_heavy` | 手机亮屏 ≥ 6 小时 | 18:00 之后 |
 | `leisure_heavy` | 单个娱乐应用 ≥ 3 小时 | 18:00 之后 |
 | `long_desktop` | 电脑快照新鲜（≤30 分钟）且同一窗口连续 ≥ 3 小时 | 8:00–23:00 |
+| `sensor_silent` | 13:00 后，最近一次手机活动已过去 ≥ 13 小时 | 13:00–23:00 |
 
 ```
 ⚡ 反射弧 · 娱乐时长
@@ -459,6 +460,21 @@ WeChat 今天 3 小时 20 分（阈值 3 小时）。
 
 阈值都在 `reflex.py` 顶部（也可用 `REFLEX_*` 环境变量改）。整个功能用
 `FEISHU_REFLEX=0` 关掉。
+
+### 反馈回路（只记录，不评价）
+
+每次提醒写进 `/var/lib/lifelogging/reflex-log.jsonl`：
+
+```json
+{"kind":"sent","id":"screen_heavy-20261021T190000","rule":"screen_heavy","ts":"...","text":"⚡ ..."}
+{"kind":"outcome","id":"screen_heavy-20261021T190000","window_min":15,
+ "unlocks":0,"switches":2,"screen_off":1,"activity":3}
+{"kind":"outcome","id":"...","window_min":60, ...}
+```
+
+窗口是 +15 分钟和 +60 分钟，**到了才记**，同一个窗口不会记两次。
+它现在不做任何判断 —— 「15 分钟没解锁」可能是你听了，也可能是你把手机放下了。
+等攒够「提醒 → 行为」的配对，才谈得上「哪条提醒有用」。
 
 > ⚠️ 这是个**主动打扰**的通道，误报比漏报贵得多。改阈值时先问「这句话
 > 错发了会怎样」，而不是「漏发会怎样」。

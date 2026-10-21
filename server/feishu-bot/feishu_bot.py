@@ -145,6 +145,8 @@ REFLEX = os.environ.get("FEISHU_REFLEX", "1").lower() not in (
     "", "0", "false", "no", "off")
 REFLEX_EVERY_MIN = max(5, int(os.environ.get("FEISHU_REFLEX_EVERY_MIN", "10") or 10))
 REFLEX_STATE_PATH = STATE_DIR / "reflex-state.json"
+# 反馈回路：每次提醒 + 之后 +15/+60 分钟的行为，各一行。只记录，不评价。
+REFLEX_LOG_PATH = STATE_DIR / "reflex-log.jsonl"
 
 # 「别打扰」时段。**推送这一层也需要**，不能只靠生成器那边拦。
 #
@@ -1272,6 +1274,35 @@ def save_reflex_state(state: dict) -> None:
         print(f"WARN 反射弧状态写不进 {REFLEX_STATE_PATH}：{e}", file=sys.stderr)
 
 
+def load_reflex_log() -> list[dict]:
+    """读反馈日志。坏行跳过 —— 这是观测数据，不为一行坏数据把整套停掉。"""
+    try:
+        lines = REFLEX_LOG_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    out: list[dict] = []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            out.append(row)
+    return out
+
+
+def append_reflex_log(rows: list[dict]) -> None:
+    if not rows:
+        return
+    try:
+        REFLEX_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with REFLEX_LOG_PATH.open("a", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError as e:
+        print(f"WARN 反馈日志写不进 {REFLEX_LOG_PATH}：{e}", file=sys.stderr)
+
+
 def reflex_tick() -> None:
     """取一次当天数据，交给 reflex.evaluate；该说就说。"""
     if not OWNER_OPEN_ID:
@@ -1304,9 +1335,13 @@ def reflex_tick() -> None:
 
     try:
         today_events = live.relay_events(day, RELAY_BASE, RELAY_API_KEY)
+        events_ok = True
     except Exception as e:  # noqa: BLE001
         print(f"[reflex] 手机事件拿不到：{type(e).__name__}: {e}", file=sys.stderr)
         today_events = []
+        # ⚠️ 拉失败时**不补观察**：把「网络断了」记成「15 分钟没解锁」，
+        #    等于往反馈数据里写一批假零。宁可这次不记。
+        events_ok = False
 
     # 熬夜规则跨零点：01:00 时「今天」可能一条活动都没有，得看昨天那份。
     events = list(today_events)
@@ -1315,6 +1350,14 @@ def reflex_tick() -> None:
         events += live.relay_events(yday, RELAY_BASE, RELAY_API_KEY)
     except Exception:  # noqa: BLE001
         pass
+
+    # 反馈回路：之前发过的提醒，窗口到了就补一行「后来发生了什么」。
+    # ⚠️ 只记录。别在这里下结论 —— 15 分钟没解锁不等于「他听了」。
+    if events_ok:
+        try:
+            append_reflex_log(reflex.pending_outcomes(load_reflex_log(), now, events))
+        except Exception as e:  # noqa: BLE001
+            print(f"[reflex] 反馈日志出错：{type(e).__name__}: {e}", file=sys.stderr)
 
     phone = None
     if today_events:
@@ -1334,6 +1377,7 @@ def reflex_tick() -> None:
                              snap=snap, state=st)
 
     for a in alerts:
+        alert_id = f"{a['key']}-{now:%Y%m%dT%H%M%S}"
         try:
             send_text(OWNER_OPEN_ID, a["text"])
         except Exception as e:  # noqa: BLE001
@@ -1346,7 +1390,11 @@ def reflex_tick() -> None:
         st.setdefault("fired", {})[a["key"]] = now.isoformat(timespec="seconds")
         st["last_at"] = now.isoformat(timespec="seconds")
         save_reflex_state(st)
-        print(f"[reflex] {a['key']}")
+        append_reflex_log([{
+            "kind": "sent", "id": alert_id, "rule": a["key"],
+            "ts": now.isoformat(timespec="seconds"), "text": a["text"],
+        }])
+        print(f"[reflex] {a['key']} → {alert_id}")
 
 
 def reflex_loop() -> None:
