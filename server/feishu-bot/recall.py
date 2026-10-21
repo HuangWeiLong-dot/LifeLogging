@@ -246,6 +246,9 @@ _STOP = (
     "上个月", "那几天", "前阵子", "前段时间", "为什么", "什么", "时候",
     "上次", "以前", "之前", "过去", "几天", "今天", "昨天", "前天", "现在",
     "看看", "一下", "记得", "是不是", "有没有", "多久", "哪天",
+    # 「觉得 / 感觉」是意见动词，不是内容。留着它们的话，「觉得累」会
+    # 命中所有「我觉得…」的日记，真正写「很累」的那天反而排不上来。
+    "觉得", "感觉", "认为", "印象",
     "我", "你", "他", "她", "它", "的", "了", "是", "在", "有", "和", "与",
     "就", "都", "也", "还", "很", "太", "不", "没", "吗", "呢", "吧", "啊",
     "呀", "嘛", "这", "那", "哪", "谁", "么", "过", "给",
@@ -279,9 +282,9 @@ def _query_variants(text: str) -> tuple[str, str, str, list[str], list[str]]:
             ascii_terms.append(r)
             continue
         chars.extend(r)
-        if len(r) == 1:
-            bigrams.append(r)
-        else:
+        if len(r) >= 2:
+            # 单字不塞进 bigram：它只该由单字兜底那一档命中，
+            # 否则会被算两次分（bigram 2 分 + 单字 1 分）。
             bigrams.extend(r[i:i + 2] for i in range(len(r) - 1))
 
     def _dedup(xs: list[str]) -> list[str]:
@@ -303,13 +306,18 @@ def _query_variants(text: str) -> tuple[str, str, str, list[str], list[str]]:
 
 
 def _score(text: str, bigrams: list[str], chars: list[str]) -> int:
-    """重排分数：bigram 命中权重 2，单字命中权重 1。
+    """重排分数：bigram 命中权重 2，单字命中权重 1；频次封顶 3 次。
 
-    FTS 的 bm25 会把「同一个常见字出现很多次」排得很高；这里关心的是
-    **命中了几个不同的查询词**，而不是词频。
+    FTS 的 bm25 会把「同一个常见字出现很多次」排得很高。这里关心的是
+    **命中了几个不同的查询词**，同时让命中多次的多一点分（上限 3，
+    防止一篇反复啰嗦的文档把别的全压下去）。
     """
-    return (2 * sum(1 for b in bigrams if b in text)
-            + sum(1 for c in chars if c in text))
+    total = 0
+    for b in bigrams:
+        total += 2 * min(str(text).count(b), 3)
+    for c in chars:
+        total += min(str(text).count(c), 3)
+    return total
 
 
 def search(query: str, k: int = 5, *, state_dir: Path | None = None,
