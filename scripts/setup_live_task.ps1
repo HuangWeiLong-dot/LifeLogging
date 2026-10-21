@@ -4,6 +4,10 @@
 #   轻采集（电脑活动 / 手机使用）→ 发布今天到目前为止的聚合。
 # 位置 / 手表 / AI 账单由 run_live.ps1 自己按 $HeavyMinutes 节流。
 #
+# ⚠️ Windows 上如果已经装了 windows/live-daemon 的 LifeLoggingLive.exe，
+#    不要再跑这个脚本 —— 会重新启用一个每 2 分钟闪 PowerShell 的 Live 任务。
+#    那个 WinExe 守护程序已经替代它（见 windows/live-daemon/README.md）。
+#
 # 和 setup_scheduler.ps1 分开，避免动到已有的 Daily / Refresh / Desktop 三个任务。
 # 不需要管理员（和 setup_scheduler.ps1 一样，当前用户 + RunLevel Limited 即可）。
 #

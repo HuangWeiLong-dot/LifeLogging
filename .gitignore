@@ -56,3 +56,6 @@ FxLifeSheet/
 # 想连它一起提交：删掉下面两行，然后 git add .agents skills-lock.json
 .agents/
 skills-lock.json
+
+# 编译出来的无窗口守护程序（源码在 windows/live-daemon/）
+LifeLoggingLive.exe
