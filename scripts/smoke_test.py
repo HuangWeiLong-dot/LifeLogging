@@ -2399,6 +2399,15 @@ def t_recall():
         hits = rc.search("跑步", state_dir=state, db=db)
         assert hits and hits[0]["day"] == "2026-10-20", hits
 
+        # ⚠️ 只追加 phone-*.jsonl（journal 不动）也必须触发重建 ——
+        #    只盯 journal 的指纹会让新回答永远进不了索引，且不报错。
+        with (state / "phone-2026-10-20.jsonl").open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"domain": "manual", "metric": "note",
+                                "value_text": "晚上读了一本讲火箭的书"},
+                               ensure_ascii=False) + "\n")
+        hits = rc.search("火箭", state_dir=state, db=db)
+        assert hits and hits[0]["day"] == "2026-10-20", hits
+
 
 check("recall: 中文检索 / AND→OR / 新日记自动进索引", t_recall)
 

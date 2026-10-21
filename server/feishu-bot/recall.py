@@ -59,14 +59,20 @@ def _pretty(s: str) -> str:
 
 
 def _signature(state_dir: Path) -> str:
-    """源文件的「指纹」：文件名 + mtime + 大小。变了才重建索引。"""
+    """源文件的「指纹」：文件名 + mtime + 大小。变了才重建索引。
+
+    ⚠️ 必须包含**所有**被索引的来源。只盯 journal-output 的话，新写进
+       phone-*.jsonl 的中文回答永远进不了索引 —— 而且不会报错，只会
+       表现为「日记搜得到、回答搜不到」。2026-10-21 实测踩到。
+    """
     h = hashlib.sha1()
-    for p in sorted(state_dir.glob("journal-output-*.json")):
-        try:
-            st = p.stat()
-        except OSError:
-            continue
-        h.update(f"{p.name}:{st.st_mtime_ns}:{st.st_size};".encode())
+    for pattern in ("journal-output-*.json", "phone-*.jsonl", "questions-*.json"):
+        for p in sorted(state_dir.glob(pattern)):
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            h.update(f"{p.name}:{st.st_mtime_ns}:{st.st_size};".encode())
     return h.hexdigest()
 
 
