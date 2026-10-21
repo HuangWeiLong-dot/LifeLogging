@@ -4,9 +4,10 @@
 `powershell.exe ... run_live.ps1`。即使加了 `-WindowStyle Hidden`，任务启动时仍会
 闪一个控制台窗口；在无边框全屏游戏里，这个窗口会把鼠标焦点抢走。
 
-这个 WinExe（`/target:winexe`，没有控制台）常驻在用户会话里，每 2 分钟用
-`CreateNoWindow + Hidden` 的隐藏子进程调用**同一个** `scripts/run_live.ps1`。
-脚本逻辑一行没改，变的只是“谁来拉起它、有没有窗口”。
+这个 WinExe（`/target:winexe`，没有控制台）常驻在用户会话里，带一个托盘图标
+和一个简单的控制面板，每 2 分钟用 `CreateNoWindow + Hidden` 的隐藏子进程调用
+**同一个** `scripts/run_live.ps1`。脚本逻辑一行没改，变的只是“谁来拉起它、
+有没有窗口”。
 
 ## 安装
 
@@ -19,13 +20,13 @@ powershell -ExecutionPolicy Bypass -File windows\live-daemon\install.ps1
 
 `install.ps1` 会：
 
-1. 编译 `LifeLoggingLive.exe`（Windows 自带 .NET Framework 的 `csc`，不装 SDK）；
+1. 停掉旧实例并**重新编译** `LifeLoggingLive.exe`（Windows 自带 .NET Framework 的 `csc`，不装 SDK）；
 2. 在 `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\` 放
    `LifeLogging Live.lnk` → **登录后自动启动**（无窗口）；
 3. **停用** `LifeLogging-Live` 计划任务（避免两份同时跑，也去掉 2 分钟一次的闪窗）；
 4. 把 `LifeLogging-Desktop` 任务改成 `pythonw.exe` 跑 `push_desktop.py`
    （另一个每 10 分钟的闪窗源）；
-5. 立刻启动守护程序（已在跑时 Mutex 会让第二个实例退出）。
+5. 立刻启动新版并**显示一次控制面板**；之后登录启动走 `-silent`，只在托盘。
 
 不需要管理员。
 
@@ -34,6 +35,18 @@ powershell -ExecutionPolicy Bypass -File windows\live-daemon\install.ps1
 脚本依赖当前用户的桌面会话：ActivityWatch 的窗口切片、`push_desktop.py` 的
 本机快照都在登录会话里。做成 Windows 服务（Session 0）会看不到这些数据。
 登录后启动、锁屏时继续跑，是正确的形态。
+
+## UI
+
+- 双击托盘图标（或再次双击 exe）打开控制面板；单实例会把已有窗口叫出来。
+- 面板：LIVE / RUNNING NOW / PAUSED、上次运行时间与退出码、下次运行倒计时、
+  RUN NOW / PAUSE / OPEN LOGS / OPEN SITE。
+- 关闭窗口 = 收进托盘；托盘菜单 EXIT 才真正退出。
+- 登录自启带 `-silent`，不会弹窗；托盘图标在系统托盘溢出区。
+- 应用图标是 `app.ico`（黑底圆角方块 + 白色脉冲，16–256 多尺寸）：
+  `make-icon.py` 生成，`build.ps1` 用 `/win32icon` 嵌进 exe；窗口标题栏、任务栏和
+  托盘都读这个 exe 图标。改颜色/形状后重跑 `python windows/live-daemon/make-icon.py`，
+  再 `install.ps1`。
 
 ## 运行方式
 

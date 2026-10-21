@@ -59,3 +59,6 @@ skills-lock.json
 
 # 编译出来的无窗口守护程序（源码在 windows/live-daemon/）
 LifeLoggingLive.exe
+
+# make-icon.py 的肉眼预览（图标本体 app.ico 进仓库）
+windows/live-daemon/_preview-*.png

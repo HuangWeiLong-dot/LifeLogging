@@ -22,13 +22,21 @@ $Root = Split-Path -Parent (Split-Path -Parent $here)
 $Root = (Resolve-Path $Root).Path
 $exe = Join-Path $Root "LifeLoggingLive.exe"
 
-if (-not (Test-Path $exe)) {
-    Write-Host "-> building the exe first"
-    & (Join-Path $here "build.ps1") -Root $Root
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $exe)) {
-        Write-Host "FAIL build failed" -ForegroundColor Red
-        exit 1
+# 更新时先停掉旧实例：exe 正在运行时 csc 写不进去。
+# （同时也会让旧版“无 UI 守护程序”让位给新版控制面板。）
+$running = Get-Process -Name "LifeLoggingLive" -ErrorAction SilentlyContinue
+if ($running) {
+    foreach ($p in $running) {
+        Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
     }
+    Start-Sleep -Milliseconds 700
+}
+
+Write-Host "-> building the exe"
+& (Join-Path $here "build.ps1") -Root $Root
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $exe)) {
+    Write-Host "FAIL build failed" -ForegroundColor Red
+    exit 1
 }
 
 # 1) 启动文件夹快捷方式
@@ -37,7 +45,7 @@ $lnkPath = Join-Path $startup "LifeLogging Live.lnk"
 $ws = New-Object -ComObject WScript.Shell
 $lnk = $ws.CreateShortcut($lnkPath)
 $lnk.TargetPath = $exe
-$lnk.Arguments = "`"$Root`""
+$lnk.Arguments = "`"$Root`" -silent"
 $lnk.WorkingDirectory = $Root
 $lnk.WindowStyle = 7
 $lnk.Description = "LifeLogging live pipeline (hidden)"
@@ -69,15 +77,12 @@ if ($desk -and (Test-Path $pyw)) {
     Write-Host "WARN venv pythonw.exe not found; Desktop task left unchanged" -ForegroundColor Yellow
 }
 
-# 4) 立即启动（已在跑的话 Mutex 会让第二个实例自己退出）
+# 4) 立即启动。更新时先停掉旧实例（老版没有 UI，会占着 Mutex）：
+#    停掉 → 启动新版 → 这次带面板启动，让你立刻看到 UI。
+#    登录时启动的是 startup 快捷方式，它带 -silent，只在托盘。
 if (-not $NoStart) {
-    $running = Get-Process -Name "LifeLoggingLive" -ErrorAction SilentlyContinue
-    if ($running) {
-        Write-Host "     daemon already running (pid $($running[0].Id))"
-    } else {
-        Start-Process -FilePath $exe -ArgumentList "`"$Root`"" -WorkingDirectory $Root -WindowStyle Hidden
-        Write-Host "OK   daemon started (hidden)"
-    }
+    Start-Process -FilePath $exe -ArgumentList "`"$Root`"" -WorkingDirectory $Root
+    Write-Host "OK   LifeLoggingLive started (panel shown once; login start is silent)"
 }
 
 Write-Host ""

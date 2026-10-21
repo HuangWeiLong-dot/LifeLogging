@@ -27,11 +27,24 @@ if (-not (Test-Path $csc)) {
 }
 
 $source = Join-Path $here "Program.cs"
+$icon = Join-Path $here "app.ico"
 $out = Join-Path $Root "LifeLoggingLive.exe"
+
+$cscArgs = @(
+    "/nologo", "/target:winexe", "/optimize+",
+    "/r:System.Windows.Forms.dll", "/r:System.Drawing.dll",
+    "/out:$out"
+)
+if (Test-Path $icon) {
+    $cscArgs += "/win32icon:$icon"
+} else {
+    Write-Host "WARN app.ico not found; building without a custom icon" -ForegroundColor Yellow
+}
+$cscArgs += $source
 
 Write-Host "-> csc: $csc"
 Write-Host "-> out: $out"
-& $csc /nologo /target:winexe /optimize+ "/out:$out" $source
+& $csc @cscArgs
 if ($LASTEXITCODE -ne 0) {
     Write-Host "FAIL compile failed" -ForegroundColor Red
     exit 1
