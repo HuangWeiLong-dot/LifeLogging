@@ -639,6 +639,12 @@ PHONE_APPS = {
     # 国内常用
     "com.tencent.mm": "WeChat",
     "com.tencent.mobileqq": "QQ",
+    "com.tencent.androidqqmail": "QQ Mail",
+    "com.miui.home": "Home",
+    "com.android.chrome": "Chrome",
+    "com.google.android.youtube": "YouTube",
+    "com.google.android.gm": "Gmail",
+    "com.microsoft.office.outlook": "Outlook",
     "com.tencent.wework": "WeCom",
     "com.tencent.mtt": "QQ Browser",
     "com.tencent.weread": "WeRead",
