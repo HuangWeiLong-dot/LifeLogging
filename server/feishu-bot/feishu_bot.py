@@ -406,6 +406,47 @@ def relay_note(text: str) -> dict:
     return r.json()
 
 
+# 「这句话我是要记下来，不是要问你」——带上前缀就完全不进查数据那条路。
+#
+# ⚠️ 存在的理由：一句话是在「问数据」还是在「记一笔」，只有写的人知道。
+#    live.answer_query 靠关键词 + 疑问语气猜，猜得再准也有猜错的时候
+#    （「这个电脑配置怎么样」是问句、又命中「电脑」，但它不是在问今天用了
+#    多久电脑）。前缀是这个猜测的逃生口，同时也是「问了问题却只被记下来」
+#    时的补救。
+NOTE_PREFIXES = ("记：", "记:", "记一笔：", "记一笔:", "笔记：", "笔记:")
+
+
+def split_note_prefix(text: str) -> str | None:
+    """带「记：」前缀就返回去掉前缀的正文；没带返回 None。
+
+    前缀后面是空的时候返回 ""（调用方提示「记什么」）—— 不能用 None，
+    那样和「没带前缀」就分不开了。
+    """
+    for p in NOTE_PREFIXES:
+        if text.startswith(p):
+            return text[len(p):].strip()
+    return None
+
+
+def save_note(open_id: str, text: str) -> None:
+    """把一句话存成笔记并回执。
+
+    ⚠️ 失败必须说出来。静默失败等于把用户亲手写的东西丢了，而且他以为
+       已经在日记里了 —— 那比一句报错糟得多。
+    """
+    try:
+        relay_note(text)
+    except Exception as e:  # noqa: BLE001
+        print(f"ERROR 记笔记失败：{type(e).__name__}: {e}", file=sys.stderr)
+        send_text(open_id, f"没存进去：{e}")
+        return
+    # 记下原文（截断）：排查「我说的话它怎么没存/怎么当成问句了」时，
+    # 日志里得有那句话本身，光有「记下了」什么都查不出来。
+    print(f"[note] {text[:80]!r}")
+    send_text(open_id, "记下了。\n"
+                       "（这条会进今天的日记。想让我出题就发「?」）")
+
+
 def pending_filtered(state: dict) -> list[dict]:
     """中继说还没答的题，减去**今天手动跳过**的那些。
 
@@ -880,6 +921,8 @@ def handle_text(open_id: str, text: str) -> None:
                   "【记一笔】\n"
                   "  直接发一句话 → 存进今天的记录，会进日记。\n"
                   "  例：「今天见了老王，聊了项目」\n"
+                  "  带「记：」前缀的一定当笔记存（句子长得像问句时用它）；\n"
+                  "  除此之外，带问号/疑问词的话会先被当成「问我今天」。\n"
                   "\n"
                   "【要我出题】\n"
                   "  回「?」→ 今天还没答的题\n"
@@ -943,6 +986,22 @@ def handle_text(open_id: str, text: str) -> None:
         advance(open_id)
         return
 
+    # ── 明确要记一笔 ──
+    # 放在所有命令和查数据之前：带了前缀就是笔记，哪怕它长得像问句、
+    # 哪怕正有一道题在等答案（笔记不该被题截胡，题也不会丢 —— 它还在
+    # 中继的待答列表里）。
+    #
+    # ⚠️ 这里**不**清 awaiting：如果是昨天的实时题，下一条消息会走下面
+    #    那段 expire 逻辑把它清掉。在这里清就得先拉一次 relay_pending，
+    #    而那会让「没挂题时发一条笔记」也去碰网络 —— 不值。
+    forced_note = split_note_prefix(stripped)
+    if forced_note is not None:
+        if not forced_note:
+            send_text(open_id, "记什么？在「记：」后面写内容。")
+            return
+        save_note(open_id, forced_note)
+        return
+
     if not awaiting:
         # 没有在等答案。先看这是不是一个「问我今天」的问题；不是的话，
         # 就当「给我题」——「随便一句都能出题」这个手感要保住。
@@ -986,14 +1045,11 @@ def handle_text(open_id: str, text: str) -> None:
         #    代价：一句没命中关键词的问句（「我今天咋这么累」）不会得到回答，
         #    而是被记下来。但它同时也进了当天的日记资料 —— 所以不是「丢了」，
         #    而是「记下来了」。想明确要题就发「?」。
-        try:
-            relay_note(stripped)
-        except Exception as e:  # noqa: BLE001
-            print(f"ERROR 记笔记失败：{type(e).__name__}: {e}", file=sys.stderr)
-            send_text(open_id, f"没存进去：{e}")
-            return
-        send_text(open_id, "记下了。\n"
-                           "（这条会进今天的日记。想让我出题就发「?」）")
+        #
+        # ⚠️ 反过来的保证在 live.answer_query 里：**不像在问的话永远到不了
+        #    这里之上那条分支**。关键词里有「电脑」「网页」「应用」这种日常
+        #    词，只靠它们判「查数据」会把随手记吃掉。
+        save_note(open_id, stripped)
         return
 
     try:

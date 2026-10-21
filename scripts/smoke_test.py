@@ -2177,10 +2177,20 @@ def t_live_question_expiry():
     state.clear()
     state["awaiting"] = live_old["id"]
     fb.relay_pending = lambda: [live_old]
-    fb.handle_text("ou_x", "记：今天见了老王")
+    fb.handle_text("ou_x", "今天见了老王")
     assert calls["answer"] == [], f"被当成答案了：{calls['answer']}"
-    assert calls["note"] == ["记：今天见了老王"], calls["note"]
+    assert calls["note"] == ["今天见了老王"], calls["note"]
     assert state.get("awaiting") is None, "旧的 awaiting 该被清掉"
+
+    # ①b 「记：」前缀同样不该被当成答案，而且前缀本身不进笔记正文
+    #     （正挂着一道题时也一样 —— 笔记不该被题截胡）
+    state.clear()
+    state["awaiting"] = live_old["id"]
+    calls["note"].clear()
+    calls["answer"].clear()
+    fb.handle_text("ou_x", "记：今天见了老王")
+    assert calls["answer"] == [], f"带前缀的笔记被当成答案了：{calls['answer']}"
+    assert calls["note"] == ["今天见了老王"], calls["note"]
 
     # ② 问责批不受影响 —— 它本来就是问昨天，第二天答是正常的
     calls["note"].clear()
@@ -2728,6 +2738,18 @@ def t_feishu_live_routing():
     got = ask("今天去哪了，手机用了多久")
     assert "Dawarich 挂了" in got and "⟨手机⟩" in got, got
 
+    # ── 随手记不能被关键词吃掉 ──
+    # 「电脑 / 网页 / 窗口 / 应用」都是日常名词。只靠关键词判断的话，
+    # 一句随手记会被当成查数据：用户收到一整份电脑报表，而他写的那句
+    # **根本没存下来**。丢的是他亲手写的东西 —— 所以不像在问的一律当笔记。
+    for note in ("今天用电脑画了张图", "这个网页不错，收藏了",
+                 "把应用都整理了一下", "在窗口里调了半天参数",
+                 "电脑上那个 bug 还没修",
+                 "今天几乎没开电脑",     # 「几(?!乎)」：「几乎」不是问句
+                 "哪怕电脑卡也不换"):    # 「哪(?!怕)」：「哪怕」不是问句
+        assert ask(note) is None, f"{note!r} 是随手记，不该被当成查询"
+        assert calls == [], f"{note!r} 不该去拉任何数据，实际拉了 {calls}"
+
     # ── 认不出来时**不能**默默去出题 ──
     assert ask("这是啥？") == lv.UNKNOWN_ANSWER, "带问号又没命中的，要明说能答什么"
     assert calls == []
@@ -2746,6 +2768,38 @@ def t_feishu_live_routing():
 
 check("feishu: 路由从窄到宽 —— 日记/手表说答不了，电脑/位置/手机各拉各的",
       t_feishu_live_routing)
+
+
+def t_feishu_note_prefix():
+    """「记：」前缀必须无条件当笔记 —— 它是猜错时的逃生口。
+
+    live.answer_query 靠关键词 + 疑问语气猜「这句话是在问数据还是在记一笔」，
+    而「这个电脑配置怎么样」既是问句、又命中「电脑」，但它明明只是一条想法。
+    没有前缀的话这种话没法表达成笔记：查数据那条路会截胡，而笔记那条路
+    只收「没被认出来」的话。
+    """
+    import importlib.util
+
+    path = (Path(__file__).resolve().parent.parent
+            / "server" / "feishu-bot" / "feishu_bot.py")
+    spec = importlib.util.spec_from_file_location("feishu_bot_np", path)
+    fb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fb)
+
+    assert fb.split_note_prefix("记：今天用电脑画了张图") == "今天用电脑画了张图"
+    assert fb.split_note_prefix("记: 在窗口里调了半天") == "在窗口里调了半天"
+    assert fb.split_note_prefix("记一笔：这个网页不错") == "这个网页不错"
+    assert fb.split_note_prefix("笔记本：这个网页不错") is None, \
+        "只有明确的前缀才算，别把「笔记本：」也吃掉"
+    # 前缀后面空着 → ""，必须和「没带前缀」的 None 分开
+    assert fb.split_note_prefix("记：") == ""
+    assert fb.split_note_prefix("记：   ") == ""
+    for t in ("今天见了老王", "记下了什么吗", ""):
+        assert fb.split_note_prefix(t) is None, f"{t!r} 不该被当成带前缀"
+
+
+check("feishu: 「记：」前缀无条件当笔记（猜错时的逃生口）",
+      t_feishu_note_prefix)
 
 
 # ── 7e. Gadgetbridge 表选择 ────────────────────────────────────────
