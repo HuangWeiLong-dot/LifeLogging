@@ -253,31 +253,63 @@ _STOP = (
 _RUN_RE = re.compile(r"[一-鿿]+|[A-Za-z0-9]+")
 
 
-def _query_variants(text: str) -> tuple[str, str]:
-    """把一句自然语言问句变成 (精确查询, 宽松查询)。
+def _query_variants(text: str) -> tuple[str, str, str, list[str], list[str]]:
+    """把一句自然语言问句变成 (精确查询, 词组查询, 单字兜底, bigrams, chars)。
 
     ⚠️ 不能把整句直接塞进 FTS5：中文逐字切开后，「我上次觉得累是什么时候」
        会变成一个要求 12 个字连续相邻的短语 —— 几乎永远命中 0。
-       所以先删功能词，再拿剩下的词做 AND；AND 空了就退到 OR。
+       所以先删功能词，再拿剩下的词做 AND；AND 空了退到词组（含 bigram），
+       再空才退到单字。
+
+    ⚠️ 单字只做**兜底**。「外包项目」里的「项」「目」到处都有，直接 OR
+       单字会把「只含项目、和外包无关」的日记排到前面 —— 服务器上实测过。
     """
     clean = text or ""
     for w in sorted(_STOP, key=len, reverse=True):
         clean = clean.replace(w, " ")
     runs = [r for r in _RUN_RE.findall(clean) if r.strip()]
     if not runs:
-        return "", ""
+        return "", "", "", [], []
+
+    chars: list[str] = []
+    bigrams: list[str] = []
+    ascii_terms: list[str] = []
+    for r in runs:
+        if r.isascii():
+            ascii_terms.append(r)
+            continue
+        chars.extend(r)
+        if len(r) == 1:
+            bigrams.append(r)
+        else:
+            bigrams.extend(r[i:i + 2] for i in range(len(r) - 1))
+
+    def _dedup(xs: list[str]) -> list[str]:
+        seen: list[str] = []
+        for x in xs:
+            if x not in seen:
+                seen.append(x)
+        return seen
+
+    chars = _dedup(chars)
+    bigrams = _dedup(bigrams)
 
     and_q = to_fts_query(" ".join(runs), joiner="AND")
-    # 宽松查询：整词 + 单字。单字很吵，但 OR + bm25 只把它们当弱证据；
-    # 对「觉得累」这种和日记里「很累」措辞对不上的情况，单字是唯一能命中的路。
-    chars = [ch for r in runs if not r.isascii() for ch in r]
-    ascii_terms = [r for r in runs if r.isascii()]
-    terms: list[str] = []
-    for t in runs + chars + ascii_terms:
-        if t not in terms:
-            terms.append(t)
-    or_q = to_fts_query(" ".join(terms[:12]), joiner="OR")
-    return and_q, or_q
+    word_terms = _dedup(runs + bigrams + ascii_terms)
+    word_q = to_fts_query(" ".join(word_terms[:12]), joiner="OR")
+    char_terms = _dedup(chars + ascii_terms)
+    char_q = to_fts_query(" ".join(char_terms[:12]), joiner="OR")
+    return and_q, word_q, char_q, bigrams, chars
+
+
+def _score(text: str, bigrams: list[str], chars: list[str]) -> int:
+    """重排分数：bigram 命中权重 2，单字命中权重 1。
+
+    FTS 的 bm25 会把「同一个常见字出现很多次」排得很高；这里关心的是
+    **命中了几个不同的查询词**，而不是词频。
+    """
+    return (2 * sum(1 for b in bigrams if b in text)
+            + sum(1 for c in chars if c in text))
 
 
 def search(query: str, k: int = 5, *, state_dir: Path | None = None,
@@ -294,30 +326,34 @@ def search(query: str, k: int = 5, *, state_dir: Path | None = None,
         return []
     try:
         _ensure_schema(conn)
+        and_q, word_q, char_q, bigrams, chars = _query_variants(query)
         rows: list = []
-        # 先 AND 后 OR，和 memory.py 同一条策略：AND 精确但容易 0，
-        # OR 宽松但会把只共享一个常见字的文档也拉进来。
-        for fts_q in _query_variants(query):
+        # 三档：整词 AND → 整词+bigram OR → 单字 OR（兜底）。
+        # 和 memory.py 一样先精确后宽松，但这里多一层重排：FTS 的 bm25
+        # 只看词频，会把「项目」出现很多次、却和「外包」无关的日记排前面。
+        for fts_q in (and_q, word_q, char_q):
             if not fts_q:
                 continue
             try:
                 rows = conn.execute(
-                    """SELECT d.doc_key, d.day, d.kind,
+                    """SELECT d.doc_key, d.day, d.kind, d.text,
                               snippet(memory_fts, 3, '〔', '〕', '…', ?) AS excerpt
                        FROM memory_fts f
                        JOIN memory_docs d ON d.doc_key = f.doc_key
                        WHERE memory_fts MATCH ?
                        ORDER BY bm25(memory_fts)
                        LIMIT ?""",
-                    (EXCERPT_CHARS // 4, fts_q, max(1, k)),
+                    (EXCERPT_CHARS // 4, fts_q, max(k, 20)),
                 ).fetchall()
             except sqlite3.OperationalError as e:
                 print(f"WARN recall 检索失败：{e}", file=sys.stderr)
                 return []
             if rows:
                 break
+        # 稳定排序：分数相同的保持 bm25 顺序。
+        rows = sorted(rows, key=lambda r: -_score(str(r[3] or ""), bigrams, chars))
         return [{"doc_key": r[0], "day": r[1], "kind": r[2],
-                 "excerpt": _pretty(r[3])} for r in rows]
+                 "excerpt": _pretty(r[4])} for r in rows[:max(1, k)]]
     finally:
         conn.close()
 
