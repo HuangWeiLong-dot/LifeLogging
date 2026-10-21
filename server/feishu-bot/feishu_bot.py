@@ -67,7 +67,7 @@ import queue
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -96,6 +96,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # 影响机器人启动。
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "scripts"))
 import live  # noqa: E402
+import reflex  # noqa: E402
 
 APP_ID = os.environ.get("FEISHU_APP_ID", "")
 APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
@@ -137,6 +138,13 @@ LIVE_PUSH = os.environ.get("FEISHU_LIVE_PUSH", "1").lower() not in (
 # 多久去中继看一眼有没有新的实时题。生成器是 30 分钟一次，这里比它密，
 # 所以题生成后最多几分钟就到手机上。
 LIVE_POLL_MIN = max(1, int(os.environ.get("FEISHU_LIVE_POLL_MIN", "5") or 5))
+
+# 反射弧（reflex.py）：没人问的时候，它自己开口提醒一句。
+# 规则是确定性的；阈值在 reflex.py 顶部。设 FEISHU_REFLEX=0 就完全关掉。
+REFLEX = os.environ.get("FEISHU_REFLEX", "1").lower() not in (
+    "", "0", "false", "no", "off")
+REFLEX_EVERY_MIN = max(5, int(os.environ.get("FEISHU_REFLEX_EVERY_MIN", "10") or 10))
+REFLEX_STATE_PATH = STATE_DIR / "reflex-state.json"
 
 # 「别打扰」时段。**推送这一层也需要**，不能只靠生成器那边拦。
 #
@@ -941,6 +949,13 @@ def handle_text(open_id: str, text: str) -> None:
                   "  发「/收尾」→ 立刻开始问收尾题，答完我给你一份今日复盘\n"
                   "  （23:00 也会自动问一次，如果你还没发过）\n"
                   "  发「/复盘」→ 重新生成一次今日复盘（总结失败时用它补）\n"
+                  "  收尾的常规题里，心情/体力回 1–5 分（后面可以补一句），\n"
+                  "  其余几维仍是自由文本。\n"
+                  "\n"
+                  "【它会主动说】\n"
+                  "  熬夜 / 手机亮屏超 6 小时 / 娱乐应用超 3 小时 /\n"
+                  "  电脑前连续 3 小时 → 发一句「⚡ 反射弧」。\n"
+                  "  每条每天最多一次；正有题在等答案时不发（免得被当成答案）。\n"
                   "\n"
                   "⚠️ 电脑数据来自笔记本每 10 分钟推的快照，答案里会写明\n"
                   "   「最后上报是几点」—— 是几小时前的就直说，别当成此刻。\n"
@@ -1238,6 +1253,119 @@ def live_push_loop() -> None:
         time.sleep(LIVE_POLL_MIN * 60)
 
 
+# ── 反射弧 ──────────────────────────────────────────────────────────
+def load_reflex_state() -> dict:
+    try:
+        raw = json.loads(REFLEX_STATE_PATH.read_text(encoding="utf-8"))
+        return raw if isinstance(raw, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_reflex_state(state: dict) -> None:
+    try:
+        REFLEX_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = REFLEX_STATE_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, REFLEX_STATE_PATH)
+    except OSError as e:
+        print(f"WARN 反射弧状态写不进 {REFLEX_STATE_PATH}：{e}", file=sys.stderr)
+
+
+def reflex_tick() -> None:
+    """取一次当天数据，交给 reflex.evaluate；该说就说。"""
+    if not OWNER_OPEN_ID:
+        return
+
+    now = datetime.now(TZ)
+    day = now.date().isoformat()
+
+    # ⚠️ 正有一道题**刚发出去、还没答**时不要插话：飞书里那条提醒会被当成
+    #    答案存下去，而他刚打了一半的话就没了。
+    #
+    #    判据是「这题什么时候发的」而不是「awaiting 是不是空的」。awaiting
+    #    只会被下一条用户消息清掉 —— 昨晚 23:00 那道没答的题会一直挂着，
+    #    拿它挡的话，凌晨的熬夜提醒永远发不出去。
+    bot_state = load_state()
+    awaiting = str(bot_state.get("awaiting") or "")
+    if awaiting:
+        sent_map = bot_state.get("sent")
+        sent_at = sent_map.get(awaiting) if isinstance(sent_map, dict) else None
+        try:
+            sent_dt = datetime.fromisoformat(str(sent_at))
+        except (TypeError, ValueError):
+            sent_dt = None
+        # ⚠️ 老状态里可能存的是**不带时区**的 ISO；拿它和 now 相减会抛
+        #    TypeError，而这个循环里抛一次只是这一轮没跑 —— 但别让它变成
+        #    每 10 分钟一次的报错噪音。
+        if (sent_dt is not None and sent_dt.tzinfo is not None
+                and now - sent_dt < timedelta(hours=1)):
+            return
+
+    try:
+        today_events = live.relay_events(day, RELAY_BASE, RELAY_API_KEY)
+    except Exception as e:  # noqa: BLE001
+        print(f"[reflex] 手机事件拿不到：{type(e).__name__}: {e}", file=sys.stderr)
+        today_events = []
+
+    # 熬夜规则跨零点：01:00 时「今天」可能一条活动都没有，得看昨天那份。
+    events = list(today_events)
+    try:
+        yday = (now.date() - timedelta(days=1)).isoformat()
+        events += live.relay_events(yday, RELAY_BASE, RELAY_API_KEY)
+    except Exception:  # noqa: BLE001
+        pass
+
+    phone = None
+    if today_events:
+        try:
+            phone = live.deps()["summarize_phone"](today_events)
+        except Exception as e:  # noqa: BLE001
+            # Dawarich/归一化模块加载失败不该让电脑那条规则也哑掉。
+            print(f"[reflex] 手机汇总拿不到：{type(e).__name__}: {e}", file=sys.stderr)
+
+    try:
+        snap = live.relay_desktop(RELAY_BASE, RELAY_API_KEY)
+    except Exception:  # noqa: BLE001
+        snap = None
+
+    st = load_reflex_state()
+    alerts = reflex.evaluate(now, day, events=events, phone=phone,
+                             snap=snap, state=st)
+
+    for a in alerts:
+        try:
+            send_text(OWNER_OPEN_ID, a["text"])
+        except Exception as e:  # noqa: BLE001
+            # 发失败**不记已发** —— 下一轮还会再试。
+            print(f"[reflex] 发送失败（{a['key']}）：{type(e).__name__}: {e}",
+                  file=sys.stderr)
+            continue
+        if st.get("day") != day:
+            st = {"day": day, "fired": {}}
+        st.setdefault("fired", {})[a["key"]] = now.isoformat(timespec="seconds")
+        st["last_at"] = now.isoformat(timespec="seconds")
+        save_reflex_state(st)
+        print(f"[reflex] {a['key']}")
+
+
+def reflex_loop() -> None:
+    if not REFLEX:
+        print("FEISHU_REFLEX=0，反射弧关着。")
+        return
+    if not OWNER_OPEN_ID:
+        print("WARN: 没配 FEISHU_OWNER_OPEN_ID，反射弧发不出去。", file=sys.stderr)
+        return
+    print(f"→ 反射弧：每 {REFLEX_EVERY_MIN} 分钟看一次")
+    while True:
+        try:
+            reflex_tick()
+        except Exception as e:  # noqa: BLE001
+            # 这个线程绝不能死 —— 死了 systemd 看不出来（进程还在）。
+            print(f"WARN: 反射弧循环出错：{type(e).__name__}: {e}", file=sys.stderr)
+        time.sleep(REFLEX_EVERY_MIN * 60)
+
+
 def push_loop() -> None:
     """每天 PUSH_AT 主动推一次。这就是选飞书而不是 QQ 的全部理由。"""
     if not PUSH_AT:
@@ -1339,6 +1467,8 @@ def run() -> None:
     threading.Thread(target=push_loop, daemon=True).start()
     # 实时题单独一个循环：它要按分钟级去看中继，而不是等每天 08:30 那一次。
     threading.Thread(target=live_push_loop, daemon=True).start()
+    # 反射弧：没人问的时候主动说一句（熬夜 / 屏幕时间 / 久坐）。
+    threading.Thread(target=reflex_loop, daemon=True).start()
     # 提前把 GeoNames 城市表准备好。第一次要下载 30–40 MB，那一下绝不能在
     # 处理用户消息的线程里发生 —— 否则机器人会显得「卡死」很久。
     threading.Thread(target=live.warm_geocoding, daemon=True).start()

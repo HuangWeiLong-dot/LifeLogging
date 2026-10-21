@@ -1152,6 +1152,13 @@ def t_qa_join():
                 {"id": "2026-10-18-cccc3333", "kind": "summary",
                  "format": "text", "text": "今天最值得记住的事？",
                  "evidence": "只有你知道", "ref": ""},
+                # 自评打分题：dim/routine 必须透到 /qa，否则 collect_labels
+                # 只能去猜题面 —— 猜错一条就是脏标签。
+                {"id": "2026-10-18-dddd4444", "kind": "summary",
+                 "routine": True, "dim": "心情", "format": "choice",
+                 "text": "今天整体心情打几分？",
+                 "evidence": "情绪数据看不到。", "ref": "",
+                 "options": [{"label": "1 很差"}, {"label": "4 不错"}]},
             ],
         }, ensure_ascii=False), encoding="utf-8")
         rows = [
@@ -1167,6 +1174,9 @@ def t_qa_join():
             {"ts_utc": "2026-10-18T15:00:00Z", "domain": "question",
              "metric": "answer", "source": "relay",
              "value_text": "2026-10-18-cccc3333|见到朋友|很好"},
+            {"ts_utc": "2026-10-18T15:02:00Z", "domain": "question",
+             "metric": "answer", "source": "relay",
+             "value_text": "2026-10-18-dddd4444|4 不错|下午有点堵"},
             {"ts_utc": "2026-10-18T15:01:00Z", "domain": "question",
              "metric": "answer", "source": "relay",
              "value_text": "2026-10-18-unknown|随便|"},
@@ -1176,7 +1186,7 @@ def t_qa_join():
             encoding="utf-8")
 
         out = pr.day_qa("2026-10-18")
-        assert len(out["qa"]) == 4, out
+        assert len(out["qa"]) == 5, out
         by = {x["id"]: x for x in out["qa"]}
         assert by["2026-10-17-aaaa1111"]["source"] == "laptop"
         assert by["2026-10-17-aaaa1111"]["note"] == "早上完成了"
@@ -1185,6 +1195,11 @@ def t_qa_join():
         assert by["2026-10-18-bbbb2222"]["note"] == "重答"
         assert by["2026-10-18-cccc3333"]["kind"] == "summary"
         assert by["2026-10-18-unknown"].get("answer_only") is True, "没题文也不能丢答案"
+        # 自评题的 dim / routine 要透出来，collect_labels 靠它认维度
+        rated = by["2026-10-18-dddd4444"]
+        assert rated["dim"] == "心情" and rated["routine"] is True, rated
+        assert rated["format"] == "choice" and rated["answer"] == "4 不错", rated
+        assert by["2026-10-18-bbbb2222"]["dim"] == "", "没有 dim 的题不能编一个"
 
 
 check("relay /qa: 作答日合并两份问题文件 / 保留备注 / 重答取最新 / answer-only",
@@ -1768,8 +1783,18 @@ def t_summary_questions():
                    "by_category": [["Work", 3.2], ["Life", 2.1]]}})
     assert len(qs) == 10, qs
     assert all(q["kind"] == "summary" for q in qs), "必须带 kind=summary"
-    assert all(q["format"] == "text" and q["ref"] == "" for q in qs), \
-        "收尾题是文字题，不能去勾任务"
+    # ⚠️ 「不能去勾任务」靠的是 ref 为空，**不是** format=text：
+    #    心情/体力现在是 1–5 的选择题（见 RATED_DIMENSIONS），它们仍然不该
+    #    勾任何任务 —— apply_answers 只看带 ref 的题。
+    assert all(q["ref"] == "" for q in qs), "收尾题不能去勾任务"
+    rated = [q for q in qs if q.get("dim") in lq.RATED_DIMENSIONS]
+    assert len(rated) == 2, [q.get("dim") for q in rated]
+    assert all(q["format"] == "choice" for q in rated), [q["format"] for q in rated]
+    assert all(len(q.get("options") or []) == 5 for q in rated)
+    assert all(str(o["label"])[0].isdigit() for q in rated for o in q["options"]), \
+        "选项必须以分数开头 —— collect_labels.py 靠它取数字"
+    assert all(q["format"] == "text" for q in qs if q.get("dim") not in
+               lq.RATED_DIMENSIONS), "其余常规题仍是自由文本"
     keys = [q["_key"] for q in qs]
     assert len(set(keys)) == 10, f"题号不能重：{keys}"
     assert all(k.startswith(f"summary-{day}") for k in keys), keys
@@ -1834,6 +1859,187 @@ def t_summary_questions():
 
 check("live questions: 收尾三题（kind=summary / 一天一次 / 到点才发）",
       t_summary_questions)
+
+
+def t_label_extraction():
+    """自评答案 → 数值标签：只认带 dim 的 1–5，**绝不猜**自由文本。
+
+    这是以后所有「相关性/预测」的唯一标签来源。错一条会污染整张表，
+    而且不会报错 —— 所以这里钉死两件事：
+      · 「4 不错」→ 4，备注保留
+      · 没有 dim / 答的是「还行」→ 不进标签（不是估成 3 分）
+    """
+    import importlib.util
+
+    path = Path(__file__).resolve().parent / "collect_labels.py"
+    spec = importlib.util.spec_from_file_location("collect_labels_t", path)
+    cl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cl)
+
+    for s, want in (("4 不错", 4), ("5", 5), ("1 没电", 1),
+                    ("3分，下午开会", 3), ("4、还行", 4)):
+        assert cl.score_of(s) == want, (s, cl.score_of(s))
+    for s in ("还行", "", "6 很好", "0 很差", "4.5", "十分"):
+        assert cl.score_of(s) is None, (s, cl.score_of(s))
+
+    payload = {"qa": [
+        {"id": "d-1", "question_day": "2026-10-21", "dim": "心情",
+         "answer": "4 不错", "note": "下午有点堵", "ts_utc": "2026-10-21T15:00:00Z"},
+        {"id": "d-2", "question_day": "2026-10-21", "dim": "体力",
+         "answer": "2 偏低", "note": "", "ts_utc": "2026-10-21T15:00:02Z"},
+        # 不是打分维度 → 不进标签
+        {"id": "d-3", "question_day": "2026-10-21", "dim": "人际",
+         "answer": "4 不错", "ts_utc": "2026-10-21T15:00:03Z"},
+        # 打分维度但答的是自由文本 → 不进标签（不估分）
+        {"id": "d-4", "question_day": "2026-10-21", "dim": "心情",
+         "answer": "还行", "ts_utc": "2026-10-21T15:00:04Z"},
+        # 老数据没有 dim → 不进标签
+        {"id": "d-5", "question_day": "2026-10-20",
+         "answer": "4 不错", "ts_utc": "2026-10-20T15:00:00Z"},
+    ]}
+    rows = cl.extract(payload)
+    assert {r["qid"] for r in rows} == {"d-1", "d-2"}, rows
+    mood = next(r for r in rows if r["dim"] == "心情")
+    assert mood["score"] == 4 and mood["note"] == "下午有点堵", mood
+    assert mood["day"] == "2026-10-21", mood
+
+
+check("labels: 自评 1–5 → labels.jsonl，自由文本不估分",
+      t_label_extraction)
+
+
+def t_reflex_rules():
+    """反射弧：只在该响的时候响 —— 每条一天一次、60 分钟间隔、答题时不打断。
+
+    这些规则是**主动打扰**。误报的代价不是一条错消息，是你把整条通道
+    静音 —— 所以边界（静音时段 / awaiting / 快照陈旧）必须被钉住。
+    """
+    import importlib.util
+    from datetime import datetime as dt
+    from datetime import timedelta as td
+    from zoneinfo import ZoneInfo
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "reflex_t", root / "server" / "feishu-bot" / "reflex.py")
+    rx = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rx)
+
+    tz = ZoneInfo("Asia/Shanghai")
+    day = "2026-10-21"
+    iso = lambda d: d.astimezone(tz).isoformat()  # noqa: E731
+
+    # 01:00，手机 5 分钟前还在用 → 熬夜
+    late = dt(2026, 10, 21, 1, 0, tzinfo=tz)
+    ev = [{"metric": "unlock", "ts_utc": iso(late - td(minutes=5))}]
+    got = rx.evaluate(late, day, events=ev, phone=None, snap=None, state={})
+    assert [a["key"] for a in got] == ["late_night"], got
+
+    # 同一晚已经说过一次 → 不再说
+    got = rx.evaluate(late, day, events=ev, phone=None, snap=None,
+                      state={"day": day, "fired": {"late_night": iso(late)}})
+    assert got == [], got
+
+    # 手机 40 分钟没动 → 不算「还在用」
+    ev_idle = [{"metric": "unlock", "ts_utc": iso(late - td(minutes=40))}]
+    assert rx.evaluate(late, day, events=ev_idle, phone=None, snap=None,
+                       state={}) == []
+
+    # 正在等答案 → 一句话都不说（会被当成答案）
+    assert rx.evaluate(late, day, events=ev, phone=None, snap=None,
+                       state={}, awaiting=True) == []
+
+    phone = {"screen_minutes": 400.0, "top_apps": [("WeChat", 200.0),
+                                                    ("Code", 60.0)]}
+    evening = dt(2026, 10, 21, 19, 0, tzinfo=tz)
+    # 亮屏 6h40 + 微信 3h20：先报屏幕（一次只报一条）
+    got = rx.evaluate(evening, day, events=[], phone=phone, snap=None, state={})
+    assert [a["key"] for a in got] == ["screen_heavy"], got
+    assert "6 小时" in got[0]["text"] or "6 小" in got[0]["text"], got[0]
+
+    # 屏幕没超、微信超了 → 报娱乐
+    phone2 = {"screen_minutes": 120.0, "top_apps": [("WeChat", 200.0)]}
+    got = rx.evaluate(evening, day, events=[], phone=phone2, snap=None, state={})
+    assert [a["key"] for a in got] == ["leisure_heavy"], got
+    assert "WeChat" in got[0]["text"], got[0]
+
+    # 60 分钟内已经发过一条 → 这一轮全静音
+    got = rx.evaluate(evening, day, events=[], phone=phone2, snap=None,
+                      state={"day": day, "fired": {},
+                             "last_at": iso(evening - td(minutes=30))})
+    assert got == [], got
+
+    # 电脑快照：新鲜 + 连续 200 分钟 → 久坐
+    snap = {"pushed_at": iso(evening - td(minutes=5)),
+            "current": {"app": "Code.exe", "minutes": 200, "category": "Work"}}
+    got = rx.evaluate(evening, day, events=[], phone=None, snap=snap, state={})
+    assert [a["key"] for a in got] == ["long_desktop"], got
+
+    # 快照 2 小时没更新 → 不拿它判断「现在」
+    stale = {"pushed_at": iso(evening - td(hours=2)),
+             "current": {"app": "Code.exe", "minutes": 200}}
+    assert rx.evaluate(evening, day, events=[], phone=None, snap=stale,
+                       state={}) == []
+
+    # 静音时段（23:30）：屏幕/久坐都不说话
+    night = dt(2026, 10, 21, 23, 30, tzinfo=tz)
+    assert rx.evaluate(night, day, events=[], phone=phone, snap=snap,
+                       state={}) == []
+
+
+check("reflex: 熬夜/亮屏/娱乐/久坐 —— 边界、冷却、答题时不打断",
+      t_reflex_rules)
+
+
+def t_reflex_awaiting_gate():
+    """「刚发出的题」才拦反射弧；挂了一整晚的旧题不能把凌晨提醒也拦掉。
+
+    ⚠️ awaiting 只会被下一条用户消息清掉。昨晚 23:00 那道没答的题会一直
+       挂着 —— 如果只看「awaiting 非空」，熬夜提醒就永远发不出去。
+       所以判据是「这题什么时候发的」：1 小时内才安静。
+    """
+    import importlib.util
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "fb_reflex", root / "server" / "feishu-bot" / "feishu_bot.py")
+    fb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fb)
+
+    calls = {"events": 0, "sent": 0}
+    originals = (fb.OWNER_OPEN_ID, fb.live.relay_events, fb.live.relay_desktop,
+                 fb.live.deps, fb.send_text, fb.load_state)
+    try:
+        fb.OWNER_OPEN_ID = "ou_x"
+        fb.live.relay_events = lambda *a, **k: (
+            calls.__setitem__("events", calls["events"] + 1) or [])
+        fb.live.relay_desktop = lambda *a, **k: None
+        fb.live.deps = lambda: (_ for _ in ()).throw(RuntimeError("不测这块"))
+        fb.send_text = lambda *a, **k: calls.__setitem__("sent", calls["sent"] + 1)
+        fb.load_reflex_state = lambda: {}
+        fb.save_reflex_state = lambda s: None
+
+        now = fb.datetime.now(fb.TZ)
+        qid = now.date().isoformat() + "-abcd1234"
+
+        # ① 题刚发出去 5 分钟 → 不插话，也不去拉数据
+        fb.load_state = lambda: {"awaiting": qid, "sent": {
+            qid: (now - fb.timedelta(minutes=5)).isoformat(timespec="seconds")}}
+        fb.reflex_tick()
+        assert calls["events"] == 0, "刚发出的题在等答案，不该去拉数据"
+
+        # ② 同一道题挂了 3 小时 → 照常检查（昨晚的题不该挡住凌晨提醒）
+        fb.load_state = lambda: {"awaiting": qid, "sent": {
+            qid: (now - fb.timedelta(hours=3)).isoformat(timespec="seconds")}}
+        fb.reflex_tick()
+        assert calls["events"] >= 1, "旧题不该拦住反射弧"
+    finally:
+        (fb.OWNER_OPEN_ID, fb.live.relay_events, fb.live.relay_desktop,
+         fb.live.deps, fb.send_text, fb.load_state) = originals
+
+
+check("reflex: 只拦「一小时内的题」，挂了一晚的旧题不挡提醒",
+      t_reflex_awaiting_gate)
 
 
 def t_notes_into_journal():

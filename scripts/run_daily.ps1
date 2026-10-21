@@ -160,6 +160,11 @@ function Invoke-OneDay($d) {
     # 手机**使用**事件（解锁/切应用）走服务器中继 —— 手机直连本机会丢数据，
     # 因为这台笔记本一天只醒几小时。跟 collect-phone 拉位置是对称的。
     Invoke-Step "collect-phone-events" "scripts\collect_phone_events.py" @("--date", $ds) | Out-Null
+    # 自评标签：把心情/体力的 1–5 分抽成 state/labels.jsonl。
+    # ⚠️ 必须排在上面那步之后 —— collect-phone-events 刚把 qa-<day>.json 拉回来。
+    if (-not $DryRun) {
+        Invoke-Step "labels" "scripts\collect_labels.py" @() | Out-Null
+    }
     # 手表：先把 Gadgetbridge 导出的 SQLite 从中继取回来，再读它。
     # 两步必须按这个顺序 —— ingest_gadgetbridge 读的是本地那份文件。
     Invoke-Step "collect-watch"   "scripts\collect_watch.py"   @("--date", $ds) | Out-Null

@@ -192,16 +192,24 @@ def qid(day: str, text: str) -> str:
 
 
 def make(day: str, text: str, evidence: str, key: str,
-         kind: str = "routine") -> dict:
-    """实时题一律是**文字题**。
+         kind: str = "routine", fmt: str = "text",
+         options: list[dict] | None = None) -> dict:
+    """生成一条实时题。
 
-    ⚠️ `format="text"` 会让 apply_answers 那边永远判成「没完成」（文字题
-       没有完成这个概念），这正是我们要的：实时题不该去勾任何任务，
-       它只是问你一句。所以 `ref` 必须是空的。
+    ⚠️ `ref` 必须是空的。apply_answers 只处理带 ref 的题（见它
+       `read_questions()` 里的判断），所以这里的题永远不会去勾任务 ——
+       包括 format="choice" 的打分题：它只是问一句，不是任务。
+
+    ⚠️ 打分题用 choice **不是**为了好看：答案要能被下游算成数字
+       （`collect_labels.py` 读的就是选项的 leading digit）。自由文本
+       再有人情味，也进不了任何统计。
     """
-    return {"id": qid(day, text), "kind": kind, "format": "text",
+    item = {"id": qid(day, text), "kind": kind, "format": fmt,
             "text": text, "evidence": evidence, "ref": "",
             "_key": key}
+    if options:
+        item["options"] = list(options)
+    return item
 
 
 # ── 取数 ────────────────────────────────────────────────────────────
@@ -529,6 +537,40 @@ ROUTINE_DIMENSIONS: tuple[tuple[str, tuple[str, ...], str], ...] = (
 )
 
 
+# 哪几个维度除了自由文本，**每天还给一个 1–5 的分数**。
+#
+# ⚠️ 这是给「以后要学的模型」攒燃料，不是给今天看的。情绪/体力是预测里
+#    最可能当目标变量的一维，而它现在只存在于自由文本里 —— 自由文本再
+#    有人情味也进不了任何统计。分数和备注**都要**：分数量化，备注保留
+#    「为什么」，两者缺一都会把这一天压平。
+#
+# ⚠️ 只给两个维度打分。七个全改成选择会把这个晚上变成填表，回答质量
+#    反而会掉 —— 那正是 `ROUTINE_DIMENSIONS` 注释里说的「退化成还行」。
+#
+# ⚠️ 打分题**不轮换问法**，用固定题干。轮换是为了防止自由文本退化成
+#    「还行」；而 1–5 的量表每天一样，才是可比的。题干里留一句邀请备注，
+#    把原来那种「什么时候最好/最差」的细节留在备注里。
+RATED_DIMENSIONS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "心情": (
+        "今天整体心情打几分？想补一句的话：今天什么时候情绪最好、什么时候最糟？",
+        ("1 很差", "2 偏低", "3 一般", "4 不错", "5 很好"),
+    ),
+    "体力": (
+        "今天整体体力打几分？想补一句的话：今天什么时候精力最好、什么时候最差？",
+        ("1 没电", "2 偏低", "3 一般", "4 不错", "5 充沛"),
+    ),
+}
+
+
+def _rating_options(dim: str) -> list[dict]:
+    """把维度名变成 choice 题要的 options 形状。
+
+    ⚠️ **不写 `done`**。写了也不会被用，但会让后来的人以为这条答案在
+       判定某个任务完成与否 —— 它不是，routine 题的 ref 永远是空的。
+    """
+    return [{"label": label} for label in RATED_DIMENSIONS[dim][1]]
+
+
 def summary_questions(day_iso: str, stays: list[dict],
                       events: list[dict], snap: dict | None) -> list[dict]:
     """晚上收尾的几道题。答完之后机器人会用 LLM 写一段当天总结。
@@ -545,7 +587,9 @@ def summary_questions(day_iso: str, stays: list[dict],
       3. 手机节奏 —— 解锁/切换次数，问「哪一段是真投入」
       4. 位置 —— 去过几个地方、最久的是哪，问计划外的那次
       5. 常规题 ×7 —— **数据看不见的七个维度**（体力/心情/人际/睡眠/吃饭/
-         休息/学习），**每天全问**，但每天的措辞不同，见 ROUTINE_DIMENSIONS
+         休息/学习），**每天全问**，但每天的措辞不同，见 ROUTINE_DIMENSIONS。
+         其中心情/体力是 **1–5 打分 + 可选备注**（见 RATED_DIMENSIONS），
+         其余五个仍是自由文本
       6. 没做成、想留到明天 —— 明天的问责线索
 
     ⚠️ **某一块没有数据就不问那一题**（比如位置数据缺失的那天）。
@@ -565,8 +609,10 @@ def summary_questions(day_iso: str, stays: list[dict],
 
     def add(text: str, evidence: str, routine: bool = False,
             dim: str = "") -> None:
+        options = _rating_options(dim) if dim in RATED_DIMENSIONS else None
         q = make(day_iso, text, evidence,
-                 f"summary-{day_iso}-{len(qs) + 1}", kind="summary")
+                 f"summary-{day_iso}-{len(qs) + 1}", kind="summary",
+                 fmt="choice" if options else "text", options=options)
         if routine:
             # kind 仍是 summary（收尾流程靠它判断「答完了没有」），
             # 只是打个标记，让机器人把它显示成「常规」。
@@ -609,11 +655,15 @@ def summary_questions(day_iso: str, stays: list[dict],
     except ValueError:
         ord_ = 0
     for i, (dim, variants, evidence) in enumerate(ROUTINE_DIMENSIONS):
-        if not variants:
+        rated = RATED_DIMENSIONS.get(dim)
+        if rated:
+            text = rated[0]
+        elif variants:
+            # 每个维度用不同的偏移 —— 这样七条题的组合逐日变化，
+            # 而不是整组一起平移（那样三天的组合会一模一样）。
+            text = variants[(ord_ + i * 3) % len(variants)]
+        else:
             continue
-        # 每个维度用不同的偏移 —— 这样七条题的组合逐日变化，
-        # 而不是整组一起平移（那样三天的组合会一模一样）。
-        text = variants[(ord_ + i * 3) % len(variants)]
         add(text, evidence, routine=True, dim=dim)
 
     # 最后一道：留给明天的问责线索

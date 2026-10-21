@@ -633,6 +633,10 @@ def day_qa(day: str) -> dict:
             "question_day": str(d.get("question_day") or qid[:10]),
             "source": str(d.get("source") or ""),
             "kind": str(d.get("kind") or ""),
+            # 常规题的维度名与「是不是常规题」。下游（collect_labels.py）
+            # 靠 dim 把「4 不错」认成「心情 = 4」；没有它就只能去猜题面。
+            "dim": str(d.get("dim") or ""),
+            "routine": bool(d.get("routine")),
             "format": str(d.get("format") or "yes_no"),
             "text": d.get("text"),
             "evidence": str(d.get("evidence") or ""),

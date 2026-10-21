@@ -132,6 +132,7 @@ LifeLogging/
 │   ├── collect_desktop.py       ← ActivityWatch → 事件表（无录屏录音）
 │   ├── collect_phone.py         ← Dawarich → 事件表（手机位置）
 │   ├── collect_phone_events.py  ← 服务器中继 → 事件表（手机使用：解锁/切应用）
+│   ├── collect_labels.py        ← 飞书自评（心情/体力 1–5）→ state/labels.jsonl
 │   ├── normalize.py             ← 原始数据 → 柳比歇夫分类
 │   ├── app_map.py               ← 「应用 → 分类」的学习表（运行时产物 state/app_map.json）
 │   ├── learn_apps.py            ← 学认不出来的新应用：问一次模型，缓存成规则
