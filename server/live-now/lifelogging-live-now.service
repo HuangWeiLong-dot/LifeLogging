@@ -1,0 +1,43 @@
+# LifeLogging —— 24h 服务器侧的 /api/life/now 发布器
+#
+# 和 close_day 同一个形状（oneshot + timer），但它不调日记；它只组装一份
+# 「我现在在干嘛」并整份覆写站点的 R2。数据来自中继 / Dawarich / 中继上的
+# gadgetbridge.db —— 所以笔记本关机时它也还能更新位置、手机、问答、手表。
+#
+# 部署见同目录 README.md。
+
+[Unit]
+Description=LifeLogging - publish the 24h live NOW snapshot
+After=network-online.target tailscaled.service lifelogging-relay.service
+Wants=network-online.target
+Requires=lifelogging-relay.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/lifelogging/repo
+
+# DEEPSEEK_API_KEY（翻译）在 close-day.env；LIFE_INGEST_TOKEN（站点写入）在
+# live-now.env。不要把密钥写进这个文件 —— 它要进 git。
+EnvironmentFile=/etc/lifelogging/close-day.env
+EnvironmentFile=-/etc/lifelogging/live-now.env
+
+ExecStart=/opt/lifelogging/venv/bin/python /opt/lifelogging/repo/server/live-now/live_now_server.py
+
+# 中继 + Dawarich + 手环库解析，正常几秒；给足余量但别无限挂。
+TimeoutStartSec=120
+
+# 和 relay / close-day 同一套加固
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+# 翻译缓存写在 state_dir（服务器上是 /var/lib/lifelogging）；手环库只读。
+ReadWritePaths=/var/lib/lifelogging

@@ -8,6 +8,7 @@
 | `lifelogging-close-day` | 关账 + 调 AI 写日记正文 | 定时（systemd timer，每 15 分钟） |
 | `lifelogging-feishu-bot` | 飞书机器人：每日提问的收发通道（**可选**） | 常驻（systemd service） |
 | `lifelogging-live-questions` | 白天根据当天数据生成「实时提问」（**可选**，随飞书机器人一起） | 定时（systemd timer，每 30 分钟） |
+| `lifelogging-live-now` | 24h 实时快照：位置 / 手机 / 问答 / 手表 → 站点 `/api/life/now` | 定时（systemd timer，每 2 分钟） |
 
 各自的具体说明： [`phone-relay/README.md`](phone-relay/README.md) · [`close-day/README.md`](close-day/README.md) · [`feishu-bot/README.md`](feishu-bot/README.md)
 

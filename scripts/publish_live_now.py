@@ -315,10 +315,39 @@ def phone_now(conn, day: str) -> dict | None:
 
 
 def watch_now(conn, day: str) -> dict | None:
+    rows = conn.execute(
+        """SELECT day_local, metric, value_num, ts_utc, ingested_at FROM events
+           WHERE domain = 'health'
+             AND metric IN ('steps', 'heart_rate_avg', 'heart_rate_min')
+           ORDER BY day_local DESC, ts_utc DESC LIMIT 24""",
+    ).fetchall()
+
+    local = None
+    if rows:
+        latest_day = rows[0]["day_local"]
+        metrics = {
+            r["metric"]: r["value_num"]
+            for r in rows if r["day_local"] == latest_day
+        }
+        stamps = [
+            r["ingested_at"] or r["ts_utc"]
+            for r in rows if r["day_local"] == latest_day
+        ]
+        local = {
+            "day": latest_day,
+            "synced": latest_day == day,
+            "steps": metrics.get("steps"),
+            "hrAvg": metrics.get("heart_rate_avg"),
+            "hrMin": metrics.get("heart_rate_min"),
+            "pushedAt": iso(to_utc(max(stamps))) if stamps else None,
+            "source": "local",
+        }
+
     snap = relay_snapshot("/watch")
+    relay = None
     if snap:
         health = snap.get("health") or {}
-        return {
+        relay = {
             "day": snap.get("day"),
             "synced": snap.get("day") == day,
             "steps": health.get("steps"),
@@ -328,24 +357,12 @@ def watch_now(conn, day: str) -> dict | None:
             "source": "relay",
         }
 
-    rows = conn.execute(
-        """SELECT day_local, metric, value_num FROM events
-           WHERE domain = 'health' AND metric IN ('steps', 'heart_rate_avg', 'heart_rate_min')
-           ORDER BY day_local DESC LIMIT 12""",
-    ).fetchall()
-    if not rows:
-        return None
-    latest_day = rows[0]["day_local"]
-    metrics = {r["metric"]: r["value_num"] for r in rows if r["day_local"] == latest_day}
-    return {
-        "day": latest_day,
-        "synced": latest_day == day,
-        "steps": metrics.get("steps"),
-        "hrAvg": metrics.get("heart_rate_avg"),
-        "hrMin": metrics.get("heart_rate_min"),
-        "pushedAt": None,
-        "source": "local",
-    }
+    # 本机 events.db 才是源数据，中继只是给飞书机器人留的最后一份。
+    # 中继的 /watch 可能还是昨天的（push_health 只在重采集里跑），
+    # 所以取更新的那一天；同一天时优先本机（ingested_at 更新）。
+    if local and relay:
+        return local if str(local.get("day") or "") >= str(relay.get("day") or "") else relay
+    return local or relay
 
 
 def qa_now(day: str) -> dict | None:

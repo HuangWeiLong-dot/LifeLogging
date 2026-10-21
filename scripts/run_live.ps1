@@ -184,6 +184,8 @@ try {
         Invoke-Py "phone-location" "scripts\collect_phone.py" @("--date", $today) | Out-Null
         Invoke-Py "watch-pull" "scripts\collect_watch.py" @("--date", $today) | Out-Null
         Invoke-Py "watch-ingest" "middleware\ingest_gadgetbridge.py" @("--date", $today) | Out-Null
+        # 中继 /watch 是飞书机器人读的那份；不推的话它会一直停在上一份。
+        Invoke-Py "push-health" "scripts\push_health.py" @() | Out-Null
         Invoke-Py "ai-usage" "scripts\collect_ai_usage.py" @("--date", $today) | Out-Null
         Invoke-Py "cost-events" "scripts\cost_guard.py" @("emit-events", "--days", "1") | Out-Null
         $state.last_heavy = (Get-Date).ToString("s")
