@@ -426,6 +426,27 @@ def save_desktop(payload: dict) -> tuple[bool, str]:
     return True, _write_json(desktop_path(), payload)
 
 
+WATCH_NAME = "watch-latest.json"
+
+
+def watch_path() -> Path:
+    """笔记本推上来的最新一份**健康汇总**（步数/心率/睡眠/运动）。
+
+    ⚠️ 只留最新一份，和 desktop 同理：原始数据在笔记本的 events.db 和
+       中继上那份 gadgetbridge.db 里；这里要的是「机器人答得了」的那几行。
+    """
+    return DATA_DIR / WATCH_NAME
+
+
+def save_watch(payload: dict) -> tuple[bool, str]:
+    """⚠️ 字段校验从**松**，理由同 save_desktop：自己人推的，格式变了宁可
+       让机器人看到「少了某字段」，也不要在中继这层整份丢掉。"""
+    day = str(payload.get("day") or "")
+    if not _DAY_RE.match(day):
+        return False, "day must be YYYY-MM-DD"
+    return True, _write_json(watch_path(), payload)
+
+
 def journal_path(kind: str, day: str) -> Path | None:
     """日记管线的中转文件。kind 是 'input' 或 'output'。
 
@@ -1083,6 +1104,21 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, {"error": f"stored snapshot is unreadable: {e}"})
             return
 
+        if u.path == "/watch":
+            # 笔记本推来的健康汇总，给机器人答「走了多少步 / 睡得怎么样」。
+            # 没推过时同样返回 200 + null。
+            if not self._authed():
+                return
+            p = watch_path()
+            if not p.exists():
+                self._send(200, {"snapshot": None})
+                return
+            try:
+                self._send(200, {"snapshot": json.loads(p.read_text(encoding="utf-8"))})
+            except (OSError, json.JSONDecodeError) as e:
+                self._send(500, {"error": f"stored snapshot is unreadable: {e}"})
+            return
+
         if u.path == "/ledger":
             # 笔记本取回服务器那份台账，合并进自己的。
             if not self._authed():
@@ -1264,6 +1300,18 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, {"error": err})
                 return
             ok, detail = save_desktop(payload)
+            self._send(200 if ok else 400, {"ok": ok, "detail": detail})
+            return
+
+        if u.path == "/watch":
+            # 笔记本推上来的健康汇总。见 save_watch()。
+            if not self._authed():
+                return
+            payload, err = self._json_body()
+            if err:
+                self._send(400, {"error": err})
+                return
+            ok, detail = save_watch(payload)
             self._send(200 if ok else 400, {"ok": ok, "detail": detail})
             return
 

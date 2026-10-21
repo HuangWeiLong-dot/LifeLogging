@@ -169,6 +169,9 @@ function Invoke-OneDay($d) {
     # 两步必须按这个顺序 —— ingest_gadgetbridge 读的是本地那份文件。
     Invoke-Step "collect-watch"   "scripts\collect_watch.py"   @("--date", $ds) | Out-Null
     Invoke-Step "gadgetbridge"    "middleware\ingest_gadgetbridge.py" @("--date", $ds) | Out-Null
+    # 把健康日汇总推给服务器 —— 机器人跑在服务器上，看不到这台笔记本。
+    # ⚠️ 必须在 ingest 之后：它读的就是刚写进 events.db 的那几行。
+    Invoke-Step "push-health"     "scripts\push_health.py" | Out-Null
 
     # 2. 归一化
     $normalized = Invoke-Step "normalize" "scripts\normalize.py" @("--date", $ds)

@@ -157,6 +157,14 @@ def relay_desktop(base: str, key: str) -> dict | None:
     return snap if isinstance(snap, dict) else None
 
 
+def relay_watch(base: str, key: str) -> dict | None:
+    """笔记本推来的健康日汇总（步数/心率/睡眠/运动）。没推过返回 None。"""
+    r = httpx.get(f"{base}/watch", headers={"X-API-Key": key}, timeout=20.0)
+    r.raise_for_status()
+    snap = r.json().get("snapshot")
+    return snap if isinstance(snap, dict) else None
+
+
 def location_stays(day_iso: str) -> list[dict]:
     """当天的停留，按时间排序。
 
@@ -536,6 +544,95 @@ def render_desktop(day_iso: str, base: str, key: str) -> str:
     return "\n".join(lines)
 
 
+WATCH_NO_DATA = (
+    "服务器上还没有手表的健康汇总 —— 笔记本一次都没推过。\n"
+    "确认 `run_daily.ps1` 里跑了 `scripts/push_health.py`，或者手工来一次：\n"
+    "    python scripts/push_health.py\n"
+    "（原因和电脑快照一样：Gadgetbridge 的数据在笔记本上，而它一天只醒几小时。）"
+)
+
+
+def render_watch(day_iso: str, base: str, key: str) -> str:
+    """手表日汇总：步数 / 心率 / 睡眠 / 最近运动。
+
+    ⚠️ 「这是哪一天的」必须写在最前面。Gadgetbridge 通常隔天才导出，
+       所以最常见的正确回答是「这是昨天的」而不是「今天没走」。
+    """
+    try:
+        snap = relay_watch(base, key)
+    except Exception as e:  # noqa: BLE001
+        raise LiveUnavailable(f"拉不到健康汇总：{type(e).__name__}: {e}") from None
+    if not snap:
+        return WATCH_NO_DATA
+
+    pushed = _parse_dt(snap.get("pushed_at"))
+    now = datetime.now(pushed.tzinfo) if pushed else None
+    push_txt, push_min = _ago(snap.get("pushed_at"), now) if now else ("", None)
+
+    day = str(snap.get("day") or "")
+    health = snap.get("health") if isinstance(snap.get("health"), dict) else {}
+    lines = [f"手表汇总（{day}）：", ""]
+    shown = False
+
+    steps = health.get("steps")
+    if steps is not None:
+        lines.append(f"  步数        {int(round(float(steps)))} 步")
+        shown = True
+    hr_avg = health.get("heart_rate_avg")
+    if hr_avg is not None:
+        lines.append(f"  心率        平均 {round(float(hr_avg))} bpm")
+        shown = True
+    hr_min = health.get("heart_rate_min")
+    if hr_min is not None:
+        lines.append(f"              最低 {round(float(hr_min))} bpm")
+    sleep = health.get("sleep_hours")
+    if sleep is not None:
+        lines.append(f"  睡眠        {_hm(float(sleep) * 60)}")
+        shown = True
+
+    if not shown:
+        lines.append("  这一天没有步数 / 心率记录")
+
+    if sleep is None:
+        # ⚠️ 不能说「睡眠 0 小时」。当前这台表的导出里根本没有睡眠样本，
+        #    那和「睡了 0 小时」是两件事。
+        lines.append("  睡眠        —— 这份手环导出里没有睡眠样本")
+
+    workouts = [w for w in (snap.get("workouts") or []) if isinstance(w, dict)]
+    if workouts:
+        lines += ["", "  最近运动："]
+        for w in workouts[-3:]:
+            text = _one_workout(w)
+            if text:
+                lines.append(f"    {text}")
+
+    lines += ["", f"⚠️ 笔记本最后上报：{push_txt or '时间未知'}"]
+    if day and day != day_iso:
+        lines.append(f"⚠️ 这是 **{day}** 的汇总，不是今天 —— "
+                     "Gadgetbridge 通常隔天才导出。")
+    elif push_min is not None and push_min > STALE_MINUTES:
+        lines.append("   笔记本一天只醒几小时，这份可能不是此刻。")
+    return "\n".join(lines)
+
+
+def _one_workout(w: dict) -> str:
+    """一次运动压成一行。缺的字段直接不写 —— 不编。"""
+    bits: list[str] = []
+    kind = str(w.get("kind") or "").strip()
+    if kind:
+        bits.append(kind)
+    minutes = w.get("minutes")
+    if minutes is not None:
+        bits.append(_hm(float(minutes)))
+    km = w.get("distance_km")
+    if km:
+        bits.append(f"{float(km):.1f} km")
+    hr = w.get("avg_hr")
+    if hr:
+        bits.append(f"平均 {int(hr)} bpm")
+    return " ".join(bits)
+
+
 # 电脑**活动**：现在答得了了 —— 笔记本会高频把一份小快照推给服务器
 # （scripts/push_desktop.py）。所以这一组不再指向「答不了」。
 _LAPTOP_WORDS = ("电脑", "笔记本", "activitywatch", "vscode", "窗口", "写代码",
@@ -590,9 +687,9 @@ JOURNAL_ANSWER = (
 )
 
 HEALTH_ANSWER = (
-    "手表数据还没接进来（步数 / 心率 / 睡眠）。\n"
-    "它在 Gadgetbridge 的导出库里，手机定时传到中继上 —— 接是能接，"
-    "但还没做。现在能答的是位置、手机使用、电脑活动。"
+    "手表的健康汇总现在拉不到（中继那边出错）。\n"
+    "平时它是能答的：步数 / 心率 / 最近运动。\n"
+    "睡眠取决于手环有没有导出样本 —— 这一台目前没有。"
 )
 
 UNKNOWN_ANSWER = (
@@ -600,6 +697,7 @@ UNKNOWN_ANSWER = (
     "  · 我今天去哪了 / 去过哪\n"
     "  · 手机用了多久 / 屏幕时间\n"
     "  · 今天解锁几次 / 用得最多的应用\n"
+    "  · 今天走了多少步 / 心率多少\n"
     "  · 我今天在电脑上干了什么 / 现在在忙什么\n"
     "  · 给我题（回「?」或者随便一句）\n\n"
     "⚠️ 电脑那份快照只在笔记本醒着时更新，所以它可能是几小时前的 —— "
@@ -655,7 +753,8 @@ def _digest(day_iso: str, base: str, key: str) -> str:
     parts: list[str] = []
     for fn in (lambda: render_location(day_iso),
                lambda: render_phone(relay_events(day_iso, base, key)),
-               lambda: render_desktop(day_iso, base, key)):
+               lambda: render_desktop(day_iso, base, key),
+               lambda: render_watch(day_iso, base, key)):
         try:
             parts.append(fn())
         except Exception as e:  # noqa: BLE001
@@ -886,7 +985,12 @@ def answer_query(text: str, *, day_iso: str, base: str, key: str) -> str | None:
     if _hits(t, _JOURNAL_WORDS):
         return JOURNAL_ANSWER
     if _hits(t, _HEALTH_WORDS):
-        return HEALTH_ANSWER
+        # ⚠️ 手表数据现在**有**了（笔记本推的日汇总）。以前这里直接返回
+        #    「还没接」，那句已经过期了 —— 一条过期的假话比一句「拉不到」糟。
+        try:
+            return render_watch(day_iso, base, key)
+        except LiveUnavailable:
+            return HEALTH_ANSWER
     if _hits(t, _LAPTOP_WORDS):
         return render_desktop(day_iso, base, key)
 

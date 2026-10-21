@@ -132,7 +132,8 @@ LifeLogging/
 │   ├── collect_desktop.py       ← ActivityWatch → 事件表（无录屏录音）
 │   ├── collect_phone.py         ← Dawarich → 事件表（手机位置）
 │   ├── collect_phone_events.py  ← 服务器中继 → 事件表（手机使用：解锁/切应用）
-│   ├── collect_labels.py        ← 飞书自评（心情/体力 1–5）→ state/labels.jsonl
+│   ├── collect_labels.py        ← 飞书自评（心情/体力/睡眠 1–5）→ state/labels.jsonl
+│   ├── push_health.py           ← 健康日汇总 → 中继（让机器人答得了步数/心率）
 │   ├── features.py              ← 每日状态向量 + 数据覆盖报告（state/features.jsonl）
 │   ├── baseline.py              ← 今天 vs 个人常态（中位数/MAD，不预测）
 │   ├── normalize.py             ← 原始数据 → 柳比歇夫分类

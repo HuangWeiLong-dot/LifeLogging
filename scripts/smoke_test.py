@@ -1788,7 +1788,9 @@ def t_summary_questions():
     #    勾任何任务 —— apply_answers 只看带 ref 的题。
     assert all(q["ref"] == "" for q in qs), "收尾题不能去勾任务"
     rated = [q for q in qs if q.get("dim") in lq.RATED_DIMENSIONS]
-    assert len(rated) == 2, [q.get("dim") for q in rated]
+    assert len(rated) == 3, [q.get("dim") for q in rated]
+    assert {q["dim"] for q in rated} == {"体力", "心情", "睡眠"}, \
+        [q["dim"] for q in rated]
     assert all(q["format"] == "choice" for q in rated), [q["format"] for q in rated]
     assert all(len(q.get("options") or []) == 5 for q in rated)
     assert all(str(o["label"])[0].isdigit() for q in rated for o in q["options"]), \
@@ -1893,12 +1895,15 @@ def t_label_extraction():
         # 打分维度但答的是自由文本 → 不进标签（不估分）
         {"id": "d-4", "question_day": "2026-10-21", "dim": "心情",
          "answer": "还行", "ts_utc": "2026-10-21T15:00:04Z"},
+        # 睡眠也是打分维度
+        {"id": "d-5", "question_day": "2026-10-21", "dim": "睡眠",
+         "answer": "5 很好", "note": "一觉到天亮", "ts_utc": "2026-10-21T15:00:05Z"},
         # 老数据没有 dim → 不进标签
-        {"id": "d-5", "question_day": "2026-10-20",
+        {"id": "d-6", "question_day": "2026-10-20",
          "answer": "4 不错", "ts_utc": "2026-10-20T15:00:00Z"},
     ]}
     rows = cl.extract(payload)
-    assert {r["qid"] for r in rows} == {"d-1", "d-2"}, rows
+    assert {r["qid"] for r in rows} == {"d-1", "d-2", "d-5"}, rows
     mood = next(r for r in rows if r["dim"] == "心情")
     assert mood["score"] == 4 and mood["note"] == "下午有点堵", mood
     assert mood["day"] == "2026-10-21", mood
@@ -2239,6 +2244,80 @@ def t_baseline():
 
 check("baseline: 中位数/MAD / 今天不进自己的基线 / 样本不足与零波动不硬算",
       t_baseline)
+
+
+def t_push_health_and_render():
+    """健康汇总：坏的 meta 不崩、非数字不编；渲染必须说清「这是哪一天的」。
+
+    ⚠️ Gadgetbridge 通常隔天才导出，所以「今天走了多少步」最常见的正确
+       答案是「这是昨天的」。日期不说清，用户会把昨天的步数当成今天的。
+    """
+    import push_health as ph
+    from datetime import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo(CFG["timezone"])
+    rows = [
+        ("steps", 4426.0, "", "{}"),
+        ("heart_rate_avg", 79.3, "", '{"min":61,"max":150}'),
+        ("heart_rate_min", 61.0, "", "{}"),
+        ("workout", 20.0, "跑步",
+         '{"distance_km":4.2,"avg_hr":171,"end_utc":"2026-10-20T10:00:00Z"}'),
+        ("workout", 5.0, "骑行", "not json"),     # 坏 meta 不能崩
+        ("vo2max", "bad", "", "{}"),              # 非数字 → 跳过
+    ]
+    p = ph.build_payload(rows, "2026-10-20", dt(2026, 10, 21, 10, tzinfo=tz))
+    assert p["day"] == "2026-10-20" and p["pushed_at"]
+    assert p["health"]["steps"] == 4426.0 and p["health"]["heart_rate_avg"] == 79.3
+    assert "vo2max" not in p["health"], "非数字不能被编成指标"
+    assert {w["kind"] for w in p["workouts"]} == {"跑步", "骑行"}, p["workouts"]
+
+    import importlib.util
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "live_watch", root / "server" / "feishu-bot" / "live.py")
+    lv = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lv)
+
+    snap = {
+        "day": "2026-10-20",
+        "pushed_at": "2026-10-21T08:00:00+08:00",
+        "health": {"steps": 4426, "heart_rate_avg": 79.3, "heart_rate_min": 61},
+        "workouts": [{"kind": "跑步", "minutes": 20, "distance_km": 4.2,
+                      "avg_hr": 171}],
+    }
+    lv.relay_watch = lambda b, k: snap
+    out = lv.render_watch("2026-10-21", "x", "k")
+    assert "4426" in out and "79" in out, out
+    assert "没有睡眠样本" in out, "没有睡眠数据时不能写成 0 小时"
+    assert "跑步" in out and "4.2 km" in out, out
+    assert "不是今天" in out, "隔天的汇总必须明说"
+
+    # 同一天 + 有睡眠样本 → 正常显示，不报「不是今天」
+    fresh = dict(snap, day="2026-10-21", pushed_at=dt.now(tz).isoformat(),
+                 health=dict(snap["health"], sleep_hours=7.5))
+    lv.relay_watch = lambda b, k: fresh
+    out = lv.render_watch("2026-10-21", "x", "k")
+    assert "7 小时 30 分" in out and "不是今天" not in out, out
+
+    # 没推过 → 给一条能照着修的提示
+    lv.relay_watch = lambda b, k: None
+    assert lv.render_watch("2026-10-21", "x", "k") == lv.WATCH_NO_DATA
+
+    # 中继出错 → LiveUnavailable（调用方会退回那句兜底）
+    def boom(b, k):
+        raise RuntimeError("relay down")
+    lv.relay_watch = boom
+    try:
+        lv.render_watch("2026-10-21", "x", "k")
+    except lv.LiveUnavailable:
+        pass
+    else:
+        raise AssertionError("中继出错时应该抛 LiveUnavailable")
+
+
+check("health: 快照构建不编数 / 隔天要说清 / 睡眠缺失不写 0",
+      t_push_health_and_render)
 
 
 def t_notes_into_journal():
@@ -3091,6 +3170,7 @@ def t_feishu_live_routing():
     lv.relay_events = lambda day, base, key: (calls.append("relay") or [])
     lv.render_phone = lambda evs: (calls.append("phone") or "⟨手机⟩")
     lv.render_desktop = lambda day, base, key: (calls.append("desktop") or "⟨电脑⟩")
+    lv.render_watch = lambda day, base, key: (calls.append("watch") or "⟨健康⟩")
 
     def ask(t: str) -> str | None:
         calls.clear()
@@ -3102,8 +3182,11 @@ def t_feishu_live_routing():
         assert ask(q) == lv.JOURNAL_ANSWER, f"{q!r} 应该老实说 vault 没推上来"
         assert calls == [], f"{q!r} 不该去拉任何数据，实际拉了 {calls}"
 
-    assert ask("今天走了多少步") == lv.HEALTH_ANSWER
-    assert calls == [], "手表数据还没接，不该去拉"
+    # 手表数据现在有快照了 —— 必须走 render_watch，而不是那句过期的「还没接」
+    assert ask("今天走了多少步") == "⟨健康⟩", "步数应该走健康快照"
+    assert calls == ["watch"], calls
+    assert ask("心率多少") == "⟨健康⟩"
+    assert calls == ["watch"], calls
 
     # ── 电脑活动现在答得了（笔记本会推快照）──
     for q in ("我今天在电脑上干了什么", "我今天写代码了吗",
@@ -3168,7 +3251,11 @@ def t_feishu_live_routing():
     assert "没有推到服务器" in lv.JOURNAL_ANSWER
     # 「没推过」时要把人引到那个能修的地方去，不能只说一句「没有数据」
     assert "push_desktop.py" in lv.DESKTOP_NO_DATA
-    assert "Gadgetbridge" in lv.HEALTH_ANSWER
+    # 没推过健康汇总时，也要指到那个能修的地方
+    assert "push_health.py" in lv.WATCH_NO_DATA
+    assert "Gadgetbridge" in lv.WATCH_NO_DATA
+    # 中继出错时的兜底话不能再说「还没接」—— 那是过期信息
+    assert "拉不到" in lv.HEALTH_ANSWER
 
 
 check("feishu: 路由从窄到宽 —— 日记/手表说答不了，电脑/位置/手机各拉各的",

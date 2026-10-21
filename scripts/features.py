@@ -61,6 +61,7 @@ FEATURE_VERSION = 1
 LABEL_KEYS = {
     "心情": "mood",
     "体力": "energy",
+    "睡眠": "sleep",
 }
 
 _BLOCK_TIME = re.compile(r"^\s*(\d{1,2}):(\d{2})")
