@@ -644,6 +644,12 @@ _LAPTOP_WORDS = ("电脑", "笔记本", "activitywatch", "vscode", "窗口", "�
 _JOURNAL_WORDS = ("日记", "vault", "obsidian")
 
 _HEALTH_WORDS = ("步数", "心率", "睡眠", "运动", "跑步", "手表", "卡路里", "走了多少")
+
+# 明确在问**过去**的话。模板只会答今天，拿今天的数据冒充过去是最坏的一种
+# 答错 —— 所以这里直接交给「检索 + 模型」，而不是往下走模板。
+# ⚠️ 仍然要过「像在问」那道门（见 _QUESTION_RE）。
+_HISTORY_WORDS = ("上次", "上一次", "以前", "之前", "上个月", "那几天",
+                  "过去几天", "历史上", "前阵子", "前段时间")
 _LOCATION_WORDS = ("去哪", "去了哪", "在哪儿", "在哪", "去过", "行踪", "位置",
                    "停留", "待在哪", "到哪")
 _PHONE_WORDS = ("手机", "屏幕", "解锁", "切应用", "应用", "app", "刷了", "玩了多久",
@@ -699,6 +705,7 @@ UNKNOWN_ANSWER = (
     "  · 今天解锁几次 / 用得最多的应用\n"
     "  · 今天走了多少步 / 心率多少\n"
     "  · 我今天在电脑上干了什么 / 现在在忙什么\n"
+    "  · 上次 / 以前的记录（我会去翻日记）\n"
     "  · 给我题（回「?」或者随便一句）\n\n"
     "⚠️ 电脑那份快照只在笔记本醒着时更新，所以它可能是几小时前的 —— "
     "答案里会写明，别当成此刻。"
@@ -735,16 +742,18 @@ LLM_DAILY_CAP = int(os.environ.get("FEISHU_LLM_DAILY_CAP", "10"))
 # ⚠️ 这里不是「让它聪明一点」的地方 —— 一个把「大概是在开会吧」编得像真事的
 #    机器人，比一个说「数据里没有这条」的机器人糟得多。
 #    行踪是有隐私含义的数据，编错了会真的误导人。
-_LLM_SYSTEM = """你在回答用户关于**他自己今天**的问题。
+_LLM_SYSTEM = """你在回答用户关于**他自己**的问题（今天的数据，以及过去写下的日记）。
 
 规则（必须遵守）：
-1. 只使用下面【今天的原始数据】里出现的事实。数据里没有的，直接说「记录里没有」，
-   **不要推测、不要补充常识、不要编造地点或时间**。
-2. 数据可能不完整或过时（尤其电脑那份）—— 如果数据里有「最后上报」的时间，
-   要把它说出来。
-3. 回答用中文，两三句话讲完，不要复述整份数据。
-4. 如果问的是这台系统根本没在采集的东西（比如步数、心率、日记），
-   就说那类数据没有接进来。"""
+1. 只使用下面【今天的原始数据】和【过去的相关记录】里出现的事实。
+   两处都没有的，直接说「记录里没有」，**不要推测、不要补充常识、不要编造
+   地点、时间或原因**。
+2. 引用【过去的相关记录】时，要说明是哪一天（例如「10 月 18 日那天…」）。
+   没找到相关记录就直说没找到，不要拿今天的数据冒充过去。
+3. 数据可能不完整或过时（尤其电脑/手表那份）—— 如果数据里有「最后上报」
+   或「这是哪一天的」，要把它说出来。
+4. 回答用中文，两三句话讲完，不要复述整份数据。
+5. 如果问的是这台系统根本没在采集的东西，就说那类数据没有接进来。"""
 
 
 def _digest(day_iso: str, base: str, key: str) -> str:
@@ -834,10 +843,25 @@ def answer_freeform(text: str, *, day_iso: str, base: str, key: str) -> str | No
 
     counter = _llm_counter(Path(conf.get("state_dir") or "."), day_iso)
     digest = _digest(day_iso, base, key)
+
+    # 过去的相关记录：服务器上有 close_day 写好的日记正文，FTS5 检索 top-k。
+    # ⚠️ 检索不到就**不附**这一节，让模型看到「没有」而不是一段空标题 ——
+    #    空标题会被它读成「有一节政策要求我引用历史」。
+    history = ""
+    try:
+        import recall
+        hits = recall.search(text, 5)
+        if hits:
+            history = "\n\n【过去的相关记录（按相关度排序）】\n" + "\n".join(
+                f"- [{h['day']}] {h['excerpt']}" for h in hits)
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN 历史检索不可用：{type(e).__name__}: {e}", file=sys.stderr)
+
     out, err = _run_llm_turn(
         conf, counter, day_iso,
         system=_LLM_SYSTEM,
-        user=f"【今天的原始数据】\n{digest}\n\n【用户的问题】\n{text}",
+        user=(f"【今天的原始数据】\n{digest}{history}\n\n"
+              f"【用户的问题】\n{text}"),
         stage="feishu_ask")
     if out is None:
         return f"问不了：{err}"
@@ -977,6 +1001,11 @@ def answer_query(text: str, *, day_iso: str, base: str, key: str) -> str | None:
     #    能分开它们的只有疑问语气，不是名词。
     if not _looks_like_question(t):
         return None
+
+    # 问的是「过去」→ 交给自由问答（它会去检索服务器上的日记）。
+    # 不能往下走模板：模板答的是今天，而「上次」和「今天」是两个问题。
+    if _hits(t, _HISTORY_WORDS):
+        return UNKNOWN_ANSWER
 
     # ⚠️ 顺序是有意的：**先判答不了的**。
     #    「我今天在电脑上写的日记」里既有「电脑」也有「日记」；日记那条更具体，

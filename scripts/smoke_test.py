@@ -2320,6 +2320,112 @@ check("health: 快照构建不编数 / 隔天要说清 / 睡眠缺失不写 0",
       t_push_health_and_render)
 
 
+def t_recall():
+    """服务器端历史检索：中文分词、AND→OR、新文件会触发重建。
+
+    ⚠️ 这是「上次觉得累」这类问题的唯一数据来源。它静默返回空的结果，
+       比报错更常见 —— 所以这里钉住「该命中的必须命中」「不该命中的不许
+       靠一个字蒙进来」。
+    """
+    import importlib.util
+    import json
+    import tempfile
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "recall_t", root / "server" / "feishu-bot" / "recall.py")
+    rc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rc)
+
+    with tempfile.TemporaryDirectory() as td:
+        state = Path(td)
+        db = state / "memory.db"
+
+        def write(day: str, body: str) -> None:
+            (state / f"journal-output-{day}.json").write_text(
+                json.dumps({"day": day, "body": body}, ensure_ascii=False),
+                encoding="utf-8")
+
+        write("2026-10-18", "今天见了老王，聊了外包项目。晚上很累。")
+        write("2026-10-19", "今天在家整理书架，读了一本书。")
+
+        hits = rc.search("外包", state_dir=state, db=db)
+        assert len(hits) == 1 and hits[0]["day"] == "2026-10-18", hits
+        assert "外包" in hits[0]["excerpt"], hits[0]["excerpt"]
+
+        # 摘要里的汉字不能被切成「今 天 见 了」
+        assert "今天见了老王" in hits[0]["excerpt"], hits[0]["excerpt"]
+
+        # 自然语言问句：删功能词后要能命中，不能把整句当一个短语
+        hits = rc.search("我上次聊外包项目是什么时候", state_dir=state, db=db)
+        assert hits and hits[0]["day"] == "2026-10-18", hits
+
+        # 没有的词 → 空，不猜
+        assert rc.search("不存在的词", state_dir=state, db=db) == []
+        assert rc.search("", state_dir=state, db=db) == []
+
+        # 新的一天写进来 → 下一次检索前自动重建
+        write("2026-10-20", "今天去跑步了，跑完很累。")
+        hits = rc.search("跑步", state_dir=state, db=db)
+        assert hits and hits[0]["day"] == "2026-10-20", hits
+
+
+check("recall: 中文检索 / AND→OR / 新日记自动进索引", t_recall)
+
+
+def t_freeform_history():
+    """自由问答要**带上检索到的历史**，而且找不到时不能附一个空标题。
+
+    历史召回是「外置大脑」的核心：模型必须能引用过去的日记，并且说清
+    是哪一天；没有记录时要说没有，不能拿今天的数据冒充过去。
+    """
+    import importlib.util
+    import tempfile
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "live_hist", root / "server" / "feishu-bot" / "live.py")
+    lv = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lv)
+
+    # answer_freeform 里是 `import recall` —— 把假模块塞进 sys.modules
+    rc_spec = importlib.util.spec_from_file_location(
+        "recall", root / "server" / "feishu-bot" / "recall.py")
+    rc = importlib.util.module_from_spec(rc_spec)
+    rc_spec.loader.exec_module(rc)
+    sys.modules["recall"] = rc
+
+    captured: list[str] = []
+    originals = (lv.cfg, lv._digest, lv._run_llm_turn, rc.search)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            lv.cfg = lambda: {"state_dir": td}
+            lv._digest = lambda d, b, k: "⟨今天的数据⟩"
+            lv._run_llm_turn = lambda conf, counter, day, **kw: (
+                captured.append(kw["user"]) or ("好的", ""))
+            rc.search = lambda q, k: [
+                {"day": "2026-10-18", "excerpt": "〔外包〕项目聊到很晚，晚上很累"}]
+            lv.answer_freeform("我上次觉得累是什么时候",
+                               day_iso="2026-10-21", base="x", key="k")
+        assert "过去的相关记录" in captured[0], captured[0]
+        assert "2026-10-18" in captured[0] and "外包" in captured[0], captured[0]
+
+        # 检索为空 → 不附这一节（空标题会被模型读成「必须引用历史」）
+        rc.search = lambda q, k: []
+        captured.clear()
+        with tempfile.TemporaryDirectory() as td:
+            lv.cfg = lambda: {"state_dir": td}
+            lv.answer_freeform("我上次觉得累是什么时候",
+                               day_iso="2026-10-21", base="x", key="k")
+        assert "过去的相关记录" not in captured[0], captured[0]
+    finally:
+        (lv.cfg, lv._digest, lv._run_llm_turn, rc.search) = originals
+
+
+check("freeform: 历史召回进提示词 / 找不到时不附空标题",
+      t_freeform_history)
+
+
 def t_notes_into_journal():
     """飞书里记的一笔，必须真的**流进日记提示词** —— 否则存了等于白存。
 
@@ -3237,6 +3343,15 @@ def t_feishu_live_routing():
                  "哪怕电脑卡也不换"):    # 「哪(?!怕)」：「哪怕」不是问句
         assert ask(note) is None, f"{note!r} 是随手记，不该被当成查询"
         assert calls == [], f"{note!r} 不该去拉任何数据，实际拉了 {calls}"
+
+    # ── 问「过去」→ 交给检索 + 模型，不能拿今天的数据冒充 ──
+    for q in ("我上次觉得累是什么时候", "以前那几天手机用了多久",
+              "上个月写过什么"):
+        assert ask(q) == lv.UNKNOWN_ANSWER, \
+            f"{q!r} 是历史问题，不该走今天的模板"
+        assert calls == [], f"{q!r} 不该去拉今天的数据，实际拉了 {calls}"
+    # 不像在问的「上次」还是笔记，不能因为一个词就被吃掉
+    assert ask("上次买了牛奶") is None, "不是问句，应该当笔记"
 
     # ── 认不出来时**不能**默默去出题 ──
     assert ask("这是啥？") == lv.UNKNOWN_ANSWER, "带问号又没命中的，要明说能答什么"
