@@ -174,6 +174,10 @@ try {
 
     # ── 轻采集：每轮都做 ────────────────────────────────────────────
     Invoke-Py "desktop" "scripts\collect_desktop.py" @("--date", $today) | Out-Null
+    # 中继上的「现在在干嘛」快照：原来只在 10 分钟的 Desktop 任务里推，
+    # AFK / 当前窗口最多会旧 10 分钟。站点 NOW 每 30 秒轮询，2 分钟推一次
+    # 才能让 AFK 和「现在在」跟得上。
+    Invoke-Py "push-desktop" "scripts\push_desktop.py" @() | Out-Null
     Invoke-Py "phone-events" "scripts\collect_phone_events.py" @("--date", $today) | Out-Null
     # 只采集不归一化的话，blocks 表不会动，站点聚合里的分类时长会一直停在上一次
     # normalize。它只跑当天、几秒级，放在每轮里开销可以接受。
@@ -184,6 +188,11 @@ try {
         Invoke-Py "phone-location" "scripts\collect_phone.py" @("--date", $today) | Out-Null
         Invoke-Py "watch-pull" "scripts\collect_watch.py" @("--date", $today) | Out-Null
         Invoke-Py "watch-ingest" "middleware\ingest_gadgetbridge.py" @("--date", $today) | Out-Null
+        # GPX/FIT 锻炼文件：手机 Tasker 传到中继，这里拉到 state/gpx|fit 再解析成
+        # domain=fitness / metric=watch_track（地图上的虚线手表路线）。
+        Invoke-Py "media-collect" "scripts\collect_media.py" @() | Out-Null
+        Invoke-Py "gpx-import" "scripts\import_gpx.py" @() | Out-Null
+        Invoke-Py "fit-import" "scripts\import_fit.py" @() | Out-Null
         # 中继 /watch 是飞书机器人读的那份；不推的话它会一直停在上一份。
         Invoke-Py "push-health" "scripts\push_health.py" @() | Out-Null
         Invoke-Py "ai-usage" "scripts\collect_ai_usage.py" @("--date", $today) | Out-Null

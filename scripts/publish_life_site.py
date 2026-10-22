@@ -34,7 +34,7 @@ import re
 import sqlite3
 import sys
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -110,6 +110,13 @@ CITY_NAMES = {
 
 # 残留的 Android 包名（summarize_phone 对未知包名会原样保留）
 PKG_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$")
+
+# 七维向量里的 Social：手机上的社交/通讯应用。桌面端的 WeChat/QQ 会先被
+# Leisure 规则命中，所以这里从 phone.topApps 取，避免 Social 永远为 0。
+SOCIAL_APPS = {
+    "WeChat", "QQ", "Telegram", "WhatsApp", "Signal", "Line", "Discord",
+    "Weibo", "Xiaohongshu", "Instagram", "Facebook", "Threads", "LinkedIn",
+}
 CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -221,14 +228,25 @@ def build_health(rows: list[sqlite3.Row]) -> dict | None:
         row = pick_metric(rows, metric)
         return None if row is None else num(row["value_num"], 3)
 
+    def meta_value(metric: str, key: str) -> float | None:
+        row = pick_metric(rows, metric)
+        return None if row is None else num(meta_of(row).get(key), 1)
+
     steps = value("steps")
     if steps is not None and steps < 0:
         steps = None
+
+    # 旧数据没有独立的 heart_rate_max 事件；heart_rate_avg 的 meta 里已经有
+    # 当天的最高心率，所以历史日期也能补出 hrMax，不需要重跑 ingest。
+    hr_max = num(value("heart_rate_max"), 1)
+    if hr_max is None:
+        hr_max = meta_value("heart_rate_avg", "max")
 
     calls = {
         "steps": None if steps is None else int(round(steps)),
         "hrAvg": num(value("heart_rate_avg"), 1),
         "hrMin": num(value("heart_rate_min"), 1),
+        "hrMax": hr_max,
         "runs": None if value("run_count") is None else int(round(value("run_count") or 0)),
         "runKm": num(value("run_km"), 2),
         "runMinutes": num(value("run_minutes"), 1),
@@ -494,6 +512,162 @@ def build_ai(rows: list[sqlite3.Row]) -> dict | None:
     }
 
 
+def build_dimensions(categories: dict | None, health: dict | None,
+                     location: dict | None, phone: dict | None) -> dict[str, float]:
+    """把桌面分类 + 手表 + GPS + 手机合成神经系统用的七维（单位：小时）。
+
+    - Work / Study / Life / Leisure：桌面 ActivityWatch 分类
+    - Transport：Dawarich 的实测 + 推断通勤分钟
+    - Health：手表跑步分钟（当前导出没有睡眠/其他可计时活动）
+    - Social：手机社交/通讯应用分钟
+    Other 不进入七维（它是“没认出来”，不是维度）。
+    """
+    cats = categories or {}
+
+    def cat(name: str) -> float:
+        return max(0.0, float(cats.get(name) or 0.0))
+
+    transit_min = max(0.0, float((location or {}).get("transitMinutes") or 0.0))
+    health_min = max(0.0, float((health or {}).get("runMinutes") or 0.0))
+    social_min = 0.0
+    for name, minutes in (phone or {}).get("topApps") or []:
+        if str(name) in SOCIAL_APPS:
+            social_min += max(0.0, float(minutes or 0.0))
+
+    return {
+        "Work": round(cat("Work"), 2),
+        "Study": round(cat("Study"), 2),
+        "Transport": round(transit_min / 60.0, 2),
+        "Leisure": round(cat("Leisure"), 2),
+        "Health": round(health_min / 60.0, 2),
+        "Life": round(cat("Life"), 2),
+        "Social": round(social_min / 60.0, 2),
+    }
+
+
+def build_workouts(rows: list[sqlite3.Row]) -> list[dict[str, Any]] | None:
+    """每次锻炼的明细（目前主要是跑步）。给 MOTION 的 RUNS 列表用。"""
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if row["metric"] != "workout":
+            continue
+        start = str(row["ts_utc"] or "")
+        if not start:
+            continue
+        meta = meta_of(row)
+
+        def num_meta(key: str, digits: int, integer: bool = False):
+            v = num(meta.get(key), digits)
+            if v is None:
+                return None
+            return int(round(v)) if integer else round(v, digits)
+
+        out.append({
+            "start": start,
+            "end": str(meta.get("end_utc") or ""),
+            "name": clean_name(row["value_text"], 40) or "Workout",
+            "kind": clean_name(meta.get("kind"), 40),
+            "minutes": round(num(row["value_num"], 1) or 0.0, 1),
+            "km": num(meta.get("distance_km"), 2),
+            "avgHr": num_meta("avg_hr", 0, True),
+            "maxHr": num_meta("max_hr", 0, True),
+            "paceS": num_meta("pace_s_per_km", 0, True),
+            "cadence": num_meta("avg_cadence", 0, True),
+            "ascentM": num_meta("ascent_m", 0, True),
+            "calories": num_meta("calories", 0, True),
+            "vo2max": num_meta("vo2max", 1),
+            "trainingEffect": num_meta("training_effect", 1),
+            "recoveryHours": num_meta("recovery_hours", 1),
+        })
+    out.sort(key=lambda w: w["start"])
+    return out or None
+
+
+def build_all_time(cfg: dict, tz: ZoneInfo) -> dict | None:
+    """手表数据库里的**全历史**统计（不是 30 天窗口）。
+
+    Gadgetbridge 的 BASE_ACTIVITY_SUMMARY 保存了所有锻炼；这里直接读它，
+    所以 Best Pace / Longest 可以来自很早以前，而不是从站点搭好之后才有。
+    """
+    gb = (cfg.get("sources") or {}).get("gadgetbridge") or {}
+    db_path = gb.get("db_path")
+    if not db_path:
+        return None
+    path = Path(str(db_path))
+    if not path.is_file():
+        return None
+
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            'SELECT NAME, START_TIME, SUMMARY_DATA FROM "BASE_ACTIVITY_SUMMARY"'
+        ).fetchall()
+        conn.close()
+    except (sqlite3.Error, OSError) as exc:
+        print(f"  ⚠️  all-time watch stats unavailable: {exc}", file=sys.stderr)
+        return None
+
+    def val(summary: dict, key: str):
+        v = summary.get(key)
+        return v.get("value") if isinstance(v, dict) else v
+
+    workouts = []
+    for row in rows:
+        start_ms = row["START_TIME"]
+        if not isinstance(start_ms, (int, float)) or start_ms <= 0:
+            continue
+        try:
+            summary = json.loads(row["SUMMARY_DATA"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            summary = {}
+        try:
+            km = float(val(summary, "distanceMeters") or 0) / 1000.0
+        except (TypeError, ValueError):
+            km = 0.0
+        try:
+            pace = float(val(summary, "averageKMPaceSeconds") or 0)
+        except (TypeError, ValueError):
+            pace = 0.0
+        if km <= 0:
+            continue
+        start = datetime.fromtimestamp(start_ms / 1000.0, tz=timezone.utc).astimezone(tz)
+        workouts.append({
+            "km": km,
+            "pace": pace,
+            "start": start,
+            "name": (row["NAME"] or "").strip() or "Workout",
+            "day": start.date().isoformat(),
+        })
+
+    if not workouts:
+        return None
+
+    paced = [w for w in workouts if w["pace"] > 0 and w["km"] >= 0.1]
+    if not paced:
+        paced = [w for w in workouts if w["pace"] > 0]
+    best = min(paced, key=lambda w: w["pace"]) if paced else None
+    longest = max(workouts, key=lambda w: w["km"])
+
+    def iso(w) -> str | None:
+        return (w["start"].astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                if w else None)
+
+    return {
+        "runs": len(workouts),
+        "km": round(sum(w["km"] for w in workouts), 1),
+        "bestPaceS": int(round(best["pace"])) if best else None,
+        "bestPaceKm": round(best["km"], 2) if best else None,
+        "bestPaceName": clean_name(best["name"], 40) if best else None,
+        "bestPaceDay": best["day"] if best else None,
+        "bestPaceStart": iso(best),
+        "longestKm": round(longest["km"], 2),
+        "longestName": clean_name(longest["name"], 40),
+        "longestDay": longest["day"],
+        "longestStart": iso(longest),
+    }
+
+
 def build_day(conn: sqlite3.Connection, day: str, categories_cfg: list[str]) -> dict | None:
     blocks = conn.execute(
         """SELECT category, app, SUM(hours) AS hours
@@ -514,23 +688,31 @@ def build_day(conn: sqlite3.Connection, day: str, categories_cfg: list[str]) -> 
         by_domain.setdefault(row["domain"], []).append(row)
 
     categories, tracked, top_apps = build_desktop(blocks, categories_cfg)
+    health = build_health(by_domain.get("health", []))
+    location = build_location(by_domain.get("location", []))
+    phone = build_phone(by_domain.get("phone", []))
     return {
         "v": 1,
         "day": day,
         "categories": categories,
         "trackedHours": tracked,
         "topApps": top_apps,
-        "health": build_health(by_domain.get("health", [])),
-        "location": build_location(by_domain.get("location", [])),
-        "phone": build_phone(by_domain.get("phone", [])),
+        "health": health,
+        "location": location,
+        "phone": phone,
         "ai": build_ai(by_domain.get("ai", [])),
+        "workouts": build_workouts(by_domain.get("fitness", [])),
+        "dimensions": build_dimensions(categories, health, location, phone),
     }
 
 
 def has_content(day_obj: dict) -> bool:
+    # dimensions 是从下面这些源派生的；它总是 dict，不能单独拿来判断“有没有数据”，
+    # 否则空的 30 天会被整批发上去。
     return any(
         day_obj.get(k) is not None
-        for k in ("categories", "trackedHours", "topApps", "health", "location", "phone", "ai")
+        for k in ("categories", "trackedHours", "topApps", "health", "location",
+                  "phone", "ai", "workouts")
     )
 
 
@@ -570,6 +752,41 @@ def post_days(url: str, token: str, days: list[dict], chunk_size: int, timeout: 
                 break
 
             last_error = RuntimeError(f"HTTP {res.status_code}: {res.text[:200]}")
+            # 兼容旧 Worker：它的 DAY_KEYS 还没有 allTime。
+            if (res.status_code == 400
+                    and any("allTime" in d for d in chunk)):
+                for d in chunk:
+                    d.pop("allTime", None)
+                print("  ⚠️  Worker 还不认识 allTime；这批先去掉它再发。")
+                continue
+            # 兼容旧 Worker：它的 DAY_KEYS 还没有 workouts。部署新 Worker 之前，
+            # 当天 23:00 的流水线不能因为一个新字段整批失败。
+            if (res.status_code == 400
+                    and any("workouts" in d for d in chunk)):
+                for d in chunk:
+                    d.pop("workouts", None)
+                print("  ⚠️  Worker 还不认识 workouts；这批先去掉它再发。")
+                continue
+            # 兼容旧 Worker：它的 DAY_KEYS 还没有 dimensions。部署新 Worker 之前，
+            # 当天 23:00 的流水线不能因为一个新字段整批失败 —— 剥掉 dimensions
+            # 重试一次；部署后再跑 --days 30 就能把历史补回来。
+            if (res.status_code == 400
+                    and any("dimensions" in d for d in chunk)):
+                for d in chunk:
+                    d.pop("dimensions", None)
+                print("  ⚠️  Worker 还不认识 dimensions；这批先去掉它再发。")
+                continue
+            # 兼容旧 Worker：它的 HEALTH_KEYS 还没有 hrMax。部署新 Worker 之前，
+            # 当天 23:00 的流水线不能因为一个新字段整批失败 —— 剥掉 hrMax
+            # 重试一次；部署后再跑 --days 30 就能把历史补回来。
+            if (res.status_code == 400 and "hrMax" in res.text
+                    and any(isinstance(d.get("health"), dict) and "hrMax" in d["health"]
+                            for d in chunk)):
+                for d in chunk:
+                    if isinstance(d.get("health"), dict):
+                        d["health"].pop("hrMax", None)
+                print("  ⚠️  Worker 还不认识 health.hrMax；这批先去掉它再发。")
+                continue
             if res.status_code in (429, 500, 502, 503, 504) and attempt < 3:
                 retry_after = res.headers.get("Retry-After", "")
                 wait = min(float(retry_after), 10.0) if retry_after.isdigit() else float(2 ** attempt)
@@ -639,6 +856,8 @@ def main() -> int:
     payloads: list[dict] = []
     skipped: list[str] = []
 
+    all_time = build_all_time(cfg, tz)
+
     header(f"publish life · {days[0]} → {days[-1]}")
     for day in days:
         try:
@@ -646,6 +865,8 @@ def main() -> int:
             if not has_content(obj):
                 skipped.append(day)
                 continue
+            if all_time:
+                obj["allTime"] = all_time
             encode_day(obj)  # 先验证体积
             payloads.append(obj)
             print(

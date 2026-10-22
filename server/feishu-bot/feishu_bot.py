@@ -29,9 +29,10 @@
     **中继是「什么算还没答」的唯一实现**，这里不抄第二份 —— 抄了就会漂移，
     而且漂移了两边都不报错。
 
-    另外它还能答「我今天去哪了」这类**当天数据**的问题（同一根管子上的另一
-    个用途）。那一半在 live.py 里 —— 同样是把服务器上已有的实现调过来用，
-    不重写任何统计逻辑。
+    另外它还能查**当天数据**：`/today`、`/phone`、`/where`、`/desktop`、
+    `/watch`、`/qa`、`/ask`。只有斜杠命令会读数据，普通消息一律记成笔记。
+    那一半在 live.py 里 —— 同样是把服务器上已有的实现调过来用，不重写任何
+    统计逻辑。
 
 **⚠️ 三件必须知道的事**
 
@@ -64,6 +65,7 @@ import argparse
 import json
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -453,8 +455,7 @@ def save_note(open_id: str, text: str) -> None:
     # 记下原文（截断）：排查「我说的话它怎么没存/怎么当成问句了」时，
     # 日志里得有那句话本身，光有「记下了」什么都查不出来。
     print(f"[note] {text[:80]!r}")
-    send_text(open_id, "记下了。\n"
-                       "（这条会进今天的日记。想让我出题就发「?」）")
+    send_text(open_id, "记下了。")
 
 
 def pending_filtered(state: dict) -> list[dict]:
@@ -919,59 +920,105 @@ def handle_end_day(open_id: str) -> None:
     print(f"[end-day] 收尾开始，还剩 {len(qs)} 题")
 
 
+# 只有这些命令会去读数据。普通消息一律记成笔记 —— 自然语言关键词匹配太容易
+# 被长文里的「手机」「电脑」误伤，而且回复里那串解释本身也是噪音。
+DATA_COMMANDS = {
+    "/today": "当天总览",
+    "/phone": "手机使用",
+    "/where": "位置 / 停留",
+    "/location": "位置 / 停留",
+    "/desktop": "电脑当前快照",
+    "/watch": "手表汇总",
+    "/qa": "当天问答",
+    "/ask": "自由提问",
+}
+
+
+def _day_arg(arg: str) -> str:
+    """命令后面可以带 YYYY-MM-DD；不带就是今天。"""
+    m = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", arg or "")
+    return m.group(1) if m else datetime.now(TZ).date().isoformat()
+
+
+def handle_data_command(open_id: str, cmd: str, arg: str) -> None:
+    """斜杠命令的查询出口。只在这里读数据。"""
+    day = _day_arg(arg)
+    try:
+        if cmd == "/today":
+            snap = live.data_snapshot(day, RELAY_BASE, RELAY_API_KEY)
+            reply = f"今天 · {day}"
+            reply += ("\n" + "\n".join(f"· {x}" for x in snap)) if snap else "\n没有数据。"
+        elif cmd == "/phone":
+            reply = live.render_phone(
+                live.relay_events(day, RELAY_BASE, RELAY_API_KEY), day_iso=day)
+        elif cmd in ("/where", "/location"):
+            reply = live.render_location(day)
+        elif cmd == "/desktop":
+            reply = live.render_desktop(day, RELAY_BASE, RELAY_API_KEY)
+        elif cmd == "/watch":
+            reply = live.render_watch(day, RELAY_BASE, RELAY_API_KEY)
+        elif cmd == "/qa":
+            reply = live.render_qa(day, RELAY_BASE, RELAY_API_KEY)
+        elif cmd == "/ask":
+            question = arg.strip()
+            if not question:
+                reply = "用法：/ask <问题>"
+            else:
+                reply = live.answer_query(question, day_iso=day,
+                                          base=RELAY_BASE, key=RELAY_API_KEY)
+                if reply in (None, live.UNKNOWN_ANSWER) and FREEFORM_LLM:
+                    reply = (live.answer_freeform(question, day_iso=day,
+                                                  base=RELAY_BASE,
+                                                  key=RELAY_API_KEY)
+                             or reply)
+                if not reply:
+                    reply = "没有可用答案。"
+        else:
+            reply = "未知命令。看 /help。"
+    except live.LiveUnavailable as e:
+        reply = str(e)
+    except Exception as e:  # noqa: BLE001
+        print(f"ERROR 查数据失败：{type(e).__name__}: {e}", file=sys.stderr)
+        reply = f"查不到：{e}"
+    send_text(open_id, reply)
+
+
 def handle_text(open_id: str, text: str) -> None:
     """一条用户消息进来之后做什么。跑在 worker 线程里，不受 3 秒限制。"""
     state = load_state()
     awaiting = state.get("awaiting")
 
     stripped = text.strip()
+    parts = stripped.split(maxsplit=1)
+    cmd = parts[0].lower() if parts else ""
+    arg = parts[1].strip() if len(parts) > 1 else ""
 
-    if stripped in ("/help", "帮助", "/?"):
+    if stripped in ("/help", "帮助", "/?") or cmd == "/help":
         send_text(open_id,
-                  "【记一笔】\n"
-                  "  直接发一句话 → 存进今天的记录，会进日记。\n"
-                  "  例：「今天见了老王，聊了项目」\n"
-                  "  带「记：」前缀的一定当笔记存（句子长得像问句时用它）；\n"
-                  "  除此之外，带问号/疑问词的话会先被当成「问我今天」。\n"
+                  "命令（只有斜杠命令会查数据）：\n"
+                  "  /today [YYYY-MM-DD]    当天总览\n"
+                  "  /phone [YYYY-MM-DD]    手机使用\n"
+                  "  /where [YYYY-MM-DD]    位置 / 停留\n"
+                  "  /desktop               电脑当前快照\n"
+                  "  /watch                 手表汇总\n"
+                  "  /qa [YYYY-MM-DD]       当天问答\n"
+                  "  /ask <问题>            自由提问\n"
+                  "  /pending               下一道题\n"
+                  "  /skip                  跳过当前题\n"
+                  "  /end                   开始收尾\n"
+                  "  /recap                 重新生成今日复盘\n"
+                  "  /help                  这份列表\n"
                   "\n"
-                  "【要我出题】\n"
-                  "  回「?」→ 今天还没答的题\n"
-                  "  二值题回「做了 / 没做」，选择题回数字；\n"
-                  "  答案后面可以接着写自己的话，后半句记成备注：\n"
-                  "    「做了，花了两小时」 / 「1 其实只做了一半」\n"
-                  "  /skip 跳过这题 · /pending 重新拉一遍\n"
-                  "\n"
-                  "【问我今天】\n"
-                  "  · 我今天去哪了 · 手机用了多久 · 今天解锁几次\n"
-                  "  · 我今天在电脑上干了什么 / 现在在忙什么\n"
-                  "  模板覆盖不到的交给模型，只喂今天的数据，没有就说没有。\n"
-                  "  · 上次 / 以前… → 会去翻服务器上的日记再回答\n"
-                  "\n"
-                  "【白天与晚上】\n"
-                  "  白天每个小时问你一次「刚才这一小时在干嘛」；\n"
-                  "  发「/收尾」→ 立刻开始问收尾题，答完我给你一份今日复盘\n"
-                  "  （23:00 也会自动问一次，如果你还没发过）\n"
-                  "  发「/复盘」→ 重新生成一次今日复盘（总结失败时用它补）\n"
-                  "  收尾的常规题里，心情/体力回 1–5 分（后面可以补一句），\n"
-                  "  其余几维仍是自由文本。\n"
-                  "\n"
-                  "【它会主动说】\n"
-                  "  熬夜 / 手机亮屏超 6 小时 / 娱乐应用超 3 小时 /\n"
-                  "  电脑前连续 3 小时 → 发一句「⚡ 反射弧」。\n"
-                  "  每条每天最多一次；正有题在等答案时不发（免得被当成答案）。\n"
-                  "\n"
-                  "⚠️ 电脑数据来自笔记本每 10 分钟推的快照，答案里会写明\n"
-                  "   「最后上报是几点」—— 是几小时前的就直说，别当成此刻。\n"
-                  "⚠️ 日记和 vault 答不了：它们在笔记本的 Obsidian 库里，没推到服务器。\n"
-                  "⚠️ 手表（步数/心率）来自笔记本推的日汇总，通常晚一天；\n"
-                  "   这台手环的导出里没有睡眠样本，所以睡眠只能靠自评。")
+                  "直接发文字 = 记一笔，不会触发查数据。\n"
+                  "正有题在等答案时，普通文字会被当成答案；只想记一笔请用「记：」。\n"
+                  "回「?」= 下一道题。")
         return
 
-    if stripped in END_DAY_COMMANDS:
+    if cmd in END_DAY_COMMANDS:
         handle_end_day(open_id)
         return
 
-    if stripped in RECAP_COMMANDS:
+    if cmd in RECAP_COMMANDS:
         # ⚠️ force=True：不检查「还有没有没收尾的题」。
         #    存在的理由：总结那一步可能因为 LLM 挂了/额度用完而失败（实测过，
         #    见 2026-10-17 那次 DEEPSEEK_API_KEY 缺失）。而**答完的题不会再
@@ -1005,6 +1052,14 @@ def handle_text(open_id: str, text: str) -> None:
         advance(open_id)
         return
 
+    # ── 数据命令 ──
+    # 只有斜杠命令会查数据。普通消息不再靠关键词猜「这是不是在问数据」——
+    # 一段很长的随笔里出现「手机 / 电脑」就会被误伤，而且丢的是用户亲手写的
+    # 那句话。想查数据就明确发命令。
+    if cmd in DATA_COMMANDS:
+        handle_data_command(open_id, cmd, arg)
+        return
+
     # ── 明确要记一笔 ──
     # 放在所有命令和查数据之前：带了前缀就是笔记，哪怕它长得像问句、
     # 哪怕正有一道题在等答案（笔记不该被题截胡，题也不会丢 —— 它还在
@@ -1022,34 +1077,9 @@ def handle_text(open_id: str, text: str) -> None:
         return
 
     if not awaiting:
-        # 没有在等答案。先看这是不是一个「问我今天」的问题；不是的话，
-        # 就当「给我题」——「随便一句都能出题」这个手感要保住。
-        day_iso = datetime.now(TZ).date().isoformat()
-        try:
-            reply = live.answer_query(stripped, day_iso=day_iso,
-                                      base=RELAY_BASE, key=RELAY_API_KEY)
-            if reply == live.UNKNOWN_ANSWER and FREEFORM_LLM:
-                # 模板答不了、但它看着确实是在问一句什么 —— 才交给模型。
-                #
-                # ⚠️ 顺序不能反。**已经能算出来的数字永远走模板**（确定、零成本、
-                #    不会漂移）。只有模板覆盖不到的问题才该花钱，而且喂给模型的
-                #    只有今天的原始数据，提示词里明令「数据里没有就说没有」。
-                reply = (live.answer_freeform(stripped, day_iso=day_iso,
-                                              base=RELAY_BASE, key=RELAY_API_KEY)
-                         or reply)
-        except Exception as e:  # noqa: BLE001
-            # 中继挂了、Dawarich 挂了、配置没填 —— 都会走到这里。
-            # ⚠️ 不能默默吞掉然后去出题：那会让「我问了它一个数据问题、
-            #    它却开始给我出题」看起来像答非所问。
-            print(f"ERROR 查数据失败：{type(e).__name__}: {e}", file=sys.stderr)
-            send_text(open_id, f"查不到：{e}")
-            return
-        if reply:
-            send_text(open_id, reply)
-            return
-
-        # ── 出题的暗号 ──
-        # 这几个词仍然是「给我题」，不当事笔记。除此之外**一律记下来**。
+        # 数据查询只走上面的斜杠命令；这里剩下的按「要题 / 记一笔」处理。
+        # 不再用关键词猜「这句话像不像在问数据」—— 长文里的「手机」「电脑」
+        # 太容易被误伤，而误伤的代价是用户写的那段话被吞掉。
         if stripped in ("?", "？", "题", "给我题"):
             advance(open_id)
             return
@@ -1057,17 +1087,6 @@ def handle_text(open_id: str, text: str) -> None:
         if not stripped:
             return
 
-        # ── 记一笔 ──
-        #
-        # ⚠️ 这是**有意的取舍**（使用者定的）：任何没被识别成「查数据」的消息
-        #    都存成笔记，而不是被当成「给我出题」或被打回去重说。
-        #    代价：一句没命中关键词的问句（「我今天咋这么累」）不会得到回答，
-        #    而是被记下来。但它同时也进了当天的日记资料 —— 所以不是「丢了」，
-        #    而是「记下来了」。想明确要题就发「?」。
-        #
-        # ⚠️ 反过来的保证在 live.answer_query 里：**不像在问的话永远到不了
-        #    这里之上那条分支**。关键词里有「电脑」「网页」「应用」这种日常
-        #    词，只靠它们判「查数据」会把随手记吃掉。
         save_note(open_id, stripped)
         return
 

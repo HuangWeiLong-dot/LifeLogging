@@ -2289,9 +2289,9 @@ def t_push_health_and_render():
     lv.relay_watch = lambda b, k: snap
     out = lv.render_watch("2026-10-21", "x", "k")
     assert "4426" in out and "79" in out, out
-    assert "没有睡眠样本" in out, "没有睡眠数据时不能写成 0 小时"
+    assert "睡眠        —" in out, "没有睡眠数据时用破折号，不能写成 0 小时"
     assert "跑步" in out and "4.2 km" in out, out
-    assert "不是今天" in out, "隔天的汇总必须明说"
+    assert "2026-10-20" in out, "隔天的汇总必须在标题里带日期"
 
     # 同一天 + 有睡眠样本 → 正常显示，不报「不是今天」
     fresh = dict(snap, day="2026-10-21", pushed_at=dt.now(tz).isoformat(),
@@ -3313,7 +3313,7 @@ def t_feishu_live_routing():
     calls: list[str] = []
     lv.render_location = lambda day: (calls.append("loc") or "⟨位置⟩")
     lv.relay_events = lambda day, base, key: (calls.append("relay") or [])
-    lv.render_phone = lambda evs: (calls.append("phone") or "⟨手机⟩")
+    lv.render_phone = lambda evs, day_iso=None: (calls.append("phone") or "⟨手机⟩")
     lv.render_desktop = lambda day, base, key: (calls.append("desktop") or "⟨电脑⟩")
     lv.render_watch = lambda day, base, key: (calls.append("watch") or "⟨健康⟩")
 
@@ -3407,13 +3407,61 @@ def t_feishu_live_routing():
     assert "push_desktop.py" in lv.DESKTOP_NO_DATA
     # 没推过健康汇总时，也要指到那个能修的地方
     assert "push_health.py" in lv.WATCH_NO_DATA
-    assert "Gadgetbridge" in lv.WATCH_NO_DATA
     # 中继出错时的兜底话不能再说「还没接」—— 那是过期信息
     assert "拉不到" in lv.HEALTH_ANSWER
 
 
 check("feishu: 路由从窄到宽 —— 日记/手表说答不了，电脑/位置/手机各拉各的",
       t_feishu_live_routing)
+
+
+def t_feishu_slash_only():
+    """数据只走斜杠命令；普通长文一律记成笔记。
+
+    背景：一段随笔里出现「手机」和几个问号，就被旧的 answer_query 当成
+    「手机用了多久」，于是用户收到一份手机报表，而他写的那段话没被存下来。
+    现在只有 /phone /where /desktop /watch /qa /today /ask 会查数据。
+    """
+    import importlib.util
+
+    path = (Path(__file__).resolve().parent.parent
+            / "server" / "feishu-bot" / "feishu_bot.py")
+    spec = importlib.util.spec_from_file_location("feishu_bot_slash", path)
+    fb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fb)
+
+    calls = {"sent": [], "notes": [], "cmds": []}
+    state: dict = {}
+    fb.load_state = lambda: state
+    fb.save_state = lambda s: state.update(s)
+    fb.send_text = lambda oid, t: calls["sent"].append(t)
+    fb.save_note = lambda oid, t: calls["notes"].append(t)
+    fb.handle_data_command = lambda oid, cmd, arg: calls["cmds"].append((cmd, arg))
+
+    long_note = ("Something happened today that drained me. "
+                 "Everyone had their heads down, playing on their phones. "
+                 "What exactly are you trying to express? Why does anyone do anything?")
+    fb.handle_text("ou_x", long_note)
+    assert calls["notes"] == [long_note], calls
+    assert calls["cmds"] == [], f"普通消息不该触发查数据：{calls['cmds']}"
+
+    # 斜杠命令才查数据；日期参数原样传下去
+    fb.handle_text("ou_x", "/phone")
+    assert calls["cmds"] == [("/phone", "")], calls["cmds"]
+    fb.handle_text("ou_x", "/where 2026-10-20")
+    assert calls["cmds"][-1] == ("/where", "2026-10-20"), calls["cmds"]
+    fb.handle_text("ou_x", "/ask 今天手机用了多久")
+    assert calls["cmds"][-1] == ("/ask", "今天手机用了多久"), calls["cmds"]
+
+    # /help 必须把命令列全；大小写不敏感
+    calls["sent"].clear()
+    fb.handle_text("ou_x", "/HELP")
+    assert calls["sent"] and "/phone" in calls["sent"][-1], calls["sent"]
+    assert "/where" in calls["sent"][-1] and "/qa" in calls["sent"][-1], calls["sent"]
+
+
+check("feishu: 只有斜杠命令查数据；长随笔不会被「手机」关键词吃掉",
+      t_feishu_slash_only)
 
 
 def t_feishu_note_prefix():

@@ -67,6 +67,7 @@ from __future__ import annotations
 import html
 import json
 import os
+import hashlib
 import re
 import secrets
 import sys
@@ -91,6 +92,14 @@ MAX_UPLOAD = int(os.environ.get("RELAY_MAX_UPLOAD", str(64 * 1024 * 1024)))  # 6
 # ⚠️ 不做白名单就会变成任意路径写入 —— 一个对外的端点拿到写权限，
 #    等于把服务器交出去。这里只认死几个名字。
 UPLOAD_NAMES = {"gadgetbridge.db"}
+
+# GPX / FIT 是「一次一个文件」的锻炼导出：不能像 DB 那样固定文件名覆盖，
+# 所以按内容 sha1 存到子目录，重复上传天然幂等。
+MEDIA_DIRS = {
+    "gpx": DATA_DIR / "gpx",
+    "fit": DATA_DIR / "fit",
+}
+MEDIA_RE = re.compile(r"^[a-f0-9]{40}\.(gpx|fit)$")
 
 try:
     from zoneinfo import ZoneInfo
@@ -305,6 +314,73 @@ def save_upload(name: str, body: bytes) -> tuple[bool, str]:
                 pass                       # 留不下旧版不是致命问题
         os.replace(tmp, dest)
     return True, f"{len(body)} bytes"
+
+
+def _media_kind(kind: str) -> str | None:
+    return kind if kind in MEDIA_DIRS else None
+
+
+def _media_valid(kind: str, body: bytes) -> bool:
+    """粗校验魔术字，挡住把 DB/文本误传到 GPX/FIT 端点。"""
+    if not body:
+        return False
+    if kind == "gpx":
+        head = body[:256].lstrip(b"\xef\xbb\xbf \t\r\n")
+        return head.startswith(b"<?xml") or head.startswith(b"<gpx")
+    if kind == "fit":
+        # FIT header: 12 or 14 bytes, bytes 8..12 == ".FIT"
+        return len(body) >= 12 and body[8:12] == b".FIT"
+    return False
+
+
+def media_path(kind: str, name: str) -> Path | None:
+    if _media_kind(kind) is None or not MEDIA_RE.match(name or ""):
+        return None
+    suffix = f".{kind}"
+    if not name.endswith(suffix):
+        return None
+    return MEDIA_DIRS[kind] / name
+
+
+def save_media(kind: str, body: bytes) -> tuple[bool, str]:
+    """按内容 sha1 存 GPX/FIT；同一份文件重复上传不会产生副本。"""
+    if _media_kind(kind) is None:
+        return False, f"unknown media kind: {kind}"
+    if not _media_valid(kind, body):
+        return False, f"body does not look like a {kind.upper()} file"
+
+    digest = hashlib.sha1(body).hexdigest()
+    name = f"{digest}.{kind}"
+    dest = MEDIA_DIRS[kind] / name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists() and dest.stat().st_size == len(body):
+        return True, name
+
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    with _write_lock:
+        with tmp.open("wb") as f:
+            f.write(body)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, dest)
+    return True, name
+
+
+def list_media(kind: str) -> list[dict[str, Any]]:
+    if _media_kind(kind) is None:
+        return []
+    out = []
+    for p in sorted(MEDIA_DIRS[kind].glob(f"*.{kind}")):
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        out.append({
+            "name": p.name,
+            "bytes": st.st_size,
+            "updated": datetime.fromtimestamp(st.st_mtime, tz=TZ).strftime("%Y-%m-%d %H:%M"),
+        })
+    return out
 
 
 # ── 每日提问 ────────────────────────────────────────────────────────
@@ -966,6 +1042,12 @@ class Handler(BaseHTTPRequestHandler):
                         "updated": datetime.fromtimestamp(st.st_mtime, tz=TZ)
                                            .strftime("%Y-%m-%d %H:%M"),
                     }
+            for kind in MEDIA_DIRS:
+                files = list_media(kind)
+                payload[f"files_{kind}"] = {
+                    "count": len(files),
+                    "latest": files[-1] if files else None,
+                }
             self._send(200, payload)
             return
 
@@ -990,6 +1072,29 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, {"error": "?day=YYYY-MM-DD is required"})
                 return
             self._send(200, day_qa(day))
+            return
+
+        if u.path in ("/files/gpx", "/files/fit"):
+            if not self._authed():
+                return
+            kind = u.path.rsplit("/", 1)[-1]
+            self._send(200, {"kind": kind, "files": list_media(kind)})
+            return
+
+        if u.path.startswith("/files/gpx/") or u.path.startswith("/files/fit/"):
+            if not self._authed():
+                return
+            kind, _, name = u.path[len("/files/"):].partition("/")
+            p = media_path(kind, name)
+            if p is None or not p.exists():
+                self._send(404, {"error": "no such media file"})
+                return
+            data = p.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
             return
 
         if u.path.startswith("/files/"):
@@ -1177,6 +1282,26 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:                # noqa: N802
         u = urlparse(self.path)
+
+        # ── GPX / FIT 媒体上传（每次锻炼一个文件）──────────────────
+        if u.path in ("/upload/gpx", "/upload/fit"):
+            if not self._authed():
+                return
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                self._send(400, {"error": "bad Content-Length"})
+                return
+            if n <= 0 or n > MAX_UPLOAD:
+                self._send(400, {"error": f"body must be 1..{MAX_UPLOAD} bytes"})
+                return
+            body = self.rfile.read(n)
+            ok, detail = save_media(
+                u.path.rsplit("/", 1)[-1],
+                extract_upload(body, self.headers.get("Content-Type") or ""),
+            )
+            self._send(200 if ok else 400, {"ok": ok, "detail": detail})
+            return
 
         # ── 文件上传（Gadgetbridge 导出的 .db）─────────────────────
         if u.path.startswith("/upload/"):

@@ -23,6 +23,7 @@ using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -129,7 +130,12 @@ namespace LifeLoggingLive
                 Application.SetCompatibleTextRenderingDefault(false);
 
                 form = new MainForm(silent);
-                form.CreateControl(); // 先建句柄，show 事件线程才能 BeginInvoke
+                IntPtr handle = form.Handle; // 先建句柄，show 事件线程才能 BeginInvoke
+                // 登录自启的快捷方式是「最小化启动」（WindowStyle=7）。静默实例
+                // 如果只建句柄不 Show，窗口会停在 (-32000,-32000) 这个最小化坐标上，
+                // 之后 ShowFromTray 只把 WindowState 改回 Normal，位置还是屏幕外。
+                // 先强制隐藏，打开面板时再按当前屏幕重新定位。
+                form.Hide();
                 if (!silent)
                 {
                     form.Show(); // 手动启动 / 安装后：直接把面板亮出来
@@ -386,7 +392,7 @@ namespace LifeLoggingLive
 
         private sealed class MainForm : Form
         {
-            private readonly bool startedSilent;
+            private readonly Size panelSize;
             private readonly Label statusLabel;
             private readonly Label lastLabel;
             private readonly Label nextLabel;
@@ -409,7 +415,6 @@ namespace LifeLoggingLive
 
             public MainForm(bool silent)
             {
-                startedSilent = silent;
                 Text = "LifeLogging Live";
                 ClientSize = new Size(424, 244);
                 FormBorderStyle = FormBorderStyle.FixedSingle;
@@ -500,15 +505,7 @@ namespace LifeLoggingLive
                 uiTimer.Tick += delegate { UpdateUi(); };
                 uiTimer.Start();
                 UpdateUi();
-            }
-
-            protected override void OnShown(EventArgs e)
-            {
-                base.OnShown(e);
-                if (startedSilent)
-                {
-                    HideToTray();
-                }
+                panelSize = Size;
             }
 
             protected override void OnResize(EventArgs e)
@@ -538,13 +535,64 @@ namespace LifeLoggingLive
                     BeginInvoke(new Action(ShowFromTray));
                     return;
                 }
+
+                // 静默启动的窗口可能还停在最小化坐标 (-32000,-32000)。
+                if (WindowState == FormWindowState.Minimized || !IsOnScreen())
+                {
+                    CenterOnCursorScreen();
+                }
+
                 Show();
                 ShowInTaskbar = true;
-                WindowState = FormWindowState.Normal;
+
+                // 登录快捷方式是 SW_SHOWMINIMIZED；第一次 Show() 时窗口可能
+                // 仍带着最小化状态。此时 WinForms 的 WindowState 可能报告
+                // Normal，不能再写 WindowState（反而会把窗口真正最小化），
+                // 必须用 Win32 的 SW_RESTORE 恢复。
+                if (IsIconic(Handle))
+                {
+                    ShowWindow(Handle, SW_RESTORE);
+                }
+                if (!IsOnScreen())
+                {
+                    CenterOnCursorScreen();
+                }
+
                 Activate();
                 BringToFront();
                 UpdateUi();
             }
+
+            private void CenterOnCursorScreen()
+            {
+                Rectangle area = Screen.FromPoint(Cursor.Position).WorkingArea;
+                StartPosition = FormStartPosition.Manual;
+                Size = panelSize;
+                Location = new Point(
+                    area.Left + Math.Max(0, (area.Width - panelSize.Width) / 2),
+                    area.Top + Math.Max(0, (area.Height - panelSize.Height) / 2));
+            }
+
+            private bool IsOnScreen()
+            {
+                Rectangle bounds = Bounds;
+                foreach (Screen screen in Screen.AllScreens)
+                {
+                    if (screen.WorkingArea.IntersectsWith(bounds))
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            [DllImport("user32.dll")]
+            private static extern bool IsIconic(IntPtr hWnd);
+
+            [DllImport("user32.dll")]
+            private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+            private const int SW_RESTORE = 9;
 
             private void HideToTray()
             {

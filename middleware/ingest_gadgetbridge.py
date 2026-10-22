@@ -211,6 +211,15 @@ def to_events(grouped: dict[str, list[tuple[datetime, float]]], day: Day) -> lis
                     source="gadgetbridge",
                 )
             )
+            out.append(
+                Event(
+                    ts_utc=day.start_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    domain="health",
+                    metric=f"{metric}_max",
+                    value_num=max(vals),
+                    source="gadgetbridge",
+                )
+            )
 
     # 总睡眠时长
     sleep_parts = {k: v for k, v in grouped.items() if k.startswith("sleep_")}
@@ -301,6 +310,7 @@ def read_workouts(conn: sqlite3.Connection, day: Day) -> list[dict[str, Any]]:
             "avg_hr": _summary_value(s, "averageHR"),
             "max_hr": _summary_value(s, "maxHR"),
             "pace_s_per_km": _summary_value(s, "averageKMPaceSeconds"),
+            "avg_cadence": _summary_value(s, "averageCadence"),
             "ascent_m": _summary_value(s, "activityTotalAscent"),
             "calories": _summary_value(s, "caloriesBurnt"),
             "vo2max": _summary_value(s, "maximumOxygenUptake"),
@@ -353,6 +363,7 @@ def workouts_to_events(workouts: list[dict[str, Any]], day: Day) -> list[Event]:
                     "avg_hr": w["avg_hr"],
                     "max_hr": w["max_hr"],
                     "pace_s_per_km": w["pace_s_per_km"],
+                    "avg_cadence": w["avg_cadence"],
                     "ascent_m": w["ascent_m"],
                     "calories": w["calories"],
                     "vo2max": w["vo2max"],

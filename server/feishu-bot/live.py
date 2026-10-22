@@ -227,29 +227,19 @@ def _hm(minutes: float) -> str:
 def render_location(day_iso: str) -> str:
     stays = location_stays(day_iso)
     if not stays:
-        return ("今天还没有位置数据。\n"
-                "手机上的 GPSLogger / OwnTracks 在传的话，Dawarich 里应该有点位 —— "
-                "没有就是那边断了（`curl <服务器>:3000/api/v1/points?...` 验一下）。")
+        return f"位置 · {day_iso}\n没有位置数据。"
 
     total = sum(s["minutes"] for s in stays)
-    lines = [f"今天有 {len(stays)} 段停留（≥15 分钟才算）：", ""]
+    lines = [f"位置 · {day_iso}", ""]
     for s in stays:
         span = f"{s['start']}–{s['end']}" if s["start"] and s["end"] else "—"
-        lines.append(f"  {span}  {s['place']}  ·  {_hm(s['minutes'])}")
+        place = s["place"] + ("（坐标）" if s["is_coord"] else "")
+        lines.append(f"  {span}  {place}  ·  {_hm(s['minutes'])}")
     lines += ["", f"合计 {_hm(total)}。"]
-
-    if any(s["is_coord"] for s in stays):
-        # ⚠️ 不能装作是地名。服务器上没有 GeoNames 数据表时，
-        #    collect_phone._describe() 会退回坐标 —— 那是**静默**的，
-        #    不说出来就会变成「机器人给的地址看着像坏的」。
-        lines += ["", "⚠️ 上面是坐标不是地名：服务器上没有城市数据表。"
-                      "让它下次自己下载（第一次约 30–40 MB），"
-                      "或者把笔记本上的 data/cities1000.txt 和 "
-                      "admin1CodesASCII.txt 拷到服务器的 repo/data/ 下。"]
     return "\n".join(lines)
 
 
-def render_phone(events: list[dict]) -> str:
+def render_phone(events: list[dict], day_iso: str | None = None) -> str:
     try:
         s = deps()["summarize_phone"](events)
     except LiveUnavailable:
@@ -258,22 +248,19 @@ def render_phone(events: list[dict]) -> str:
         raise LiveUnavailable(f"汇总手机数据失败：{type(e).__name__}: {e}") from None
 
     if not s["unlocks"] and not s["app_switches"]:
-        return ("今天中继上没有手机事件。\n"
-                "要么手机那边没在传（Tasker 被系统杀了 / 没连上），"
-                "要么今天真的没解锁。先看 `curl <中继>/health` 的 today_events。")
+        return "今天没有手机事件。"
 
-    # ⚠️ 「有屏幕数据」和「屏幕时间恰好是 0」是两回事，必须分开说。
-    #    手机上「Display On/Off」那两个 Profile 是中途才加的（实测踩过），
-    #    加之前那段时间没有屏幕事件 —— 直接报「0 分钟」会让人以为当天没玩手机。
+    # ⚠️ 「有屏幕数据」和「屏幕时间恰好是 0」是两回事：没有屏幕事件时
+    #    只写「—」，不能写「0 分钟」。
     screen_evs = [e for e in events
                   if e.get("metric") in ("screen_on", "screen_off")]
 
-    lines = ["今天手机：", ""]
+    lines = [f"手机 · {day_iso}" if day_iso else "手机", ""]
     if screen_evs:
         lines.append(f"  屏幕亮着     {_hm(s['screen_minutes'])}")
         lines.append(f"  前台合计     {_hm(s['foreground_minutes'])}（下界）")
     else:
-        lines.append("  屏幕时间     —  今天没有屏幕事件")
+        lines.append("  屏幕时间     —")
     lines.append(f"  解锁         {s['unlocks']} 次")
     if s["first_unlock"]:
         lines.append(f"  首次 / 末次  {s['first_unlock']} / {s['last_unlock']}")
@@ -285,21 +272,12 @@ def render_phone(events: list[dict]) -> str:
         for name, mins in top:
             lines.append(f"    {name}  {_hm(mins)}")
 
-    if not screen_evs:
-        lines += ["", "⚠️ 没有屏幕事件，所以「屏幕亮着多久」算不出来，"
-                      "「用得最多」也只剩按解锁事件截断的粗略版本。"
-                      "手机上那两个 Display On/Off 的 Tasker Profile 没配或没生效。"]
-    else:
-        lines += ["", "⚠️ 屏幕时间是实测（亮屏区间求和）；"
-                      "「用得最多」是按相邻两次切换的时间差推的**下界**，"
-                      "不等于手机总使用时长。"]
-
     unknown = s["unknown_apps"][:5]
     if unknown:
-        lines.append("")
-        lines.append("  没映射的包名：" +
-                     " · ".join(f"{p}({_hm(m)})" for p, m in unknown))
-        lines.append("  （要认得出它们，往 normalize.PHONE_APPS 里加）")
+        # 聊天里不展开；留在日志里给维护者看。
+        print("  unknown apps: "
+              + " · ".join(f"{p}({_hm(m)})" for p, m in unknown),
+              file=sys.stderr)
     return "\n".join(lines)
 
 
@@ -322,16 +300,18 @@ def data_snapshot(day_iso: str, base: str, key: str) -> list[str]:
         except Exception:  # noqa: BLE001
             pass
 
-    try:
-        snap = relay_desktop(base, key) or {}
-        today = snap.get("today") or {}
-        total = today.get("total_hours")
-        if total:
-            cats = " / ".join(f"{k} {v}h" for k, v in
-                              (today.get("by_category") or [])[:4])
-            out.append(f"电脑：{total} 小时（{cats}）")
-    except Exception:  # noqa: BLE001
-        pass
+    # 电脑快照只有「最新一份」，没有历史；查过去某天时不要拿今天那份冒充。
+    if day_iso == datetime.now(ZoneInfo(TZ_NAME)).date().isoformat():
+        try:
+            snap = relay_desktop(base, key) or {}
+            today = snap.get("today") or {}
+            total = today.get("total_hours")
+            if total:
+                cats = " / ".join(f"{k} {v}h" for k, v in
+                                  (today.get("by_category") or [])[:4])
+                out.append(f"电脑：{total} 小时（{cats}）")
+        except Exception:  # noqa: BLE001
+            pass
 
     try:
         stays = location_stays(day_iso)
@@ -339,6 +319,16 @@ def data_snapshot(day_iso: str, base: str, key: str) -> list[str]:
             best = max(stays, key=lambda s: s["minutes"])
             out.append(f"位置：{len(stays)} 处，最久 {best['place']}"
                        f"（{_hm(best['minutes'])}）")
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        snap = relay_watch(base, key) or {}
+        health = snap.get("health") or {}
+        steps = health.get("steps")
+        if steps is not None:
+            out.append(f"手表：{int(round(float(steps)))} 步"
+                       f"（{snap.get('day') or '—'}）")
     except Exception:  # noqa: BLE001
         pass
 
@@ -363,6 +353,7 @@ def _norm_qa(qa: list[Any] | None) -> list[dict]:
                 "kind": str(x.get("kind") or ""),
                 "source": str(x.get("source") or ""),
                 "id": str(x.get("id") or ""),
+                "ts_utc": str(x.get("ts_utc") or ""),
             }
         elif isinstance(x, (tuple, list)) and len(x) >= 2:
             item = {
@@ -397,6 +388,22 @@ def _qa_line(x: dict, q_limit: int = 56, a_limit: int = 120) -> str:
     a = _one_line(x.get("answer") or "", a_limit)
     n = _one_line(x.get("note") or "", a_limit)
     return f"{q} → {a}" + (f"（{n}）" if n else "")
+
+
+def render_qa(day_iso: str, base: str, key: str) -> str:
+    """某一天的全部问答，一条一行。只给事实，不解释。"""
+    qa = _norm_qa(relay_qa(day_iso, base, key))
+    lines = [f"问答 · {day_iso}"]
+    if not qa:
+        lines.append("没有回答。")
+        return "\n".join(lines)
+
+    lines.append("")
+    tz = ZoneInfo(TZ_NAME)
+    for x in qa:
+        ts = _hhmm(x.get("ts_utc"), tz)
+        lines.append((f"{ts}  " if ts else "") + _qa_line(x, q_limit=50, a_limit=100))
+    return "\n".join(lines)
 
 
 def day_recap(day_iso: str, base: str, key: str,
@@ -476,26 +483,11 @@ def _ago(v: Any, now: datetime) -> tuple[str, float | None]:
     return f"{h // 24} 天前", mins
 
 
-# 超过这个分钟数就把「陈旧」明确说出来。
-# ⚠️ 笔记本一天只醒约 3.4 小时，所以几十上百分钟前是**常态而不是异常** ——
-#    正因为是常态才更要说：不说的话，一份 5 小时前的快照会被读成
-#    「你现在正在写代码」，而那是这个功能最坏的失败方式：安安静静地答错。
-STALE_MINUTES = 20
-
-DESKTOP_NO_DATA = (
-    "服务器上还没有电脑快照 —— 笔记本一次都没推过。\n"
-    "确认笔记本上注册了那个推送计划任务（scripts/setup_scheduler.ps1 里的 "
-    "LifeLogging-Desktop），或者手工跑一次：\n"
-    "    python scripts/push_desktop.py\n"
-    "（原来那个原因仍然成立：电脑的数据在笔记本上，而那台一天只醒约 3.4 小时。）"
-)
+DESKTOP_NO_DATA = "还没有电脑快照。笔记本上跑一次 scripts/push_desktop.py。"
 
 
 def render_desktop(day_iso: str, base: str, key: str) -> str:
-    """电脑上今天到目前。
-
-    **陈旧程度是这个答案的一部分，不是附注。** 见 STALE_MINUTES 的说明。
-    """
+    """电脑上今天到目前。日期与「多久之前」放在标题行，正文不再解释。"""
     try:
         snap = relay_desktop(base, key)
     except Exception as e:  # noqa: BLE001
@@ -503,15 +495,18 @@ def render_desktop(day_iso: str, base: str, key: str) -> str:
     if not snap:
         return DESKTOP_NO_DATA
 
-    # 用**快照自己的时区**算「多久之前」—— 这样不依赖 deps()，
-    # 于是「Dawarich 没配好」不会连带把电脑这块也弄哑。
+    # 用快照自己的时区算「多久之前」—— 不依赖 deps()。
     pushed = _parse_dt(snap.get("pushed_at"))
     now = datetime.now(pushed.tzinfo) if pushed else None
-    ev_txt, ev_min = _ago(snap.get("last_event"), now) if now else ("", None)
+    ev_txt, _ = _ago(snap.get("last_event"), now) if now else ("", None)
     push_txt, _ = _ago(snap.get("pushed_at"), now) if now else ("", None)
 
     day = str(snap.get("day") or "")
-    lines: list[str] = []
+    head = f"电脑 · {day or day_iso}"
+    fresh = ev_txt or push_txt
+    if fresh:
+        head += f" · {fresh}"
+    lines: list[str] = [head, ""]
 
     cur = snap.get("current")
     if isinstance(cur, dict) and cur.get("app"):
@@ -519,15 +514,16 @@ def render_desktop(day_iso: str, base: str, key: str) -> str:
         title = str(cur.get("title") or "").strip()
         if title:
             lines.append(f"  {title[:70]}")
-        lines.append(f"  分类 {cur.get('category')} · 这一段已持续 "
+        lines.append(f"  分类 {cur.get('category')} · 已持续 "
                      f"{int(cur.get('minutes') or 0)} 分钟")
     elif snap.get("afk") is True:
-        lines.append("现在：人不在电脑前（AFK）")
+        lines.append("现在：AFK")
     else:
-        lines.append("现在：没有正在进行的窗口活动")
+        lines.append("现在：没有窗口活动")
 
     today = snap.get("today") or {}
-    lines += ["", f"今天合计 {today.get('total_hours')} 小时"]
+    label = "今天合计" if (not day or day == day_iso) else "当天合计"
+    lines += ["", f"{label} {today.get('total_hours')} 小时"]
     cats = today.get("by_category") or []
     if cats:
         lines.append("  " + " · ".join(f"{k} {v}h" for k, v in cats))
@@ -535,27 +531,16 @@ def render_desktop(day_iso: str, base: str, key: str) -> str:
     if apps:
         lines.append("  用得最多 " + " · ".join(f"{a} {v}h" for a, v in apps[:5]))
 
-    lines += ["", f"⚠️ 笔记本最后上报：{ev_txt or push_txt or '时间未知'}"]
-    if day and day != day_iso:
-        lines.append(f"⚠️ 这份快照是 **{day}** 的，不是今天 —— 笔记本今天还没推过。")
-    elif ev_min is not None and ev_min > STALE_MINUTES:
-        lines.append("   笔记本一天只醒几小时，睡了就不再更新。所以这个「今天」"
-                     "只到它睡着那一刻，**不是此刻**。")
     return "\n".join(lines)
 
 
-WATCH_NO_DATA = (
-    "服务器上还没有手表的健康汇总 —— 笔记本一次都没推过。\n"
-    "确认 `run_daily.ps1` 里跑了 `scripts/push_health.py`，或者手工来一次：\n"
-    "    python scripts/push_health.py\n"
-    "（原因和电脑快照一样：Gadgetbridge 的数据在笔记本上，而它一天只醒几小时。）"
-)
+WATCH_NO_DATA = "还没有手表汇总。笔记本上跑一次 scripts/push_health.py。"
 
 
 def render_watch(day_iso: str, base: str, key: str) -> str:
     """手表日汇总：步数 / 心率 / 睡眠 / 最近运动。
 
-    ⚠️ 「这是哪一天的」必须写在最前面。Gadgetbridge 通常隔天才导出，
+    ⚠️ 「这是哪一天的」写在标题行。Gadgetbridge 通常隔天才导出，
        所以最常见的正确回答是「这是昨天的」而不是「今天没走」。
     """
     try:
@@ -567,11 +552,14 @@ def render_watch(day_iso: str, base: str, key: str) -> str:
 
     pushed = _parse_dt(snap.get("pushed_at"))
     now = datetime.now(pushed.tzinfo) if pushed else None
-    push_txt, push_min = _ago(snap.get("pushed_at"), now) if now else ("", None)
+    push_txt, _ = _ago(snap.get("pushed_at"), now) if now else ("", None)
 
     day = str(snap.get("day") or "")
+    head = f"手表 · {day or day_iso}"
+    if push_txt:
+        head += f" · {push_txt}"
     health = snap.get("health") if isinstance(snap.get("health"), dict) else {}
-    lines = [f"手表汇总（{day}）：", ""]
+    lines = [head, ""]
     shown = False
 
     steps = health.get("steps")
@@ -591,12 +579,11 @@ def render_watch(day_iso: str, base: str, key: str) -> str:
         shown = True
 
     if not shown:
-        lines.append("  这一天没有步数 / 心率记录")
+        lines.append("  没有步数 / 心率记录")
 
     if sleep is None:
-        # ⚠️ 不能说「睡眠 0 小时」。当前这台表的导出里根本没有睡眠样本，
-        #    那和「睡了 0 小时」是两件事。
-        lines.append("  睡眠        —— 这份手环导出里没有睡眠样本")
+        # 不能说「睡眠 0 小时」：这台表的导出里没有睡眠样本。
+        lines.append("  睡眠        —")
 
     workouts = [w for w in (snap.get("workouts") or []) if isinstance(w, dict)]
     if workouts:
@@ -606,12 +593,6 @@ def render_watch(day_iso: str, base: str, key: str) -> str:
             if text:
                 lines.append(f"    {text}")
 
-    lines += ["", f"⚠️ 笔记本最后上报：{push_txt or '时间未知'}"]
-    if day and day != day_iso:
-        lines.append(f"⚠️ 这是 **{day}** 的汇总，不是今天 —— "
-                     "Gadgetbridge 通常隔天才导出。")
-    elif push_min is not None and push_min > STALE_MINUTES:
-        lines.append("   笔记本一天只醒几小时，这份可能不是此刻。")
     return "\n".join(lines)
 
 
@@ -655,18 +636,11 @@ _LOCATION_WORDS = ("去哪", "去了哪", "在哪儿", "在哪", "去过", "行�
 _PHONE_WORDS = ("手机", "屏幕", "解锁", "切应用", "应用", "app", "刷了", "玩了多久",
                 "用了多久", "用了多长时间")
 
-# 一句话**像不像在问**。只有像在问，才拿去当「查数据」；不像的一律当笔记。
+# 一句话**像不像在问**。`/ask` 里只有像在问才走模板；不像的再去问模型。
 #
-# ⚠️ 这是「记一笔」的守门人，不是锦上添花。
-#    上面那几个关键词里有一堆日常词（电脑 / 网页 / 浏览器 / 窗口 / 应用 /
-#    位置 …）。随手记一句「今天用电脑画了张图」就会命中「电脑」，于是你收到
-#    一整份电脑报表，而**自己写的那句话根本没存下来**。丢的是用户亲手写的
-#    东西，比少答一句问句糟得多 —— 所以宁可把一句问句当笔记存下来（它还会
-#    进当天的日记），也不要把笔记当问句吃掉。
-#
-#    代价：不带疑问语气的「查数据」会被记成笔记，比如「给我看看今天手机」。
-#    想明确提问就带疑问词或问号；想明确记一笔可以带「记：」前缀
-#    （见 feishu_bot.NOTE_PREFIXES）。
+# ⚠️ 关键词里有一堆日常名词（电脑 / 网页 / 浏览器 / 窗口 / 应用 / 位置…）。
+#    只靠名词判断的话，「今天用电脑画了张图」也会被当成查询，拉出一整份
+#    电脑报表。能分开它们的只有疑问语气。
 _QUESTION_RE = re.compile(
     r"[?？]"                       # 问号
     r"|吗|呢|嘛|啥|什么|怎么|咋"    # 疑问语气词
@@ -687,29 +661,12 @@ def _hits(text: str, words: tuple[str, ...]) -> bool:
 
 
 JOURNAL_ANSWER = (
-    "日记和 vault 我答不了 —— 它们在笔记本的 Obsidian 库里，**没有推到服务器**。\n"
-    "（推上去的只是「电脑活动」那一小份快照，不是整个库。\n"
-    " 想知道电脑上在忙什么可以直接问「我今天在电脑上干了什么」。）"
+    "日记和 vault 在笔记本的 Obsidian 库里，没有推到服务器。"
 )
 
-HEALTH_ANSWER = (
-    "手表的健康汇总现在拉不到（中继那边出错）。\n"
-    "平时它是能答的：步数 / 心率 / 最近运动。\n"
-    "睡眠取决于手环有没有导出样本 —— 这一台目前没有。"
-)
+HEALTH_ANSWER = "手表的健康汇总拉不到（中继出错）。"
 
-UNKNOWN_ANSWER = (
-    "这句我没认出来要问什么。我现在能答的是：\n"
-    "  · 我今天去哪了 / 去过哪\n"
-    "  · 手机用了多久 / 屏幕时间\n"
-    "  · 今天解锁几次 / 用得最多的应用\n"
-    "  · 今天走了多少步 / 心率多少\n"
-    "  · 我今天在电脑上干了什么 / 现在在忙什么\n"
-    "  · 上次 / 以前的记录（我会去翻日记）\n"
-    "  · 给我题（回「?」或者随便一句）\n\n"
-    "⚠️ 电脑那份快照只在笔记本醒着时更新，所以它可能是几小时前的 —— "
-    "答案里会写明，别当成此刻。"
-)
+UNKNOWN_ANSWER = "没认出这个问题。用 /help 看可用命令。"
 
 
 def cfg() -> dict:
@@ -978,7 +935,7 @@ def write_day_summary(day_iso: str, base: str, key: str,
 
 
 def answer_query(text: str, *, day_iso: str, base: str, key: str) -> str | None:
-    """认出来就返回答案；认不出来返回 None（调用方接着当「给我题」处理）。
+    """认出来就返回答案；认不出来返回 None（/ask 再决定要不要交给模型）。
 
     ⚠️ 判别的顺序是有意的：**先从窄到宽，把「答不了」和更具体的那几条放前面**。
        一句话里往往同时命中好几组词：
@@ -995,10 +952,9 @@ def answer_query(text: str, *, day_iso: str, base: str, key: str) -> str | None:
     if not t.strip("?？!！。.、,， \t　"):
         return None
 
-    # ⚠️ **不像在问的一律不查**，交给调用方当笔记存下来（见 _QUESTION_RE）。
-    #    这一步必须排在所有关键词判断**前面**：关键词再准也没用，因为
-    #    「今天用电脑画了张图」和「我今天在电脑上干了什么」里都有「电脑」，
-    #    能分开它们的只有疑问语气，不是名词。
+    # ⚠️ **不像在问的一律不查。** 这一步必须排在所有关键词判断**前面**：
+    #    关键词再准也没用，因为「今天用电脑画了张图」和「我今天在电脑上干了
+    #    什么」里都有「电脑」，能分开它们的只有疑问语气，不是名词。
     if not _looks_like_question(t):
         return None
 
@@ -1033,7 +989,8 @@ def answer_query(text: str, *, day_iso: str, base: str, key: str) -> str | None:
         #    也一起拿不到 —— 而那是两份完全独立的数据、两条独立的链路。
         parts: list[str] = []
         for part in (lambda: render_location(day_iso),
-                     lambda: render_phone(relay_events(day_iso, base, key))):
+                     lambda: render_phone(relay_events(day_iso, base, key),
+                                          day_iso=day_iso)):
             try:
                 parts.append(part())
             except LiveUnavailable as e:
@@ -1044,7 +1001,7 @@ def answer_query(text: str, *, day_iso: str, base: str, key: str) -> str | None:
         return render_location(day_iso)
 
     if wants_phone:
-        return render_phone(relay_events(day_iso, base, key))
+        return render_phone(relay_events(day_iso, base, key), day_iso=day_iso)
 
     # 带问号但没命中任何一类 → 明说能答什么，而不是默默去出题。
     if t.endswith(("?", "？")):
