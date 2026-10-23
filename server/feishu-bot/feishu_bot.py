@@ -917,6 +917,30 @@ def send_report(open_id: str, text: str, template: str = "turquoise",
         send_text(open_id, text)
 
 
+def reason_card(q: dict, score: str) -> dict:
+    """打完分之后那张「为什么」。
+
+    ⚠️ 它问的和题目本身不是一回事：题目问「多少」，这张问「因为什么」。
+       `4 不错` 只说明程度，`4 不错 · 上午连上四节课，下午还能跑 4×400`
+       才说明发生了什么 —— 后者才是能进关联图的东西。
+    """
+    dim = str(q.get("dim") or "")
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "violet",
+                   "title": {"tag": "plain_text",
+                             "content": f"{dim} · 补一句为什么"}},
+        "elements": [
+            {"tag": "div",
+             "text": {"tag": "lark_md",
+                      "content": f"**{score}** 收到。是什么让它变成这个分数的？\n\n"
+                                 "一件事、一个人、或者身体本身都行，一句话就够。"}},
+            {"tag": "hr"},
+            _note("这句会作为证据存进标签。不想说就回「跳过」。"),
+        ],
+    }
+
+
 def done_card(day_iso: str, ack: str = "") -> dict:
     """「今天的问答结束了」那张卡。
 
@@ -1312,6 +1336,17 @@ def target_day_iso(now: datetime) -> str:
     return now.date().isoformat()
 
 
+# 打完分之后要不要追问一句「为什么」。
+#
+# ⚠️ 这是**证据的唯一来源**。1–5 分只说明「多少」，说明不了「为什么」；
+#    而「为什么」恰恰是以后做关联分析要用的东西。答完 4 分却没说原因，
+#    那条标签在证据层面就是空的（`label_free_text` 只能把「4 不错」当成
+#    依据，那是循环论证）。
+#
+#    所以打完分，如果没写备注，就追一条一句话的卡片。回「跳过」可以略过。
+ASK_REASON = os.environ.get("FEISHU_ASK_REASON", "1").lower() not in (
+    "", "0", "false", "no", "off")
+
 CHECKIN_COMMANDS = ("/打卡", "/checkin", "/ck")
 # 兜底打卡的时间。到这个点还没收尾，就只问三个数字。
 # 留空 = 不自动兜底，只有 /打卡 能用。
@@ -1509,6 +1544,52 @@ def handle_data_command(open_id: str, cmd: str, arg: str) -> None:
                 title="自由问答" if cmd == "/ask" else None)
 
 
+_SKIP_REASON = {"跳过", "skip", "不", "不用", "不想说", "-", "无", "算了"}
+
+
+def _wants_reason(q: dict, note: str) -> bool:
+    """答完这一题之后要不要追一句「为什么」。
+
+    只追问**打了分但没写字**的那种：有 1–5 量表、属于某个维度、备注为空。
+    ⚠️ 备注非空就不追了 —— 他已经说过了，再问一遍是在凑消息数。
+    """
+    if not ASK_REASON:
+        return False
+    if str(q.get("format") or "") != "choice":
+        return False
+    if not str(q.get("dim") or ""):
+        return False
+    return not str(note or "").strip()
+
+
+def _handle_reason(open_id: str, reason_for: dict, text: str) -> None:
+    """把「为什么」这半句补回到**同一道题**上。
+
+    ⚠️ 不是新开一道题、也不是记成笔记，而是用同样的分数再答一次同一个 qid ——
+       中继的 `day_qa()` 对同一题号取 ts 最大的那条，所以备注会被换上、
+       分数不变。这样证据就长在标签身上，而不是飘在别处。
+    """
+    qid = str(reason_for.get("qid") or "")
+    dim = str(reason_for.get("dim") or "")
+    value = str(reason_for.get("value") or "")
+    skip = text.strip().lower() in _SKIP_REASON
+
+    if not skip and text.strip():
+        try:
+            relay_answer(qid, value, text[:500])
+        except Exception as e:  # noqa: BLE001
+            # ⚠️ 不清 reason_for —— 让这句话还在，用户重发一次就能补上。
+            send_text(open_id, f"这半句没存进去：{e}\n再发一次就行。")
+            return
+        print(f"[reason] {qid} {dim} = {text[:60]!r}")
+
+    state = load_state()
+    state["reason_for"] = None
+    save_state(state)
+    advance(open_id, ack=(f"✓ 跳过（{dim} 没有原因）" if skip
+                          else f"✓ 已补上 {dim} 的原因"))
+
+
 def handle_text(open_id: str, text: str) -> None:
     """一条用户消息进来之后做什么。跑在 worker 线程里，不受 3 秒限制。"""
     state = load_state()
@@ -1606,6 +1687,21 @@ def handle_text(open_id: str, text: str) -> None:
         save_note(open_id, forced_note)
         return
 
+    # ── 正在等「为什么」的答案 ──
+    # ⚠️ 放在 awaiting 判断**之前**：这时候 awaiting 是空的（追问时清掉了），
+    #    不拦的话这句话会掉进「记一笔」，变成一条游离的笔记，
+    #    而那条标签永远等不到证据。
+    reason_for = state.get("reason_for")
+    if isinstance(reason_for, dict) and reason_for.get("qid"):
+        today_iso_ = datetime.now(TZ).date().isoformat()
+        if str(reason_for.get("day") or "") != today_iso_:
+            # 昨天挂着没答的原因，今天不能再吃用户的第一句话。
+            state["reason_for"] = None
+            save_state(state)
+        else:
+            _handle_reason(open_id, reason_for, stripped)
+            return
+
     if not awaiting:
         # 数据查询只走上面的斜杠命令；这里剩下的按「要题 / 记一笔」处理。
         # 不再用关键词猜「这句话像不像在问数据」—— 长文里的「手机」「电脑」
@@ -1680,6 +1776,25 @@ def handle_text(open_id: str, text: str) -> None:
         if note:
             stored += f"\n{note}"
     print(f"[answer] {awaiting} = {value!r} note={note!r} -> relay {res}")
+
+    # ── 补一句「为什么」──
+    #
+    # ⚠️ 这一步必须在 advance() 之前，而且**不**接着出下一题：用户的下一条
+    #    消息要么是这句原因，要么是「跳过」，两者都得先被接住。所以这里清掉
+    #    awaiting、立一个 reason_for，等那句话回来再继续。
+    if _wants_reason(q, note):
+        state = load_state()
+        state["awaiting"] = None
+        state["reason_for"] = {"qid": str(awaiting), "day": today_iso,
+                               "dim": str(q.get("dim") or ""), "value": value}
+        save_state(state)
+        try:
+            send_card(open_id, reason_card(q, value))
+        except Exception as e:  # noqa: BLE001
+            print(f"WARN 追问卡片没发出去，退回纯文本：{type(e).__name__}: {e}",
+                  file=sys.stderr)
+            send_text(open_id, f"{stored}\n\n为什么？一句话就行，也可以回「跳过」。")
+        return
 
     # 晚上收尾：这是最后一道总结题的话，立刻写总结，不再接着出题。
     if str(q.get("kind") or "") == "summary":
