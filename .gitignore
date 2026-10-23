@@ -65,3 +65,7 @@ LifeLoggingLive.exe
 
 # make-icon.py 的肉眼预览（图标本体 app.ico 进仓库）
 windows/live-daemon/_preview-*.png
+
+# 思维导图/流程图渲染的中间文件（docs/render_dataflow.py 生成）
+docs/_mermaid.min.js
+docs/_render.html

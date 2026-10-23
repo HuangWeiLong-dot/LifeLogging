@@ -1,0 +1,97 @@
+flowchart TB
+%% LLS 数据流：层与层之间到底传了什么
+%% ⚠️ 第一行必须是 flowchart —— mermaid v11 会把开头的 %% 注释块解析坏
+%%    （报 "Parse error on line 1"，而且错误信息里会出现 %%%%flowchart），
+%%    所以声明写在最前面，说明放在它后面。
+%% 读法：实线 = 数据真的流过去；虚线 = 有关系，但不是数据依赖。
+%% 方框里写的是**落盘文件**，每个都能在 state/ 里打开看。
+
+subgraph S["① 采集层"]
+  direction TB
+  A1["桌面 ActivityWatch<br/>时间块 · 类别 · 应用 · 窗口标题"]
+  A2["手机 Tasker → 中继<br/>解锁 · 应用切换"]
+  A3["位置 Dawarich<br/>坐标 → 停留 · 地点 · 时长"]
+  A4["手表 Gadgetbridge<br/>步数 · 心率 · 睡眠"]
+  A5["网页 aw-watcher-web<br/>站点 · 页面标题"]
+end
+
+subgraph N["归一化"]
+  direction TB
+  N1["timeline-&lt;day&gt;.json<br/>全天汇总 + blocks[]"]
+end
+
+subgraph T["② 结构化层"]
+  direction TB
+  T1["events.jsonl<br/>activity · category · place<br/>people · plan · task_refs<br/>outcome · reason_class"]
+end
+
+subgraph L["③ 标注层"]
+  direction TB
+  L1["labels.jsonl<br/>自评 1–5：体力 · 心情 · 睡眠"]
+  L2["labels-llm.jsonl<br/>AI 1–5：七个维度<br/>+ evidence · cause · links"]
+end
+
+subgraph C["④ 合成层"]
+  direction TB
+  C1["features.jsonl<br/>一天一行数值特征"]
+  C2["deviations.jsonl<br/>课表 vs 实际"]
+  C3["dataset.jsonl<br/>今天 + 昨天（prev）"]
+end
+
+subgraph I["⑤ 交互层（飞书）"]
+  direction TB
+  I1["每小时题<br/>题干里嵌着位置 / 电脑 / 手机"]
+  I2["收尾七维题 · 轻量打卡"]
+  I3["偏离追问"]
+end
+
+%% 采集 → 归一化：五个源汇成一份日汇总
+A1 --> N1
+A2 --> N1
+A3 --> N1
+A4 --> N1
+A5 --> N1
+
+%% 归一化 → 下游
+N1 -- "blocks[]" --> C1
+N1 -- "当天数字，拼进题干" --> I1
+N1 -- "该时段实际在干嘛" --> C2
+
+%% 交互 → 回答（回答又回到数据里）
+I1 -- "hourly 回答" --> T1
+I1 -- "收尾回答" --> L1
+I2 -- "收尾回答" --> L1
+I2 -- "自由文本" --> L2
+
+%% 结构化 → 标注：打分时把当天活动当语境
+T1 -- "当天活动，作为打分依据" --> L2
+
+%% 结构化 → 合成
+T1 -- "activity / category" --> C2
+T1 -- "outcome / reason_class" --> C3
+
+%% 标注 → 合成
+L1 --> C3
+L2 --> C3
+C1 --> C3
+
+%% 合成 → 追问 → 回答回到合成（闭环）
+C2 -- "哪一段偏离了" --> I3
+I3 -- "七类理由" --> C2
+
+%% 明说「没有的那条边」
+S -. "标注层的分数来自问答<br/>不从采集层推导" .- L1
+
+classDef src fill:#eaf2f8,stroke:#2f6f9f,color:#173a54
+classDef norm fill:#eef0f3,stroke:#5b6672,color:#2b3138
+classDef struct fill:#fdf1e5,stroke:#8a5a2b,color:#4a2f13
+classDef labelc fill:#f3edfa,stroke:#6b4b9a,color:#33224d
+classDef comp fill:#e8f5ef,stroke:#2c7a5e,color:#153a2c
+classDef inter fill:#fbecee,stroke:#9a3b4a,color:#4d1d24
+
+class A1,A2,A3,A4,A5 src
+class N1 norm
+class T1 struct
+class L1,L2 labelc
+class C1,C2,C3 comp
+class I1,I2,I3 inter
