@@ -47,6 +47,12 @@
        在长连接下**被静默丢弃**：按钮显示得出来、点了没反应、服务端一个错都不报。
        （已对着 SDK 源码确认。）所以答案交互用编号文字。
 
+       ⚠️ 注意被禁掉的是**按钮回调**，不是卡片本身。发一张**只读**的卡片
+       （msg_type=interactive，元素里没有任何 button / select）
+       不经过那条回调路径，完全正常。下面 question_card() / recap_card()
+       就是这么用的 —— 视觉上是卡片，回答仍然靠打字。
+       任何时候都不要往卡片里加 button，那会让整条问答链路静默失效。
+
     3. **事件处理必须 3 秒内返回**，否则飞书会**超时重推**，于是同一条消息被
        处理两次。所以下面 on_message 只做「提取字段 + 入队」就返回，真正的
        HTTP 调用全在 worker 线程里；并且按 message_id 去重。
@@ -474,7 +480,21 @@ def pending_filtered(state: dict) -> list[dict]:
         state["skipped_day"] = day
         state["skipped"] = []
     skipped = set(state.get("skipped") or [])
-    return [q for q in relay_pending() if str(q.get("id")) not in skipped]
+    items = [q for q in relay_pending() if str(q.get("id")) not in skipped]
+
+    # ⚠️ 已经收尾的一天，**不再把当天的小时题捞出来问**。
+    #
+    #    收尾题发出去之后，中继上那些「11:04–12:04 这一段」还挂着没答 ——
+    #    它们不是「还有题要答」，而是**已经关掉的那一天留下的残渣**。
+    #    不滤的话，答完复盘的下一条消息就会把一小时前的题翻出来问。
+    #
+    #    早晨那批问责题（source=laptop）不在此列：它问的是昨天发生的事，
+    #    收工之后再答也完全成立。
+    if day_is_closed(day):
+        items = [q for q in items
+                 if not (str(q.get("source") or "") == "live"
+                         and str(q.get("kind") or "") != "summary")]
+    return items
 
 
 # ── 答案规范化 ──────────────────────────────────────────────────────
@@ -513,6 +533,41 @@ def _split_answer(text: str) -> tuple[str, str]:
         if ch in _SEPS:
             return t[:i].strip(), t[i:].strip(_SEPS)
     return t, ""
+
+
+def _brief(s: str, n: int) -> str:
+    s = " ".join(str(s or "").split())
+    return s if len(s) <= n else s[:n] + "…"
+
+
+# 短于这个长度的答案不参与判重：像「一致」「4」「坐地铁」这种东西，
+# 本来就该重复，而重复不携带信息。
+DUP_MIN_CHARS = 40
+
+
+def _duplicate_note(day_iso: str, text: str) -> str:
+    """这段话今天已经用来答过别的题了吗？返回那道题的题干，没有就返回空串。
+
+    ⚠️ 为什么需要它。实测发生过：一次收尾里，「今天最值得记住的一件事」和
+        「今天看的东西里哪一条最值得留下来」收到了**完全相同**的几百字英文。
+        系统照单全收，然后复盘里那段长文出现了两遍 —— 既占屏幕，也让
+        「今天到底记住了什么」变得看不清。
+
+       这里是**提示而不是拦截**：他确实想用同一段话回答，那是他的事。
+       系统该做的只是让他知道这段已经记过一次了。
+    """
+    norm = " ".join(str(text or "").split()).lower()
+    if len(norm) < DUP_MIN_CHARS:
+        return ""
+    try:
+        qa = live.relay_qa(day_iso, RELAY_BASE, RELAY_API_KEY)
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN 判重读不到问答：{type(e).__name__}: {e}", file=sys.stderr)
+        return ""
+    for x in qa:
+        if " ".join(str(x.get("answer") or "").split()).lower() == norm:
+            return str(x.get("text") or "")
+    return ""
 
 
 def _match_label(text: str, opts: list[str]) -> str | None:
@@ -589,23 +644,93 @@ def canonicalise(q: dict, raw: str) -> tuple[str | None, str, str]:
 
 
 # ── 渲染 ────────────────────────────────────────────────────────────
-def render_question(q: dict, remaining: int) -> str:
-    kind = {"commitment": "问责", "routine": "常规"}.get(str(q.get("kind") or ""), "")
-    # 实时题 / 收尾题单独标出来：它们和晚上批量生成的问责批性质不同，
-    # 混在一起会让人以为系统在乱问。
-    # ⚠️ 收尾题也带 source="live"，所以必须先判 kind。
-    if str(q.get("kind") or "") == "commitment":
-        # 实时问责题也带 source=live；必须在 source 判断之前标成「问责」，
-        # 否则它会显示成「实时」，和每小时的数据题混在一起。
-        kind = "问责"
-    elif str(q.get("kind") or "") == "summary":
-        # 收尾流程里的「常规题」（体力/心情/人际…）单独标出来 —— 它们和
-        # 数据拼出来的题性质不同，混在一起会让人以为系统在瞎问。
-        kind = "常规" if q.get("routine") else "收尾"
-    elif str(q.get("source") or "") == "live":
-        kind = "实时"
-    head = f"还剩 {remaining} 题" + (f"（{kind}）" if kind else "")
-    lines = [head]
+#
+# 题分**四批**，每一批的来路、节奏、该在哪儿答都不一样。把它们混成一个
+# 「还剩 N 题」是原来最大的体验问题：收尾答完显示「没有待答的问题了」，
+# 一小时后又被问「07:02–08:02 这一段在干嘛」—— 用户以为系统在耍他，
+# 其实是三条队列共用一个计数器。
+#
+# 所以计数**按批算**：每一批只有自己那几道题。
+_GROUP_LABEL = {
+    "commitment": "今日问责",
+    "summary": "今日收尾",
+    "live": "实时提问",
+    "morning": "今日一问",
+}
+# 飞书卡片 header 的可选色，见「卡片 JSON 结构」文档。
+_GROUP_COLOR = {
+    "commitment": "orange",
+    "summary": "violet",
+    "live": "blue",
+    "morning": "turquoise",
+}
+
+
+def _group_of(q: dict) -> str:
+    """这道题属于哪一批。
+
+    ⚠️ 判断顺序有讲究：收尾题和实时问责题都带 `source="live"`，
+       所以必须先看 kind，再看 source。
+    """
+    kind = str(q.get("kind") or "")
+    if kind == "commitment":
+        return "commitment"
+    if kind == "summary":
+        return "summary"
+    if str(q.get("source") or "") == "live":
+        return "live"
+    return "morning"
+
+
+def _group_label(q: dict) -> str:
+    group = _group_of(q)
+    label = _GROUP_LABEL[group]
+    # 收尾里那七道「常规题」标出维度名 —— 一眼知道现在是第几维，
+    # 比一个笼统的「常规」有用得多。
+    if group == "summary" and q.get("routine") and q.get("dim"):
+        return f"{label} · {q['dim']}"
+    return label
+
+
+def _note(text: str) -> dict:
+    """一行小字。
+
+    ⚠️ 用卡片原生的 `note` 元素，不用 `<font color=...>` 这种 lark_md 内联标签。
+       后者要依赖飞书对那套标签的解析（不同客户端版本表现不一致），而 `note`
+       是小字灰色块的**原生组件** —— 画出来一定是对的。
+    """
+    return {"tag": "note",
+            "elements": [{"tag": "plain_text", "content": str(text)}]}
+
+
+def _option_row(i: int, label: str) -> str:
+    """一个选项。选项自己带了序号（「1 没电」「1) 做了」）就不要再加一遍。"""
+    lab = str(label or "")
+    if lab.startswith(f"{i} "):
+        return f"**{i}**{lab[len(str(i)):]}"
+    for pfx in (f"{i}.", f"{i}、", f"{i})", f"{i}）"):
+        if lab.startswith(pfx):
+            return lab
+    return f"**{i}**　{lab}"
+
+
+def _hint_of(q: dict) -> str:
+    fmt = str(q.get("format") or "yes_no")
+    if fmt == "choice":
+        return f"回 1–{len(q.get('options') or [])}，后面可以接着写自己的话"
+    if fmt == "text":
+        return "直接回内容就行"
+    return "回「做了」或「没做」，后面可以接着写自己的话"
+
+
+def question_card(q: dict, remaining: int, ack: str = "") -> dict:
+    """一道题一张卡片。**只读**——卡片里没有按钮，答案仍然靠打字。"""
+    group = _group_of(q)
+    elements: list[dict] = []
+
+    if ack:
+        elements.append(_note(ack))
+        elements.append({"tag": "hr"})
 
     # ⚠️ 题干本身**不写「今天」**（见 live_questions.py 的注释）。日期在这里按
     #    题目真实的 day 补上。
@@ -616,26 +741,117 @@ def render_question(q: dict, remaining: int) -> str:
     day = str(q.get("day") or "")
     today = datetime.now(TZ).date().isoformat()
     if day and day != today:
+        elements.append(_note(f"⚠️ 这是 {day} 的题，不是今天的"))
+
+    elements.append({"tag": "div",
+                     "text": {"tag": "lark_md",
+                              "content": str(q.get("text") or "").strip()}})
+
+    fmt = str(q.get("format") or "yes_no")
+    if fmt == "choice":
+        rows = [_option_row(i, o.get("label") or "")
+                for i, o in enumerate(q.get("options") or [], 1)
+                if isinstance(o, dict)]
+        if rows:
+            elements.append({"tag": "hr"})
+            elements.append({"tag": "div",
+                             "text": {"tag": "lark_md",
+                                      "content": "\n".join(rows)}})
+
+    elements.append({"tag": "hr"})
+
+    # ⚠️ 实时题的「依据」是一句固定的话（「位置来自 Dawarich；电脑来自笔记本
+    #    每 10 分钟推的快照；手机来自中继」），每小时重复一遍没有任何信息量 ——
+    #    那正是这套消息读起来像 demo 的原因之一。只在它**真的**指明来源
+    #    （问责题引的是哪条任务、收尾题引的是哪个数）时才显示。
+    evidence = str(q.get("evidence") or "").strip()
+    if evidence and group != "live":
+        elements.append(_note(evidence))
+
+    elements.append(_note(f"{_hint_of(q)}　·　还剩 {remaining} 题"))
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": _GROUP_COLOR.get(group, "grey"),
+            "title": {"tag": "plain_text", "content": _group_label(q)},
+        },
+        "elements": elements,
+    }
+
+
+def recap_card(text: str) -> dict:
+    """把 day_recap() 的纯文本复盘排成卡片。解析不出来就整段塞进去。"""
+    title = "今日复盘"
+    sections: list[tuple[str, list[str]]] = []
+    head: list[str] = []
+    cur: tuple[str, list[str]] | None = None
+
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("【") and s.endswith("】") and len(s) <= 24:
+            if cur:
+                sections.append(cur)
+            cur = (s[1:-1], [])
+        elif cur is None:
+            head.append(line)
+        else:
+            cur[1].append(line)
+    if cur:
+        sections.append(cur)
+
+    if head and head[0].strip():
+        title = head[0].strip()
+
+    # 分段只认出一块就不拆了 —— 那多半是复盘格式变了（比如 LLM 那段里带了
+    # 一个假的【…】标题）。整段照原样放，比拆错强。
+    if len(sections) < 2:
+        sections = []
+
+    elements: list[dict] = []
+    for name, body in sections:
+        content = "\n".join(body).strip()
+        if not content:
+            continue
+        if elements:
+            elements.append({"tag": "hr"})
+        elements.append({"tag": "div",
+                         "text": {"tag": "lark_md",
+                                  "content": f"**{name}**\n{content}"}})
+
+    if not elements:
+        elements = [{"tag": "div",
+                     "text": {"tag": "lark_md", "content": text}}]
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "turquoise",
+                   "title": {"tag": "plain_text", "content": title}},
+        "elements": elements,
+    }
+
+
+def render_question(q: dict, remaining: int) -> str:
+    """**纯文本**版本的题目。卡片发不出去时的兜底，同时是 /pending 的输出。"""
+    lines = [f"{_group_label(q)} · 还剩 {remaining} 题"]
+
+    day = str(q.get("day") or "")
+    today = datetime.now(TZ).date().isoformat()
+    if day and day != today:
         lines += ["", f"⚠️ 这是 **{day}** 的题，不是今天的。"]
 
     lines += ["", str(q.get("text") or "").strip()]
 
     evidence = str(q.get("evidence") or "").strip()
     if evidence:
-        # 证据是原文照抄，是这类提问的意义所在，要留着。
         lines += ["", f"（依据：{evidence}）"]
 
     fmt = str(q.get("format") or "yes_no")
     if fmt == "choice":
-        for i, o in enumerate((q.get("options") or []), 1):
+        for i, o in enumerate(q.get("options") or [], 1):
             if isinstance(o, dict):
                 lines.append(f"  {i}) {o.get('label') or ''}")
-        lines += ["", f"回一个数字（1-{len(q.get('options') or [])}），"
-                      "后面可以接着写自己的话"]
-    elif fmt == "text":
-        lines += ["", "直接回内容就行"]
-    else:
-        lines += ["", "回「做了」或「没做」；后面可以接着写自己的话"]
+    lines += ["", _hint_of(q)]
     return "\n".join(lines)
 
 
@@ -720,6 +936,51 @@ def send_text(open_id: str, text: str) -> None:
             f"飞书发送失败 code={resp.code} msg={resp.msg}"
             + (f"\n{explain_api_error(RuntimeError(f'{resp.code}: {resp.msg}'))}"
                if resp.code else ""))
+
+
+def send_card(open_id: str, card: dict) -> None:
+    """发一张**只读**卡片。
+
+    ⚠️ 卡片里绝对不能有 button / select_static 之类的交互组件 ——
+       lark-oapi 的长连接会把卡片回调静默丢掉（见文件头第 2 条）。
+       这块只负责「好看地显示」，回答永远靠打字。
+    """
+    from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
+
+    req = (CreateMessageRequest.builder()
+           .receive_id_type("open_id")
+           .request_body(CreateMessageRequestBody.builder()
+                         .receive_id(open_id)
+                         .msg_type("interactive")
+                         .content(json.dumps(card, ensure_ascii=False))
+                         .build())
+           .build())
+    try:
+        resp = feishu_client().im.v1.message.create(req)
+    except Exception as e:  # noqa: BLE001
+        hint = explain_api_error(e)
+        raise RuntimeError(f"飞书发送卡片失败：{type(e).__name__}: {e}"
+                           + (f"\n{hint}" if hint else "")) from None
+    if not resp.success():
+        raise RuntimeError(f"飞书发送卡片失败 code={resp.code} msg={resp.msg}")
+
+
+def send_question(open_id: str, q: dict, remaining: int,
+                  ack: str = "") -> None:
+    """发一道题。卡片优先，**发不出去就退回纯文本**。
+
+    ⚠️ 兜底不是客气：卡片 JSON 里任何一个小改动（字段名、颜色、元素上限）
+       都可能被飞书拒掉，而拒掉的后果是「这一题压根没发出去」——
+       用户看到的是机器人不说话了。纯文本那条路永远是通的。
+    """
+    try:
+        send_card(open_id, question_card(q, remaining, ack=ack))
+        return
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN 卡片没发出去，退回纯文本：{type(e).__name__}: {e}",
+              file=sys.stderr)
+    text = render_question(q, remaining)
+    send_text(open_id, f"{ack}\n\n{text}" if ack else text)
 
 
 # ── 核心：推进一轮问答 ──────────────────────────────────────────────
@@ -812,7 +1073,12 @@ def maybe_write_summary(open_id: str, day_iso: str,
     recap = live.day_recap(day_iso, RELAY_BASE, RELAY_API_KEY, qa, text)
     if text is None:
         recap += f"\n\n（总结没写成：{err}）"
-    send_text(open_id, recap)
+    try:
+        send_card(open_id, recap_card(recap))
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN 复盘卡片没发出去，退回纯文本：{type(e).__name__}: {e}",
+              file=sys.stderr)
+        send_text(open_id, recap)
 
     # ⚠️ **整份复盘存成一条笔记** —— 明天写日记时它会作为「你说过的话」进提示词。
     #    不然它就只是聊天记录里的一段，不属于这套系统的记忆。
@@ -823,11 +1089,14 @@ def maybe_write_summary(open_id: str, day_iso: str,
     return True
 
 
-def advance(open_id: str) -> None:
+def advance(open_id: str, ack: str = "") -> None:
     """拉一次「还没答的题」，把下一题发出去。没有题就明说。
 
     每次都由**中继**重新判定「什么算还没答」—— 本地不留队列，就没有第二份
     真相，也就没有「两边不一致」这种故障。代价是每题多一次 HTTP，值。
+
+    `ack` 是「上一题记下了」那句话。它**并进下一题那张卡片的顶部**，而不是
+    单独发一条消息 —— 一天答十几题，每题两条消息就是三十条，收件箱会炸。
     """
     state = load_state()
     try:
@@ -840,18 +1109,25 @@ def advance(open_id: str) -> None:
     if not questions:
         state["awaiting"] = None
         save_state(state)
-        send_text(open_id, "今天没有待答的问题了。")
+        send_text(open_id, (f"{ack}\n\n" if ack else "")
+                  + "今天没有待答的问题了。")
         return
 
     q = questions[0]
     qid = str(q.get("id") or "")
+
+    # ⚠️ 计数**按批**算。三条队列（问责 / 实时 / 收尾）共用一个数字，是
+    #    「还剩 10 题」答完变「今天没有待答的问题了」然后又冒出「还剩 1 题」的
+    #    全部原因 —— 用户看到的是一个前后矛盾的进度条。
+    group = _group_of(q)
+    remaining = sum(1 for x in questions if _group_of(x) == group)
 
     # ⚠️ **先发消息，再落状态。**
     #    反过来写的话，发送失败会留下一个「正在等一题、但用户从没见过它」的状态，
     #    于是他下一条消息会被当成那道看不见的题的答案 —— 而且他还不知道为什么。
     #    这个顺序下最坏只是「用户看到了题、状态没存上」，他下次说话时重新走一遍
     #    advance()，能自愈。
-    send_text(open_id, render_question(q, len(questions)))
+    send_question(open_id, q, remaining, ack=ack)
 
     state["awaiting"] = qid
     sent = state.get("sent")
@@ -904,7 +1180,8 @@ def handle_end_day(open_id: str) -> None:
 
     q = qs[0]
     qid = str(q.get("id") or "")
-    send_text(open_id, render_question(q, len(qs)))
+    send_question(open_id, q,
+                  sum(1 for x in qs if _group_of(x) == _group_of(q)))
 
     state = load_state()
     state["awaiting"] = qid
@@ -1049,7 +1326,7 @@ def handle_text(open_id: str, text: str) -> None:
         state["skipped"] = skipped
         state["awaiting"] = None
         save_state(state)
-        advance(open_id)
+        advance(open_id, ack="已跳过，今天不再问这题。")
         return
 
     # ── 数据命令 ──
@@ -1128,6 +1405,11 @@ def handle_text(open_id: str, text: str) -> None:
         send_text(open_id, hint)
         return
 
+    fmt = str(q.get("format") or "yes_no")
+    # ⚠️ 判重要在**写入之前**做。写完再查的话，查到的第一条就是刚写进去的这条，
+    #    于是每一段文字都会被判成「重复」。
+    dup_of = _duplicate_note(today_iso, value) if fmt == "text" else ""
+
     try:
         res = relay_answer(str(awaiting), value, note)
     except Exception as e:  # noqa: BLE001
@@ -1136,14 +1418,15 @@ def handle_text(open_id: str, text: str) -> None:
 
     # 回显「记下了什么」：有备注的时候尤其要回显，否则用户不知道
     # 自己写的那半句是被收下了还是被丢了。
-    if str(q.get("format") or "yes_no") == "text":
-        stored = "已记下。"
+    if fmt == "text":
+        stored = "✓ 已记下"
+        if dup_of:
+            stored += f" · 这段在《{_brief(dup_of, 18)}》里也答过，只算一次"
     else:
-        stored = f"已记下：{value}"
+        stored = f"✓ 已记下 · {value}"
         if note:
-            stored += f"\n备注：{note}"
+            stored += f"\n{note}"
     print(f"[answer] {awaiting} = {value!r} note={note!r} -> relay {res}")
-    send_text(open_id, stored)
 
     # 晚上收尾：这是最后一道总结题的话，立刻写总结，不再接着出题。
     if str(q.get("kind") or "") == "summary":
@@ -1153,7 +1436,9 @@ def handle_text(open_id: str, text: str) -> None:
         except Exception as e:  # noqa: BLE001
             print(f"WARN 收尾失败：{type(e).__name__}: {e}", file=sys.stderr)
 
-    advance(open_id)
+    # ⚠️ 回执**并进下一题那张卡片**，不单独发一条。一天十几题，
+    #    每题两条消息就是三十条 —— 收件箱会先于信息量崩掉。
+    advance(open_id, ack=stored)
 
 
 # ── worker：所有会阻塞的事都在这里 ──────────────────────────────────
@@ -1185,6 +1470,53 @@ def worker_loop() -> None:
 
 
 # ── 定时主动推送 ────────────────────────────────────────────────────
+_lq_mod: object | None = None
+_lq_failed = False
+
+
+def _live_questions_module():
+    """惰性加载 live_questions，**失败只报一次**。
+
+    ⚠️ 这个函数会被 `pending_filtered()` 在**每一条消息**上调用，`push_loop`
+       还会每分钟调一次。每次都 try/except 打一行日志的话，config.yaml 一旦
+       有问题，日志会被同一句话刷屏 —— 而这个仓库一路在跟「日志里全是噪音，
+       真正的问题被埋掉」打架。
+    """
+    global _lq_mod, _lq_failed
+    if _lq_mod is not None:
+        return _lq_mod
+    if _lq_failed:
+        return None
+    try:
+        import live_questions as lq
+
+        _lq_mod = lq
+        return _lq_mod
+    except Exception as e:  # noqa: BLE001
+        _lq_failed = True
+        print(f"WARN 加载 live_questions 失败，封盘判断停用"
+              f"（只会报这一次）：{type(e).__name__}: {e}", file=sys.stderr)
+        return None
+
+
+def day_is_closed(day_iso: str) -> bool:
+    """这一天是不是已经「收尾封盘」了？
+
+    ⚠️ 借 live_questions 的实现，**不在这里另写一份**：封盘标记是那个模块
+       在收尾时写下的，两边各自判断迟早会不一致。
+    """
+    lq = _live_questions_module()
+    if lq is None:
+        # 读不到标记时**不封盘** —— 宁可多发一条，也不要因为一个读文件失败
+        # 让当天的实时题整个哑掉。
+        return False
+    try:
+        return bool(lq.is_closed(day_iso))
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN 读封盘标记失败：{type(e).__name__}: {e}", file=sys.stderr)
+        return False
+
+
 def push_next_live(open_id: str) -> bool:
     """有新的**实时题**就立刻推一题。返回是否推了。
 
@@ -1232,8 +1564,10 @@ def push_next_live(open_id: str) -> bool:
     live_qs = [q for q in pending
                if str(q.get("source") or "") == "live"
                and str(q.get("day") or "") == today]
-    if quiet:
-        # 静音时段只放行收尾题（见上面的说明）。
+    # ⚠️ 已经收尾的一天不再推小时题。收尾之后 timer 还在生成，中继上也还躺着
+    #    昨天那个小时的题 —— 不拦的话就是「复盘刚写完，又来一条 07:02–08:02」。
+    if quiet or day_is_closed(today):
+        # 静音时段 / 已封盘：只放行收尾题（见上面的说明）。
         live_qs = [q for q in live_qs
                    if str(q.get("kind") or "") == "summary"]
     if not live_qs:
@@ -1246,7 +1580,8 @@ def push_next_live(open_id: str) -> bool:
         qid = str(q.get("id") or "")
         if not qid or qid in sent:
             continue
-        send_text(open_id, render_question(q, len(live_qs)))
+        send_question(open_id, q,
+                      sum(1 for x in live_qs if _group_of(x) == _group_of(q)))
         state["awaiting"] = qid
         sent[qid] = datetime.now(TZ).isoformat(timespec="seconds")
         state["sent"] = sent

@@ -88,6 +88,13 @@ honestly and impossible to compare across days.
 Hard rules for the question text:
 - ONE thing per question. Never bundle two questions into one, and never ask for a \
 list.
+- **No two questions in the batch may be answerable by the same sentence.** Before \
+you output, read the batch as if you were the person answering it: if two questions \
+would get the same reply, keep the sharper one and delete the other. A batch of \
+twelve questions that collapses into five real answers is worse than five questions.
+- **Never ask about something the data already answers.** "How long did you spend \
+on the repo?" is not a question - the number is right there. Ask about the part the \
+data cannot see: why it happened, what was in the way, whether it was worth it.
 - NEVER use a time word - no 今天 / 昨天 / today / yesterday. The reader opens this \
 the morning after, so any such word is either wrong or ambiguous and the whole \
 batch reads as nonsense. Name the concrete event, time or number instead: \
@@ -146,6 +153,18 @@ Rules that follow from the formats:
 - If "ref" is non-empty (the question is about a specific task) the format MUST be \
 "yes_no" or "choice" - a "text" answer can never tick a task off. format="text" \
 always has an empty "ref".
+
+Rules about the material you are given:
+- The data section may say a source is **stale** ("data stopped at 2026-10-22", \
+"last reported 6 hours ago"). Do NOT build a question on numbers from a stale \
+source - by the time this is read the number is a day old and the question becomes \
+unanswerable. Ask about something that cannot go stale instead.
+- If the data section says "(no timeline data)" or "(nothing recorded)", that means \
+the collection was down, NOT that the person did nothing. Do not use it as evidence \
+that they were idle, and do not ask them to explain a gap that is your own pipeline's \
+fault.
+- If a previous day's unanswered question is listed below, do not simply ask it \
+again in different words. Either ask something that follows from a "no", or leave it.
 
 The "ref" field is machine-read, so it has its own rules:
 - kind="commitment": if the question is about one of the "Open tasks" or \
@@ -629,8 +648,13 @@ def main() -> None:
         print(f"-> already generated: {out} (use --force to regenerate)")
         return
 
-    n_commit = int(qcfg.get("commitment", 7))
-    n_routine = int(qcfg.get("routine", 5))
+    # ⚠️ 默认配额从 7+5 降到 4+3。
+    #
+    #    12 道早上答、再加上晚上收尾那 10 道，"每天问二十多道"的结果是
+    #    回答退化成「还行」「一致」—— 提的问题越多，收到的信息越少。
+    #    7 道是能在一分半里认真答完的量。
+    n_commit = int(qcfg.get("commitment", 4))
+    n_routine = int(qcfg.get("routine", 3))
 
     # ⚠️ 日记缺失**不再直接放弃**。
     #

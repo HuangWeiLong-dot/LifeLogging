@@ -301,15 +301,29 @@ def data_snapshot(day_iso: str, base: str, key: str) -> list[str]:
             pass
 
     # 电脑快照只有「最新一份」，没有历史；查过去某天时不要拿今天那份冒充。
+    #
+    # ⚠️ 光判「查的是不是今天」**不够**。快照自己带 `day` 和 `pushed_at`，
+    #    而笔记本睡着时中继上那份不会消失，它只是停住了。实测出过一次：
+    #    10-23 的复盘里写「今天电脑合计 3.52 小时」，而那份快照是 10-22 的 ——
+    #    同一份复盘的【总结】里模型自己都说「快照还停在 10-22」。
+    #    代码没发现，模型发现了。所以这里必须两个都对上：日子对得上，而且够新。
     if day_iso == datetime.now(ZoneInfo(TZ_NAME)).date().isoformat():
         try:
             snap = relay_desktop(base, key) or {}
-            today = snap.get("today") or {}
-            total = today.get("total_hours")
-            if total:
-                cats = " / ".join(f"{k} {v}h" for k, v in
-                                  (today.get("by_category") or [])[:4])
-                out.append(f"电脑：{total} 小时（{cats}）")
+            snap_day = str(snap.get("day") or "")
+            age = _snap_age_minutes(snap)
+            if (snap_day and snap_day != day_iso) or (
+                    age is not None and age > DAILY_SNAP_MAX_AGE_MIN):
+                print(f"[recap] 电脑快照过期，不用它：day={snap_day!r} "
+                      f"age={age if age is None else round(age)}min",
+                      file=sys.stderr)
+            else:
+                today = snap.get("today") or {}
+                total = today.get("total_hours")
+                if total:
+                    cats = " / ".join(f"{k} {v}h" for k, v in
+                                      (today.get("by_category") or [])[:4])
+                    out.append(f"电脑：{total} 小时（{cats}）")
         except Exception:  # noqa: BLE001
             pass
 
@@ -379,15 +393,87 @@ def _qa_bucket(x: dict) -> str:
     return "其他回答"
 
 
+# 日报快照最多能旧多久。比小时题宽松（一天的总量两三个小时里变化不大），
+# 但**跨天绝对不行** —— 那正是「今天 3.52 小时」变成谎话的地方。
+DAILY_SNAP_MAX_AGE_MIN = 180.0
+
+# 截断时按这个**优先级**找断点：先找句末，再找逗号，最后才找空格。
+# 每一组内部取最靠后的那一个。
+_CUT_GROUPS = (
+    ("\n", "。", "！", "？", ". ", "! ", "? ", "；", "; "),
+    ("，", ", "),
+    (" ",),
+)
+
+
 def _one_line(s: Any, limit: int) -> str:
-    return " ".join(str(s or "").split())[:limit]
+    """压成一行，并且**在句子边界上**截断。
+
+    ⚠️ 原来是 `[:limit]` 硬切。实测切出来的是
+       「Something happened today that drained me completely, but also made me
+        see myself more clearly than ever. In the morning,」
+    —— 停在一个逗号后面，读起来像是被谁掐断了。宁可少显示半句，
+    也要让它停在一个像结尾的地方。
+    """
+    text = " ".join(str(s or "").split())
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    for seps in _CUT_GROUPS:
+        best = -1
+        for sep in seps:
+            i = head.rfind(sep)
+            if i > best:
+                best = i + len(sep)
+        if best >= limit * 0.55:
+            return head[:best].rstrip() + "…"
+    return head.rstrip() + "…"
 
 
-def _qa_line(x: dict, q_limit: int = 56, a_limit: int = 120) -> str:
+def _snap_age_minutes(snap: dict | None) -> float | None:
+    """快照是多久以前推的（分钟）。没有/解析不出来返回 None。"""
+    dt = _parse_dt((snap or {}).get("pushed_at"))
+    if dt is None:
+        return None
+    return (datetime.now(timezone.utc) - dt).total_seconds() / 60.0
+
+
+def _qa_line(x: dict, q_limit: int = 56, a_limit: int = 120,
+             dup_of: str = "") -> str:
+    """一行问答。`dup_of` 非空表示这段答案今天已经出现过一次 —— 只指向它，
+    不把同一段长文贴第二遍。"""
     q = _one_line(x.get("text") or "(题号不在问题文件里)", q_limit)
+    if dup_of:
+        return f"{q} → 同《{_one_line(dup_of, 26)}》"
     a = _one_line(x.get("answer") or "", a_limit)
     n = _one_line(x.get("note") or "", a_limit)
     return f"{q} → {a}" + (f"（{n}）" if n else "")
+
+
+def _answer_key(x: dict) -> str:
+    """判重用的规范化答案。太短的（「一致」「4」）不参与判重 ——
+    它们本来就会重复，而且重复本身不带信息。"""
+    raw = " ".join(str(x.get("answer") or "").split()).lower()
+    return raw if len(raw) >= 40 else ""
+
+
+def _dedupe_qa(qa: list[dict]) -> list[tuple[dict, str]]:
+    """把「同一段话答了两道题」标出来，返回 [(qa, 第一道题的题干)]。
+
+    ⚠️ 实测发生过：一次收尾里，「今天最值得记住的一件事」和「今天看的东西里
+       哪一条最值得留下来」收到了**完全相同**的几百字。系统照单全收，
+       然后复盘里那段长文出现了两遍 —— 既占屏幕，也让「今天到底记住了什么」
+       变得不清楚。
+    """
+    seen: dict[str, str] = {}
+    out: list[tuple[dict, str]] = []
+    for x in qa:
+        key = _answer_key(x)
+        first = seen.get(key) if key else None
+        if key and first is None:
+            seen[key] = str(x.get("text") or "前一道题")
+        out.append((x, first or ""))
+    return out
 
 
 def render_qa(day_iso: str, base: str, key: str) -> str:
@@ -425,13 +511,14 @@ def day_recap(day_iso: str, base: str, key: str,
     q_all = _norm_qa(qa)
     if q_all:
         lines.append("【你的回答】")
+        marked = _dedupe_qa(q_all)
         for label in _QA_BUCKETS:
-            group = [x for x in q_all if _qa_bucket(x) == label]
+            group = [(x, dup) for x, dup in marked if _qa_bucket(x) == label]
             if not group:
                 continue
             lines.append(f"· {label}")
-            for x in group:
-                lines.append(f"  {_qa_line(x)}")
+            for x, dup in group:
+                lines.append(f"  {_qa_line(x, dup_of=dup)}")
         lines.append("")
 
     sec = sections or {}
@@ -849,7 +936,20 @@ _SUMMARY_SYSTEM = """你在给用户写**一天的收尾复盘**。
 6. 如果今天记录很少，照实说，不要编。
 7. `【白天的实时回答】` 是**当时发生的事实**（每小时问的），`【收尾回答】` 是
    晚上回顾。两者都要用：不要只看收尾那几条，也不要用收尾的概括覆盖掉
-   白天更具体的细节。冲突时以时间更近、更具体的那条为准。"""
+   白天更具体的细节。冲突时以时间更近、更具体的那条为准。
+
+另外三条，都和「别把不确定的东西说成确定」有关：
+
+8. **标了过期/停在哪天的数据不能当今天用。** 如果原始数据里出现「最后一次上报是
+   X 小时前」「数据停在某天」这类话，那块数字属于**那一天**，不是今天。可以在
+   summary 里提一句「电脑那边今天没上来」，但不要把它写进 `did`。
+9. **窗口标题不是行为。** 「在 VS Code 里开着 life-pipeline.drawio」只能说明
+   屏幕上开着什么，不能推出「今天在弄那张图」。`did` 里写的每一件事，必须能在
+   他的回答或明确的活动时长里找到依据；只有窗口标题支撑的那条，要么删掉，
+   要么写成「窗口一直停在 X」。
+10. **同一段回答不会出现两次。** 如果某题的回答写着「同一段回答，见《…》」，
+    那是他把同一段话答了两道题 —— 当成**一件事**，不要拆成两条 `did`，
+    也不要据此认为今天有两件同样重要的事。"""
 
 
 def _extract_json_obj(raw: str) -> dict | None:
@@ -907,13 +1007,20 @@ def write_day_summary(day_iso: str, base: str, key: str,
     q_all = _norm_qa(qa)
     if q_all:
         chunks: list[str] = []
+        marked = _dedupe_qa(q_all)
         for label in _QA_BUCKETS:
-            group = [x for x in q_all if _qa_bucket(x) == label]
+            group = [(x, dup) for x, dup in marked if _qa_bucket(x) == label]
             if not group:
                 continue
             chunks.append(f"【{label}】")
-            for x in group:
+            for x, dup in group:
                 qt = _one_line(x.get("text") or "(题号不在问题文件里)", 200)
+                if dup:
+                    # ⚠️ 同一段话答了两道题时只给模型一遍，并明说是同一段。
+                    #    贴两遍会让它以为今天有两件同样重要的事。
+                    chunks.append(f"- 问：{qt}\n  答：（同一段回答，见《"
+                                  f"{_one_line(dup, 40)}》）")
+                    continue
                 at = _one_line(x.get("answer") or "", 300)
                 nt = _one_line(x.get("note") or "", 200)
                 chunks.append(f"- 问：{qt}\n  答：{at}"

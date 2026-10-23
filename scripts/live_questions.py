@@ -56,6 +56,7 @@ import re
 import sys
 from collections import Counter
 from datetime import date, datetime, timedelta
+from typing import Any
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -82,6 +83,59 @@ ASK_UNTIL_HOUR = 24
 # ⚠️ 这**不是**「够久才问」的门槛 —— 每小时必问，这个值只决定
 #    「这一小时里哪件事最值得提」。路过、等红灯不算。
 MIN_STAY_MIN = 30
+
+# 电脑快照多久没更新，就不再当作「这一小时」的数据。
+#
+# ⚠️ 这是本文件里最重要的一条闸门。笔记本一天只醒约 3.4 小时，睡着的时候
+#    `/desktop` 上那份快照**不会消失**，它只是停在最后一次推送的样子。
+#    没有这条闸门时，07:02、08:03、10:03、11:04、12:04 五道题会复读出
+#    **一模一样**的「Code.exe 22 分 · msedge 21 分」—— 而且都写在
+#    「这一段」的标题下面，看起来像是每小时都在测。那是假的。
+SNAP_MAX_AGE_MIN = 45
+
+# 收尾题里的「今天电脑合计」能容忍多久的延迟。日报比小时题宽松 ——
+# 一天的总量在两三个小时里不会变太多，但**跨天**绝对不行。
+DAILY_SNAP_MAX_AGE_MIN = 180
+
+
+def _snap_day(snap: dict | None) -> str:
+    return str((snap or {}).get("day") or "")
+
+
+def _snap_age_min(snap: dict | None, now: datetime) -> float | None:
+    """快照是多久以前推的（分钟）。解析不出来返回 None —— **不猜**。"""
+    raw = (snap or {}).get("pushed_at")
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=TZ)
+    return (now - dt).total_seconds() / 60.0
+
+
+def snapshot_state(snap: dict | None, day_iso: str, now: datetime,
+                   max_age_min: float) -> tuple[bool, str]:
+    """这份笔记本快照能不能代表 `day_iso` 的「现在」？
+
+    返回 (能不能用, 一句**给人看的**原因)。不能用时那句话会直接进题面，
+    所以要短 —— 「电脑：数据停在 10-22」比「没有记录到活动」诚实得多，
+    前者是「不知道」，后者会被读成「你没用电脑」。
+    """
+    if not isinstance(snap, dict) or not snap:
+        return False, "笔记本还没推过快照"
+    day = _snap_day(snap)
+    if day and day != day_iso:
+        return False, f"数据停在 {day}"
+    age = _snap_age_min(snap, now)
+    if age is None:
+        # 老版本推的快照没有 pushed_at。宁可照用，也不要因为缺字段就整天哑掉。
+        return True, ""
+    if age > max_age_min:
+        return False, f"最后上报是 {_hm(age)}前"
+    return True, ""
 
 # 晚上几点开始「一天的收尾」。到点之后不再发小时的题，改发三条总结题；
 # 答完之后机器人会用 LLM 写一段当天总结（见 feishu_bot）。
@@ -182,6 +236,35 @@ def save_asked(day: str, questions: list[dict]) -> None:
     tmp.replace(p)
 
 
+def closed_path(day: str) -> Path:
+    """「这一天已经收尾了」的标记文件。
+
+    ⚠️ 为什么需要它。收尾（/收尾 或 23:00）之后，timer 仍然每 30 分钟跑一次，
+       于是复盘刚发完，一小时后又冒出一条「07:02–08:02 这一段：主要在忙什么？」。
+       那不是「还有题没答」，是**已经关掉的这一天又被重新开口了**。
+
+       「今天结束了」只有使用者自己知道，所以这个标记只能由他发起的那次
+       收尾来写，不能拿时钟推。
+    """
+    return Path(CFG["state_dir"]) / f"live-closed-{day}.json"
+
+
+def is_closed(day: str) -> bool:
+    return closed_path(day).exists()
+
+
+def mark_closed(day: str, reason: str = "") -> None:
+    p = closed_path(day)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(
+            {"day": day, "reason": reason,
+             "closed_at": datetime.now(TZ).isoformat(timespec="seconds")},
+            ensure_ascii=False), encoding="utf-8")
+    except OSError as e:
+        print(f"  ⚠️  封盘标记写不进去：{e}")
+
+
 def qid(day: str, text: str) -> str:
     """`<day>-<sha1(text)[:8]>` —— 和 generate_questions 同一套。
 
@@ -259,6 +342,23 @@ def _hm(minutes: float) -> str:
     return f"{h} 小时" if h else f"{m} 分"
 
 
+def _stay_span(stay: dict) -> str:
+    """一次停留的时间跨度：``11:04 起，已停留 3 小时 46 分``。
+
+    和「停留 3 小时 46 分」的区别很关键：后者会被读成「这一小时里待了多久」。
+    """
+    start = _parse_iso(stay.get("start"))
+    end = _parse_iso(stay.get("end"))
+    mins = float(stay.get("minutes") or 0)
+    a = start.strftime("%H:%M") if start else ""
+    b = end.strftime("%H:%M") if end else ""
+    if a and b and end > start:
+        return f"{a}–{b}，共 {_hm(mins)}"
+    if a:
+        return f"{a} 起，已停留 {_hm(mins)}"
+    return f"已停留 {_hm(mins)}"
+
+
 # ── 规则 ────────────────────────────────────────────────────────────
 def _parse_iso(v: Any) -> datetime | None:
     try:
@@ -300,7 +400,11 @@ def rule_hourly(day_iso: str, stays: list[dict], events: list[dict],
                 switches.append(sw)
 
     # 电脑：笔记本每 10 分钟推一次的快照里带着「过去一小时」。
-    lh = (snap or {}).get("last_hour") or {}
+    #
+    # ⚠️ 先过新鲜度闸门。笔记本睡着时这份快照**还在**，只是停住了 ——
+    #    不过闸门的话每一小时的题都会复读同一份数据（见 SNAP_MAX_AGE_MIN）。
+    snap_ok, snap_why = snapshot_state(snap, day_iso, now, SNAP_MAX_AGE_MIN)
+    lh = ((snap or {}).get("last_hour") or {}) if snap_ok else {}
     d_apps = [(str(a), float(m)) for a, m in (lh.get("top_apps") or [])]
     d_total = float(lh.get("total_minutes") or 0.0)
 
@@ -320,11 +424,21 @@ def rule_hourly(day_iso: str, stays: list[dict], events: list[dict],
     if stay:
         where = str(stay.get("place") or "")
         tag = "坐标 " if stay.get("is_coord") else ""
-        bits.append(f"位置：{tag}{where}（停留 {_hm(float(stay['minutes']))}）")
+        # ⚠️ 写**这段停留的时间跨度**，不写累计分钟数。
+        #    原来写「停留 3 小时 46 分」，然后把它放在「13:04–14:04 这一段」
+        #    的标题下面 —— 读者当然会以为「这一段待了 3 小时 46 分」，
+        #    而那个数是**从进门到现在**的累计值。同一份数据两小时前是
+        #    「46 分」，一小时前是「2 小时 46 分」，全是同一个停留。
+        bits.append(f"位置：{tag}{where}（{_stay_span(stay)}）")
     if d_apps:
         bits.append("电脑：" + " · ".join(f"{a} {_hm(m)}" for a, m in d_apps[:3]))
+    elif not snap_ok:
+        # ⚠️ 不能说「没有记录到活动」—— 那是在拿「没有数据」冒充「没有干活」，
+        #    而且这句假话会一路进到日记里。
+        bits.append(f"电脑：{snap_why}")
     elif d_total <= 0:
-        bits.append("电脑：没有记录到活动")
+        # 快照是新的、这一小时确实是空的 —— 这一句是**真**的。
+        bits.append("电脑：这一小时没有活动")
 
     if unlocks:
         line = f"手机：解锁 {len(unlocks)} 次"
@@ -341,8 +455,13 @@ def rule_hourly(day_iso: str, stays: list[dict], events: list[dict],
             top = Counter(real).most_common(1)[0][0]
             line += f"，{phone_app_name(top)} 切换最多"
         bits.append(line)
+    elif events:
+        # 今天**有**事件，只是这一小时没有 —— 那才是「真的没解锁」。
+        bits.append("手机：这一小时没解锁")
     else:
-        bits.append("手机：一次都没解锁")
+        # ⚠️ 一整天一条事件都没有，更可能是 Tasker / 中继断了，而不是你没碰手机。
+        #    这两种情况在数据上长得一模一样，所以话必须说成「不知道」。
+        bits.append("手机：今天还没有任何上报")
 
     if not bits:
         bits.append("这一小时没有任何记录")
@@ -416,14 +535,36 @@ def load_commitment_tasks(day_iso: str) -> list[str]:
     return out
 
 
+def _commitment_keys(day_iso: str, known: list[dict]) -> list[str]:
+    """今天已经发过的问责题 key。"""
+    prefix = f"task-{day_iso}T"
+    return [str(q.get("_key") or "") for q in known
+            if str(q.get("_key") or "").startswith(prefix)]
+
+
 def commitment_question(day_iso: str, tasks: list[str],
                         now: datetime, known: list[dict]) -> dict | None:
     """到了检查时段，挑一条没问过的任务生成问责题。
 
     ⚠️ 它**替换**普通小时题，不是追加 —— 一天 4 条已经够多了，再加会让人
        把整条通道静音，连带收尾题一起收不到。
+
+    ⚠️ **一个检查时段只发一条。** 原来 `_key` 里带着任务 hash，于是
+       `COMMITMENT_HOURS` 里的 10 点这一轮、每 30 分钟拉一次 timer 就跑一次，
+       每次都因为「这一条任务没问过」而再发一条 —— 10:03 发一条、10:33 又发
+       一条，和上面那句「一天最多 4 条」直接矛盾。key 去掉 task hash 之后，
+       同一个小时天然只有一条。
     """
     if now.hour not in COMMITMENT_HOURS or not tasks:
+        return None
+
+    fired = _commitment_keys(day_iso, known)
+    # 这个时段已经问过一条了
+    if any(k.startswith(f"task-{day_iso}T{now:%H}") for k in fired):
+        return None
+    # 当天上限（COMMITMENT_HOURS 有 4 个时段，正常情况下到不了这里，
+    # 但如果环境变量被改成了更密的时段，这行是最后一道闸）
+    if len(fired) >= max(1, len(COMMITMENT_HOURS)):
         return None
 
     asked_refs = {str(q.get("ref") or "") for q in known if q.get("ref")}
@@ -460,8 +601,8 @@ def commitment_question(day_iso: str, tasks: list[str],
             {"label": "做了一部分", "done": False},
             {"label": "没做", "done": False},
         ],
-        "_key": (f"task-{day_iso}T{now:%H}-"
-                 f"{hashlib.sha1(task.encode('utf-8')).hexdigest()[:8]}"),
+        # ⚠️ key 里**不带**任务 hash：见上面「一个检查时段只发一条」。
+        "_key": f"task-{day_iso}T{now:%H}",
     }
 
 
@@ -576,7 +717,8 @@ def _rating_options(dim: str) -> list[dict]:
 
 
 def summary_questions(day_iso: str, stays: list[dict],
-                      events: list[dict], snap: dict | None) -> list[dict]:
+                      events: list[dict], snap: dict | None,
+                      now: datetime | None = None) -> list[dict]:
     """晚上收尾的几道题。答完之后机器人会用 LLM 写一段当天总结。
 
     ⚠️ 题目是**按当天真实数据拼出来的**，不是每天问同样三句。
@@ -600,7 +742,14 @@ def summary_questions(day_iso: str, stays: list[dict],
        硬问一句「今天去了哪」只会让你没法答，还会污染总结。
        所以题数在 2–5 之间浮动，不是固定三条。
     """
-    today = (snap or {}).get("today") or {}
+    now = now or datetime.now(TZ)
+    # ⚠️ 电脑快照必须**是今天的、而且是新的**，否则那句「今天电脑合计 3.52 小时」
+    #    会是昨天的数。实测就出过这个：复盘里写「今天 3.52 小时」，而已知的
+    #    快照停在 10-22 —— 同一份复盘里模型自己都说了「快照还停在 10-22」。
+    snap_ok, snap_why = snapshot_state(snap, day_iso, now, DAILY_SNAP_MAX_AGE_MIN)
+    if not snap_ok:
+        print(f"  . 收尾不用电脑数据：{snap_why}")
+    today = ((snap or {}).get("today") or {}) if snap_ok else {}
     total = float(today.get("total_hours") or 0)
     cats = today.get("by_category") or []
     d_apps = [(str(a), float(h)) for a, h in (today.get("top_apps") or [])]
@@ -687,19 +836,30 @@ def build(day: Day, base: str, key: str) -> list[dict]:
     known = load_asked(day.iso)
     fired = {str(q.get("_key") or "") for q in known}
 
+    # ── 已经收尾的一天不再开口 ──
+    # 见 closed_path()：收尾之后再出「这一段你在干嘛」是纯噪音。
+    if is_closed(day.iso):
+        return known
+
     # ── 晚上收尾 ──
     if _summary_due(now):
         prefix = f"summary-{day.iso}"
         if any(k.startswith(prefix) for k in fired):
             return known                  # 今天已经收过尾了
         try:
-            return known + summary_questions(day.iso, stays, events, snap)
+            # ⚠️ 这里**不封盘**。封盘要等 push 成功（见 main()）—— 先封的话，
+            #    一次推送失败会让这一天再也生不出收尾，而服务器上看不出异常。
+            return known + summary_questions(day.iso, stays, events, snap, now=now)
         except Exception as e:  # noqa: BLE001
             print(f"  ⚠️  收尾题生成失败：{type(e).__name__}: {e}")
             return known
 
     # 离收尾不到一小时就别再发小时题 —— 否则晚上连着两条。
     if _summary_soon(now):
+        return known
+
+    # 这一小时刚刚发过问责题？那就不再发小时题。问责题是**替换**，不是加塞。
+    if any(k.startswith(f"task-{day.iso}T{now:%H}") for k in fired):
         return known
 
     # ── 固定时段的任务检查（替换这一小时的普通题）──
@@ -775,10 +935,14 @@ def force_summary(day_iso: str, base: str, key: str) -> list[dict]:
         events = relay_phone_events(day_iso, base, key)
         stays = today_stays(day)
         snap = relay_desktop(base, key)
-        qs = summary_questions(day_iso, stays, events, snap)
+        qs = summary_questions(day_iso, stays, events, snap,
+                               now=datetime.now(TZ))
         ok, detail = push(day_iso, base, key, known + qs)
         if not ok:
             raise RuntimeError(detail)
+        # ⚠️ 收尾题**推成功之后**才封盘。先封的话，推送失败会让这一天再也
+        #    生不出收尾 —— 而使用者以为自己已经收工了。
+        mark_closed(day_iso, "manual-summary")
 
     return [q for q in fetch_pending(base, key)
             if str(q.get("kind") or "") == "summary"]
@@ -834,6 +998,13 @@ def main() -> int:
         print(f"  ⚠️  {detail}")
         return 1
     print(f"  OK  {detail} 条已推（本次新增 {len(new)}）")
+
+    # ⚠️ **推成功之后**才封盘。收尾题一旦发出，这一天的小时题就不该再出现 ——
+    #    但先封后推的话，一次推送失败会让这一天再也生不出收尾，
+    #    而使用者以为自己已经收工了。
+    if any(str(q.get("kind") or "") == "summary" for q in new):
+        mark_closed(day.iso, "auto-summary")
+        print(f"  ·  {day.iso} 已封盘，今天不再出小时题")
     return 0
 
 

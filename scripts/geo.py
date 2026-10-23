@@ -87,6 +87,8 @@ class Place(NamedTuple):
     lon: float
     population: int
     fcode: str = ""     # GeoNames feature code: PPLA / PPLA2 / PPLA3 / PPLA4 / PPL ...
+    admin2: str = ""    # 地级单位代码。同一个 admin2 = 同一个上级，可用来验父子关系
+    admin3: str = ""
 
 
 
@@ -169,6 +171,8 @@ def _load() -> list[Place]:
                     admin1=parts[10],
                     population=int(parts[14] or 0),
                     fcode=parts[7],
+                    admin2=parts[11],
+                    admin3=parts[12],
                 ))
             except (ValueError, IndexError):
                 continue
@@ -223,6 +227,15 @@ DISTRICT_RADIUS_KM = 10.0
 # PPLX 只有 allCountries 数据集才有 —— 想细到小区就得用那个。
 CHAIN = ("PPLX", "PPLA4", "PPLA3", "PPLA2", "PPLA", "PPLC")
 
+# 「城市级」—— 可以安全地当作细一级容器的几级。
+#   PPLA2  地级市    （深圳、苏州、佛山……没有它，「Gangxia, Guangdong」会丢掉城市名）
+#   PPLA   省会 / 直辖市
+#   PPLC   首都
+#
+# ⚠️ 地级市离你几十公里也是对的：它**确实**把下面那个区县整个包住了。
+#    这正是它和「区」的区别 —— 区与区之间可能是邻居，市与区之间不会。
+CITY_LEVELS = ("PPLA2", "PPLA", "PPLC")
+
 _admin1_cache: dict[str, str] | None = None
 
 
@@ -248,14 +261,15 @@ def _load_admin1() -> dict[str, str]:
 
 
 def describe(lat: float, lon: float, max_km: float = 50.0) -> str:
-    """给人看的地点描述，**从最细一级逐级拼到国家**。
+    """给人看的地点描述：**最近的细一级 + 城市级 + 省 + 国家**。
 
-    输出形如：``Yingpu, Qingpu, Shanghai, CN``
-              街道      区      市/省     国家
+    输出形如：``Zhabei, Shanghai, CN``
+              片区     市/省     国家
+    或（郊区）：``Yingpu, Shanghai, CN``
 
     ## 行政级别怎么判 —— 用 feature code，不是用人口
 
-        PPLX   居民点的一部分（小区 / 社区）   <- 只有 allCountries 数据集有
+        PPLX   居民点的一部分（小区 / 社区）
         PPLA4  乡级：街道 / 镇
         PPLA3  县级：区 / 县
         PPLA2  地级：市
@@ -267,16 +281,30 @@ def describe(lat: float, lon: float, max_km: float = 50.0) -> str:
     1. **不能用人口选级别**。深圳 1700 万永远盖过福田 150 万 ——
        按人口选会永远停在「市」，永远到不了区、更到不了街道。
 
-    2. **「就近找上级」是错的**。行政归属是**数据**，不是几何关系：
-         · 按最近找 -> 北京中心的上级成了 Langfang（廊坊在河北）
-         · 加同省约束 -> 纽约成了「Brooklyn, Manhattan」（布鲁克林不在曼哈顿）
-       所以上级取 GeoNames 标注的 admin1 字段，那是权威值。
+    2. **「就近找上级」是错的**。行政归属是**数据**，不是几何关系。
 
-    ## 为什么拼成链条
+    ## 为什么只拼「细一级 + 城市」，不拼「细一级 + 区 + 市」
 
-    只给最细一级（「Yingpu」）别人不知道在哪；
-    只给最粗一级（「Shanghai」）等于没说。
-    从细到粗拼起来，既有粒度又有上下文。
+    ⚠️ 这里原来是从细到粗**逐级各取最近**，拼成两级地名。它会拼出
+    **互不包含**的假地名：
+
+        Zhabei, Pudong, Shanghai, CN
+
+    闸北（PPLX，浦西）和浦东（PPLA4）隔着 4.4 公里、谁也不属于谁，但两句
+    都是「浦东」附近最近的候选，于是被粘成了一个**看着完全正常**的地名。
+    GeoNames 的 admin2 代码也救不了 —— 这两个条目的 admin2 都是 12324204。
+
+    根本原因：cities500 这类数据集**只有坐标，没有边界**。没有边界就无法
+    判断 A 是否包含 B，而「各自取最近」本来就是在猜。两个同级邻居之间的距离，
+    和真正的父子距离，在几何上没有区别。
+
+    所以改成一条**结构上不可能错**的规则：细一级之后只接**城市级**
+    （PPLA / PPLC）。城市级地名离你 50 公里以内，一定在你的行政树上方 ——
+    「街区, 城市, 省, 国家」这句话永远成立，不需要边界数据去验证。
+
+    代价：丢掉区/县这一级（``Yingpu, Qingpu, Shanghai`` 只剩下
+    ``Yingpu, Shanghai``）。这是**有意的**取舍 —— 对日记来说城市级就够了，
+    而一个错的区名比少一个区名糟得多。
     """
     cands = _candidates(lat, lon, max_km)
     if not cands:
@@ -285,50 +313,44 @@ def describe(lat: float, lon: float, max_km: float = 50.0) -> str:
     near_pool = [c for c in cands if c[0] <= DISTRICT_RADIUS_KM]
     pool = near_pool or cands
 
-    # 从最细一级往粗走，**每一级取距离最近的那个**。
+    # ── 1. 最细一级：先按**距离**取，再在「几乎一样近」的里面挑级别最细的 ──
     #
-    # ⚠️ 必须按距离、不能按人口。按人口选的话：
-    #     你的坐标 -> 朱家角(7km, 6万人) 会盖过 盈浦街道(0.33km, 0人)
-    #   而且各级选出的地点会散落在不同位置（「Luohu District」和「Shahe」
-    #   根本不在一个地方），拼出来的链条在几何上是错的。
-    #   按距离选，各级天然是同心的，才有真正的地理包含关系。
-    names: list[str] = []
-    anchor: Place | None = None
-    for lvl in CHAIN:
-        hits = [
+    # ⚠️ 顺序不能反。原来是「按 CHAIN 从细到粗，取第一个有候选的级别」，
+    #    于是只要 3 公里外有一个 PPLX，它就盖过脚下 10 米的那个 PPLA4 ——
+    #    浦东南边的坐标因此被叫成「Puxi」。距离是硬约束，粒度只在打平时才用。
+    #
+    # ⚠️ 也不能按人口选：朱家角(7km, 6万人) 会盖过 盈浦街道(0.33km, 0人)。
+    d0 = min(d for d, _ in pool)
+    tied = [c for c in pool if c[0] <= d0 + 0.5]
+    rank = {fc: i for i, fc in enumerate(CHAIN)}
+    known = [c for c in tied if c[1].fcode in rank]
+    _, finest = (min(known, key=lambda cd: rank[cd[1].fcode])
+                 if known else min(tied, key=lambda cd: cd[0]))
+
+    names: list[str] = [finest.name]
+
+    # ── 2. 城市级：同国同省里最近的那个 PPLA / PPLC ──
+    # ⚠️ 同国同省这条不能省：只按距离选会把行政区划外的地方拉进来
+    #    （纽约 -> 「Tribeca, Jersey City」，隔一条河就是另一个州）。
+    if finest.fcode not in CITY_LEVELS:
+        cities = [
             c for c in pool
-            if c[1].fcode == lvl
-            # ⚠️ 必须约束「同国同省」。只按距离选会把行政区划外的地方拉进来：
-            #     纽约 -> 「Tribeca, Jersey City」（Tribeca 在曼哈顿，
-            #             Jersey City 在新泽西，隔一条河）
-            #   行政边界不看距离。
-            and (anchor is None or (
-                c[1].country == anchor.country and c[1].admin1 == anchor.admin1))
+            if c[1].fcode in CITY_LEVELS
+            and c[1].country == finest.country
+            and c[1].admin1 == finest.admin1
         ]
-        if not hits:
-            continue
-        _, p = min(hits, key=lambda cd: cd[0])
-        anchor = anchor or p
-        if p.name not in names:
-            names.append(p.name)
-        if len(names) >= 2:
-            # 最多两级，加上后面的 admin1 和国家 = 4 段
-            # （「Porte Saint-Martin, Boulogne-Billancourt, Bobigny, Île-de-France, FR」
-            #   这种五段的就是没截断产生的，读起来是流水账）
-            break
+        if cities:
+            _, city = min(cities, key=lambda cd: cd[0])
+            if city.name not in names:
+                names.append(city.name)
 
-    if not names:
-        # 一个已知级别都没匹配上（可能是 PPL 之类的普通居民点）
-        _, anchor = min(cands, key=lambda cd: cd[0])
-        names.append(anchor.name)
-
-    # 上级：admin1 字段（省级）。权威值，不能靠距离推。
+    # ── 3. 省 / 直辖市：admin1 字段是权威值，不靠距离推 ──
     admin = _load_admin1()
-    parent = admin.get(f"{anchor.country}.{anchor.admin1}", "")
+    parent = admin.get(f"{finest.country}.{finest.admin1}", "")
     if parent and parent not in names:
         names.append(parent)
 
-    names.append(anchor.country)
+    names.append(finest.country)
     return ", ".join(names)
 def main() -> None:
     """命令行自测：python scripts/geo.py 31.1566 121.1027"""
