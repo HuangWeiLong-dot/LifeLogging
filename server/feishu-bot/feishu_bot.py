@@ -831,6 +831,77 @@ def recap_card(text: str) -> dict:
     }
 
 
+def _flatten(text: str) -> str:
+    """把终端风格的缩进文本压成卡片能看的形状。
+
+    ⚠️ 数据渲染（`/phone` `/where` …）是照**终端**排的：靠前导空格对齐。
+       卡片里连续空格会被吃掉，那套对齐会散成一堆错位的列。所以这里把每行
+       的空白压成一个，并去掉连续空行 —— 结构靠换行保住，不靠列宽。
+    """
+    out: list[str] = []
+    for line in str(text or "").splitlines():
+        s = " ".join(line.split())
+        if not s and (not out or not out[-1]):
+            continue
+        out.append(s)
+    return "\n".join(out).strip()
+
+
+def report_card(text: str, template: str = "turquoise",
+                title: str | None = None) -> dict:
+    """把一段**已经排好的纯文本**包成卡片：第一行当标题，其余当正文。
+
+    ⚠️ 不做分段解析。数据命令的输出不是【标题】那种结构，硬拆只会拆坏。
+       复盘那种有明确分段的走 recap_card()。
+
+    `title` 给了就用它，否则拿第一行（≤40 字）当标题。自由问答那种散文没有
+    「第一行是标题」这回事，必须显式给。
+    """
+    body = _flatten(text)
+    lines = body.splitlines()
+    if title is None:
+        title = "数据"
+        if lines and len(lines[0]) <= 40:
+            title = lines[0]
+            lines = lines[1:]
+    elif lines and lines[0] == title:
+        lines = lines[1:]
+    body = "\n".join(lines).strip()
+
+    elements: list[dict] = []
+    if body:
+        elements.append({"tag": "div",
+                         "text": {"tag": "lark_md", "content": body}})
+    else:
+        elements.append(_note("没有数据。"))
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": template,
+                   "title": {"tag": "plain_text", "content": title}},
+        "elements": elements,
+    }
+
+
+def send_report(open_id: str, text: str, template: str = "turquoise",
+                title: str | None = None) -> None:
+    """数据命令的出口：短答案发文本，长答案发卡片。
+
+    ⚠️ 短答案（「没有数据。」「用法：/ask <问题>」）不值得开一张卡 ——
+       一张卡里只有一个字的观感比一行文字更差。
+    """
+    flat = _flatten(text)
+    if len(flat) < 40 and "\n" not in flat:
+        send_text(open_id, flat)
+        return
+    try:
+        send_card(open_id, report_card(text, template, title=title))
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN 数据卡片没发出去，退回纯文本：{type(e).__name__}: {e}",
+              file=sys.stderr)
+        send_text(open_id, text)
+
+
 def render_question(q: dict, remaining: int) -> str:
     """**纯文本**版本的题目。卡片发不出去时的兜底，同时是 /pending 的输出。"""
     lines = [f"{_group_label(q)} · 还剩 {remaining} 题"]
@@ -1031,7 +1102,13 @@ def maybe_write_summary(open_id: str, day_iso: str,
 
     ⚠️ 「答完」靠**中继**判断（再拉一次待答，看还有没有 kind=summary 的题），
        不在本地留队列 —— 和「什么算还没答」永远只有一份实现是同一个原则。
+
+    ⚠️ `day_iso` 是**被回顾的那一天**，而答案永远落在**作答那一天**的事件里。
+       凌晨收尾时这两个不是同一天（10-22 的复盘在 10-23 00:30 答）：
+       复盘标题要写 10-22，但要读的答案在 10-23 的事件文件里。
+       所以取答案用 `qa_day`，写复盘用 `day_iso`。
     """
+    qa_day = datetime.now(TZ).date().isoformat()
     try:
         pending = relay_pending()
     except Exception as e:  # noqa: BLE001
@@ -1042,11 +1119,11 @@ def maybe_write_summary(open_id: str, day_iso: str,
 
     # 优先从 /qa 取**当天全部**回答（早晨批 + 实时批 + 收尾批），
     # 不再只挑 kind=summary。旧版中继没有 /qa 时退回原来的 summary-only。
-    qa = live.relay_qa(day_iso, RELAY_BASE, RELAY_API_KEY)
+    qa = live.relay_qa(qa_day, RELAY_BASE, RELAY_API_KEY)
     if not qa:
         state = load_state()
         asked = state.get("asked") if isinstance(state.get("asked"), dict) else {}
-        answers = _answers_today(day_iso)
+        answers = _answers_today(qa_day)
         for qid, v in asked.items():
             if not isinstance(v, dict) or str(v.get("kind") or "") != "summary":
                 continue
@@ -1143,6 +1220,31 @@ def advance(open_id: str, ack: str = "") -> None:
     save_state(state)
 
 
+# 「凌晨几点之前，收尾算前一天」。
+#
+# ⚠️ 这个常量存在的原因是一个已经发生过的**数据污染**：
+#
+#    10-23 00:01 按了 /收尾。`handle_end_day` 用的是 `now.date()`，于是收尾题
+#    生成给 **10-23** —— 而 10-23 才刚开始，人真正要回顾的是 10-22。题面里的
+#    「今天电脑 3.52 小时」拿的是 10-22 的快照（那时还没有新鲜度闸门）。
+#    答完之后，那三个分数被 collect_labels 按 question_day 落成
+#    `day=2026-10-23` 的标签。
+#
+#    也就是说：**标签记在 10-23，描述的是 10-22。** 特征和标签差一天，而且
+#    从数据表面完全看不出来 —— 模型会学到一个恒定错位的映射。
+#
+#    所以「今天结束了」这句话，在一觉睡醒之前指的都是前一天。
+#    5 点是分界：再晚就不像「刚刚结束的那一天」了。
+DAY_ROLL_HOUR = int(os.environ.get("FEISHU_DAY_ROLL_HOUR", "5"))
+
+
+def target_day_iso(now: datetime) -> str:
+    """「现在要收尾的那一天」是哪天。凌晨归前一天。"""
+    if now.hour < DAY_ROLL_HOUR:
+        return (now.date() - timedelta(days=1)).isoformat()
+    return now.date().isoformat()
+
+
 END_DAY_COMMANDS = ("/收尾", "/结束", "/收工", "/end")
 # 「重来一次复盘」。存在的理由是失败可恢复：总结那一步可能因为 LLM 挂了而失败，
 # 而答完的题不会再问一遍 —— 没有这个命令就永远补不回来。
@@ -1158,7 +1260,7 @@ def handle_end_day(open_id: str) -> None:
     ⚠️ 会覆盖当前 `awaiting`：你已经明确说「结束了」，那一道没答的就先放下。
        它仍然留在中继上，之后还会再被问到（不会丢）。
     """
-    day_iso = datetime.now(TZ).date().isoformat()
+    day_iso = target_day_iso(datetime.now(TZ))
     try:
         # 延迟 import：live_questions 在 import 时会 load_config()，
         # 不想让「配置文件有问题」把整个机器人拖得启动不了。
@@ -1199,6 +1301,19 @@ def handle_end_day(open_id: str) -> None:
 
 # 只有这些命令会去读数据。普通消息一律记成笔记 —— 自然语言关键词匹配太容易
 # 被长文里的「手机」「电脑」误伤，而且回复里那串解释本身也是噪音。
+# 每条数据命令的卡片配色。和「四批题目」那套色板**故意不同**：
+# 这些是「你问它」的查询结果，不是「它问你」的题，颜色上就该分开。
+_DATA_TEMPLATE = {
+    "/today": "turquoise",
+    "/phone": "blue",
+    "/where": "green",
+    "/location": "green",
+    "/desktop": "indigo",
+    "/watch": "yellow",
+    "/qa": "violet",
+    "/ask": "grey",
+}
+
 DATA_COMMANDS = {
     "/today": "当天总览",
     "/phone": "手机使用",
@@ -1253,11 +1368,17 @@ def handle_data_command(open_id: str, cmd: str, arg: str) -> None:
         else:
             reply = "未知命令。看 /help。"
     except live.LiveUnavailable as e:
-        reply = str(e)
+        # 拿不到数据是**一句话**，不是一份报表 —— 不开卡片。
+        send_text(open_id, str(e))
+        return
     except Exception as e:  # noqa: BLE001
         print(f"ERROR 查数据失败：{type(e).__name__}: {e}", file=sys.stderr)
-        reply = f"查不到：{e}"
-    send_text(open_id, reply)
+        send_text(open_id, f"查不到：{e}")
+        return
+
+    # /ask 的回话是散文，没有「第一行当标题」这回事，必须显式给标题。
+    send_report(open_id, reply, _DATA_TEMPLATE.get(cmd, "turquoise"),
+                title="自由问答" if cmd == "/ask" else None)
 
 
 def handle_text(open_id: str, text: str) -> None:
@@ -1431,7 +1552,9 @@ def handle_text(open_id: str, text: str) -> None:
     # 晚上收尾：这是最后一道总结题的话，立刻写总结，不再接着出题。
     if str(q.get("kind") or "") == "summary":
         try:
-            if maybe_write_summary(open_id, datetime.now(TZ).date().isoformat()):
+            # ⚠️ 复盘用**题目自己的 day**，不是「现在几点」。凌晨收尾时两者
+            #    不是同一天（见 DAY_ROLL_HOUR 的注释）。
+            if maybe_write_summary(open_id, target_day_iso(datetime.now(TZ))):
                 return
         except Exception as e:  # noqa: BLE001
             print(f"WARN 收尾失败：{type(e).__name__}: {e}", file=sys.stderr)
