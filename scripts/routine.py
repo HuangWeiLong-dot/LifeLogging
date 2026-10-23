@@ -74,6 +74,9 @@ KIND_TO_CATEGORY: dict[str, tuple[str, ...] | None] = {
 
 WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
+# 人自己说的活动，按天索引。main() 里加载一次，analyze_day 直接读。
+_EVENTS: dict[str, list[dict]] = {}
+
 # 判定阈值。两个都要过 —— 只看比例的话，一个 10 分钟的时段里刷了 6 分钟
 # 就算「60% 偏离」，那是在凑数据。
 MIN_SLOT_MIN = 30          # 短于半小时的时段不判
@@ -101,22 +104,29 @@ def _block_range(b: dict) -> tuple[int, int] | None:
     return s, e
 
 
-def load_timetable(path: Path) -> dict[str, list[dict]]:
-    """读课表。文件不在就返回空 —— 调用方会明说「没有课表」。"""
+def load_timetable(path: Path) -> tuple[date | None, dict[str, list[dict]]]:
+    """读课表 → (学期第 1 周的周一, {星期: [时段]})。读不了就返回 (None, {})。"""
     try:
         import yaml
     except Exception:  # noqa: BLE001
         print("  ⚠️  没有 pyyaml，读不了课表")
-        return {}
+        return None, {}
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     except OSError:
-        return {}
+        return None, {}
     except Exception as e:  # noqa: BLE001
         print(f"  ⚠️  课表解析失败（{path}）：{type(e).__name__}: {e}")
-        return {}
+        return None, {}
     if not isinstance(raw, dict):
-        return {}
+        return None, {}
+
+    start: date | None = None
+    if raw.get("semester_start"):
+        try:
+            start = date.fromisoformat(str(raw["semester_start"]))
+        except ValueError:
+            print(f"  ⚠️  semester_start 格式不对：{raw.get('semester_start')!r}")
 
     out: dict[str, list[dict]] = {}
     for day, slots in raw.items():
@@ -134,13 +144,39 @@ def load_timetable(path: Path) -> dict[str, list[dict]]:
                 print(f"  ⚠️  {day} {s.get('start')}-{s.get('end')} 的 kind "
                       f"{kind!r} 不认识，跳过")
                 continue
+            weeks = s.get("weeks")
+            if (isinstance(weeks, list) and len(weeks) == 2
+                    and all(isinstance(w, int) for w in weeks)):
+                weeks = (weeks[0], weeks[1])
+            else:
+                weeks = None
             clean.append({"start": a, "end": z,
                           "what": str(s.get("what") or "").strip(),
                           "kind": kind,
-                          "place": str(s.get("place") or "").strip()})
+                          "place": str(s.get("place") or "").strip(),
+                          "weeks": weeks})
         clean.sort(key=lambda x: x["start"])
         out[day] = clean
-    return out
+    return start, out
+
+
+def week_of(day: date, semester_start: date | None) -> int | None:
+    """这一天的周次（第 1 周起）。没有学期开始日就返回 None。"""
+    if semester_start is None:
+        return None
+    return (day - semester_start).days // 7 + 1
+
+
+def slot_active(slot: dict, week: int | None) -> bool:
+    """这一周这个时段开不开。
+
+    ⚠️ 不判周次的话，第 11 周才开的创新创业教育会在前 10 周被判成
+       「该上课却在干别的」—— 那是最冤的一类假偏离。
+    """
+    w = slot.get("weeks")
+    if w is None or week is None:
+        return True
+    return w[0] <= week <= w[1]
 
 
 def _timeline(day_iso: str) -> dict | None:
@@ -152,45 +188,106 @@ def _timeline(day_iso: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _events_by_day() -> dict[str, list[dict]]:
+    """`state/events.jsonl` → 按天分组。这是**人自己说**的活动。"""
+    out: dict[str, list[dict]] = defaultdict(list)
+    p = STATE / "events.jsonl"
+    try:
+        lines = p.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(r, dict):
+            continue
+        day = str(r.get("day") or "")
+        a, z = _hhmm(r.get("start")), _hhmm(r.get("end"))
+        if not day or a is None or z is None or z <= a:
+            continue
+        out[day].append({**r, "_a": a, "_z": z})
+    return out
+
+
+def event_observation(slot: dict, events: list[dict]) -> dict:
+    """用**他自己说的**活动算同一个时段。
+
+    ⚠️ 这是第二条观测路径，不是补丁。笔记本合着的时候（在上课、在通勤、
+       在睡觉）屏幕上一个字都没有，但他在每小时问答里写得清清楚楚：
+       「上英语课」「在图书馆坐了一会儿之后去跑了个步」。
+       不接这条路径的话，课表时段永远判「未观测」，偏离检测等于没做。
+    """
+    spans = []
+    for e in events:
+        a = max(e["_a"], slot["start"])
+        z = min(e["_z"], slot["end"])
+        if z > a:
+            spans.append((a, z, str(e.get("category") or "Other"),
+                          str(e.get("activity") or "")))
+    return _summarise(slot, spans, label_key=3)
+
+
 def slot_observation(slot: dict, blocks: list[dict]) -> dict:
     """一个时段里到底观测到了什么。
 
     ⚠️ `observed` 是**这一段时间里被记录到的分钟数**，不是时段长度。笔记本
        关着的时候这个数会很小 —— 那是「没观测」，不是「没做事」。
     """
-    total = slot["end"] - slot["start"]
-    want = KIND_TO_CATEGORY.get(slot["kind"])
-    observed = adhered = 0.0
-    others: Counter = Counter()
-    apps: Counter = Counter()
-
+    spans = []
     for b in blocks:
         r = _block_range(b)
         if r is None:
             continue
-        bs, be = r
-        overlap = min(be, slot["end"]) - max(bs, slot["start"])
-        if overlap <= 0:
-            continue
-        mins = float(overlap)
-        observed += mins
-        cat = str(b.get("category") or "Other")
+        a = max(r[0], slot["start"])
+        z = min(r[1], slot["end"])
+        if z > a:
+            spans.append((a, z, str(b.get("category") or "Other"),
+                          str(b.get("app") or "")))
+    return _summarise(slot, spans, label_key=3)
+
+
+def _summarise(slot: dict, spans: list[tuple[int, int, str, str]],
+               label_key: int = 3) -> dict:
+    """把 [起,止,类别,标签] 归到**分钟**上再统计。
+
+    ⚠️ 必须逐分钟归属，不能各自求和。事件是按**小时**报的，两个相邻小时
+       会和同一个 90 分钟时段重叠 —— 求和会算出「观测 115 分钟 / 时段 90 分钟」
+       这种覆盖率 127% 的数，然后「偏离 60 分钟」也是假的。
+       一分钟只能属于一件事，后来的覆盖先来的（他说得越晚越具体）。
+    """
+    total = slot["end"] - slot["start"]
+    want = KIND_TO_CATEGORY.get(slot["kind"])
+
+    minutes: dict[int, tuple[str, str]] = {}
+    for a, z, cat, label in sorted(spans, key=lambda x: x[0]):
+        for m in range(a, z):
+            minutes[m] = (cat, label)
+
+    observed = len(minutes)
+    adhered = 0
+    others: Counter = Counter()
+    labels: Counter = Counter()
+    for cat, label in minutes.values():
         if want and cat in want:
-            adhered += mins
+            adhered += 1
         else:
-            others[cat] += mins
-            apps[str(b.get("app") or "")] += mins
+            others[cat] += 1
+            if label:
+                labels[label] += 1
 
     other = observed - adhered
-    coverage = observed / total if total else 0.0
     return {
         "slot_minutes": total,
-        "observed_minutes": round(observed, 1),
-        "adhered_minutes": round(adhered, 1),
-        "other_minutes": round(other, 1),
-        "coverage": round(coverage, 2),
+        "observed_minutes": float(observed),
+        "adhered_minutes": float(adhered),
+        "other_minutes": float(other),
+        "coverage": round(observed / total if total else 0.0, 2),
         "top_other_category": others.most_common(1)[0][0] if others else "",
-        "top_other_app": apps.most_common(1)[0][0] if apps else "",
+        "top_other_app": (labels.most_common(1)[0][0]
+                          if labels else (others.most_common(1)[0][0]
+                                          if others else "")),
     }
 
 
@@ -208,20 +305,31 @@ def verdict(slot: dict, obs: dict) -> str:
     return "on_track"
 
 
-def analyze_day(day_iso: str, timetable: dict[str, list[dict]]) -> list[dict]:
+def analyze_day(day_iso: str, timetable: dict[str, list[dict]],
+                semester_start: date | None = None) -> list[dict]:
     tl = _timeline(day_iso)
     if tl is None:
         return []
     try:
-        wd = WEEKDAYS[date.fromisoformat(day_iso).weekday()]
+        d = date.fromisoformat(day_iso)
+        wd = WEEKDAYS[d.weekday()]
     except ValueError:
         return []
-    slots = timetable.get(wd) or []
+    week = week_of(d, semester_start)
+    slots = [sl for sl in (timetable.get(wd) or []) if slot_active(sl, week)]
     blocks = tl.get("blocks") or []
+    events = _EVENTS.get(day_iso) or []
 
     rows: list[dict] = []
     for slot in slots:
-        obs = slot_observation(slot, blocks)
+        # 先看屏幕，屏幕看不见再看他自己的说法。
+        step = slot_observation(slot, blocks)
+        srcd = "screen"
+        if step["coverage"] < MIN_COVERAGE and events:
+            by_self = event_observation(slot, events)
+            if by_self["coverage"] >= MIN_COVERAGE:
+                step, srcd = by_self, "self"
+        obs = step
         v = verdict(slot, obs)
         rows.append({
             "day": day_iso,
@@ -231,6 +339,8 @@ def analyze_day(day_iso: str, timetable: dict[str, list[dict]]) -> list[dict]:
             "what": slot["what"],
             "kind": slot["kind"],
             "place": slot["place"],
+            "week": week,
+            "observed_by": srcd,
             "verdict": v,
             **obs,
         })
@@ -296,15 +406,19 @@ def main() -> int:
         if vault and "REPLACE" not in str(vault):
             candidates.append(Path(vault) / "04-Tasks" / "timetable.yaml")
     path = next((p for p in candidates if p.exists()), candidates[0])
-    timetable = load_timetable(path)
+    semester_start, timetable = load_timetable(path)
     if not timetable:
         print(f"  没有可用课表（找的是 {path}）。")
         print("  复制 config/timetable.example.yaml 成 config/timetable.yaml 再改。")
         return 0
 
+    global _EVENTS
+    _EVENTS = _events_by_day()
     rows: list[dict] = []
     for d in days:
-        rows += analyze_day(d, timetable)
+        rows += analyze_day(d, timetable, semester_start)
+    if semester_start is None:
+        print("  ⚠️  课表里没有 semester_start，周次过滤关掉了（第 N 周才开的课会被误判）")
 
     counts = Counter(r["verdict"] for r in rows)
     print(f"  课表时段 {len(rows)} 个（{len(days)} 天）")

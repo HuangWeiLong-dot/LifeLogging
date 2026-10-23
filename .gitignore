@@ -2,6 +2,9 @@
 # config.yaml 里有 events_api 的本地 key，以及（如果你这么填了）其它凭据。
 # 模板是 config.example.yaml，那个可以提交。
 config/config.yaml
+# 课表：有教室号和你的作息表，默认不进仓库。
+# 想让服务器/仓库也有它，删掉这一行即可（模板见 config/timetable.example.yaml）。
+config/timetable.yaml
 
 # 运行时状态：事件表、成本台账、日志、中间产物
 state/
