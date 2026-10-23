@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>LLS · 项目思维导图</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0; padding: 32px 28px 56px;
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #fbfbfa; color: #1f2328;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: .01em; }
+  .sub { color: #6a737d; font-size: 13px; margin-bottom: 22px; }
+  .card {
+    background: #fff; border: 1px solid #e5e7eb; border-radius: 14px;
+    padding: 18px 16px; overflow-x: auto;
+  }
+  .legend { display: flex; flex-wrap: wrap; gap: 10px 26px; margin: 22px 0 0; }
+  .sem { display:flex; flex-wrap:wrap; gap:8px 26px; margin-top:18px;
+          padding-top:16px; border-top:1px solid #e5e7eb; }
+  .sem .sm { display:flex; align-items:baseline; gap:7px; font-size:12.5px;
+              max-width: 520px; }
+  .sem .sm i { color:#6a737d; font-style:normal; }
+  .lg { display: flex; align-items: center; gap: 7px; font-size: 12.5px; }
+  .lg i { color: #6a737d; font-style: normal; }
+  .lg b { font-weight: 600; }
+  .dot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+  .foot { margin-top: 22px; color: #6a737d; font-size: 12px; }
+  @media (prefers-color-scheme: dark) {
+    body { background:#16181c; color:#e6edf3; }
+    .card { background:#1c1f24; border-color:#2d333b; }
+    text { fill: #e6edf3 !important; }
+    rect[fill="#ffffff"] { fill: #1c1f24 !important; }
+  }
+</style>
+<h1>LLS · LifeLogging System</h1>
+<div class="sub">13 天原始数据 · 13 行特征 · 3 条自评 · 21 条 AI 标注 · 143 条结构化事件 · 13 行数据集</div>
+<div class="card"><svg viewBox="0 0 1030 1146.0" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif">
+<path d="M540,168.0 C600.0,168.0 600.0,60.0 660,60.0" fill="none" stroke="#2f6f9f" stroke-width="1.6" stroke-opacity=".55"/>
+<path d="M540,168.0 C600.0,168.0 600.0,114.0 660,114.0" fill="none" stroke="#2f6f9f" stroke-width="1.6" stroke-opacity=".55"/>
+<path d="M540,168.0 C600.0,168.0 600.0,168.0 660,168.0" fill="none" stroke="#2f6f9f" stroke-width="1.6" stroke-opacity=".55"/>
+<path d="M540,168.0 C600.0,168.0 600.0,222.0 660,222.0" fill="none" stroke="#2f6f9f" stroke-width="1.6" stroke-opacity=".55"/>
+<path d="M540,168.0 C600.0,168.0 600.0,276.0 660,276.0" fill="none" stroke="#2f6f9f" stroke-width="1.6" stroke-opacity=".55"/>
+<path d="M540,411.0 C600.0,411.0 600.0,330.0 660,330.0" fill="none" stroke="#8a5a2b" stroke-width="1.6" stroke-opacity=".55"/>
+<path d="M540,411.0 C600.0,411.0 600.0,384.0 660,384.0" fill="none" stroke="#8a5a2b" stroke-width="1.6" stroke-opacity=".55"/>
+<path d="M540,411.0 C600.0,411.0 600.0,438.0 660,438.0" fill="none" stroke="#8a5a2b" stroke-width="1.6" stroke-opacity=".55"/>
+<path d="M540,411.0 C600.0,411.0 600.0,492.0 660,492.0" fill="none" stroke="#8a5a2b" stroke-width="1.6" stroke-opacity=".55"/>
+<path d="M540,627.0 C600.0,627.0 600.0,546.0 660,546.0" fill="none" stroke="#6b4b9a" stroke-width="1.6" stroke-opacity=".55"/>
+<path d="M540,627.0 C600.0,627.0 600.0,600.0 660,600.0" fill="none" stroke="#6b4b9a" stroke-width="1.6" stroke-opacity=".55"/>
+<path d="M540,627.0 C600.0,627.0 600.0,654.0 660,654.0" fill="none" stroke="#6b4b9a" stroke-width="1.6" stroke-opacity=".55"/>
+<path d="M540,627.0 C600.0,627.0 600.0,708.0 660,708.0" fill="none" stroke="#6b4b9a" stroke-width="1.6" stroke-opacity=".55"/>
+<path d="M540,816.0 C600.0,816.0 600.0,762.0 660,762.0" fill="none" stroke="#2c7a5e" stroke-width="1.6" stroke-opacity=".55"/>
+<path d="M540,816.0 C600.0,816.0 600.0,816.0 660,816.0" fill="none" stroke="#2c7a5e" stroke-width="1.6" stroke-opacity=".55"/>
+<path d="M540,816.0 C600.0,816.0 600.0,870.0 660,870.0" fill="none" stroke="#2c7a5e" stroke-width="1.6" stroke-opacity=".55"/>
+<path d="M540,1005.0 C600.0,1005.0 600.0,924.0 660,924.0" fill="none" stroke="#9a3b4a" stroke-width="1.6" stroke-opacity=".55"/>
+<path d="M540,1005.0 C600.0,1005.0 600.0,978.0 660,978.0" fill="none" stroke="#9a3b4a" stroke-width="1.6" stroke-opacity=".55"/>
+<path d="M540,1005.0 C600.0,1005.0 600.0,1032.0 660,1032.0" fill="none" stroke="#9a3b4a" stroke-width="1.6" stroke-opacity=".55"/>
+<path d="M540,1005.0 C600.0,1005.0 600.0,1086.0 660,1086.0" fill="none" stroke="#9a3b4a" stroke-width="1.6" stroke-opacity=".55"/>
+<path d="M250,595.5 C290.0,595.5 290.0,168.0 330,168.0" fill="none" stroke="#2f6f9f" stroke-width="1.6" stroke-opacity=".55"/>
+<path d="M250,595.5 C290.0,595.5 290.0,411.0 330,411.0" fill="none" stroke="#8a5a2b" stroke-width="1.6" stroke-opacity=".55"/>
+<path d="M250,595.5 C290.0,595.5 290.0,627.0 330,627.0" fill="none" stroke="#6b4b9a" stroke-width="1.6" stroke-opacity=".55"/>
+<path d="M250,595.5 C290.0,595.5 290.0,816.0 330,816.0" fill="none" stroke="#2c7a5e" stroke-width="1.6" stroke-opacity=".55"/>
+<path d="M250,595.5 C290.0,595.5 290.0,1005.0 330,1005.0" fill="none" stroke="#9a3b4a" stroke-width="1.6" stroke-opacity=".55"/>
+<rect x="660" y="40.0" width="330" height="40" rx="9" fill="#ffffff" stroke="#2f6f9f" stroke-width="1.4"/>
+<rect x="660" y="40.0" width="5" height="40" rx="2.5" fill="#2f6f9f"/>
+<text x="676" y="53.0" font-size="13.5" font-weight="600" fill="#1f2328">桌面 ActivityWatch</text>
+<text x="676" y="71.0" font-size="11" fill="#6a737d">13 天 timeline</text>
+<rect x="660" y="94.0" width="330" height="40" rx="9" fill="#ffffff" stroke="#2f6f9f" stroke-width="1.4"/>
+<rect x="660" y="94.0" width="5" height="40" rx="2.5" fill="#2f6f9f"/>
+<text x="676" y="107.0" font-size="13.5" font-weight="600" fill="#1f2328">手机（Tasker → 中继）</text>
+<text x="676" y="125.0" font-size="11" fill="#6a737d">解锁 / 应用切换</text>
+<rect x="660" y="148.0" width="330" height="40" rx="9" fill="#ffffff" stroke="#2f6f9f" stroke-width="1.4"/>
+<rect x="660" y="148.0" width="5" height="40" rx="2.5" fill="#2f6f9f"/>
+<text x="676" y="161.0" font-size="13.5" font-weight="600" fill="#1f2328">位置（Dawarich）</text>
+<text x="676" y="179.0" font-size="11" fill="#6a737d">停留推导 + 离线反查地名</text>
+<rect x="660" y="202.0" width="330" height="40" rx="9" fill="#ffffff" stroke="#2f6f9f" stroke-width="1.4"/>
+<rect x="660" y="202.0" width="5" height="40" rx="2.5" fill="#2f6f9f"/>
+<text x="676" y="215.0" font-size="13.5" font-weight="600" fill="#1f2328">手表（Gadgetbridge）</text>
+<text x="676" y="233.0" font-size="11" fill="#6a737d">步数 / 心率 / 睡眠</text>
+<rect x="660" y="256.0" width="330" height="40" rx="9" fill="#ffffff" stroke="#2f6f9f" stroke-width="1.4"/>
+<rect x="660" y="256.0" width="5" height="40" rx="2.5" fill="#2f6f9f"/>
+<text x="676" y="269.0" font-size="13.5" font-weight="600" fill="#1f2328">网页（aw-watcher-web）</text>
+<text x="676" y="287.0" font-size="11" fill="#6a737d">站点 / 页面标题</text>
+<rect x="330" y="148.0" width="210" height="40" rx="9" fill="#ffffff" stroke="#2f6f9f" stroke-width="1.4"/>
+<rect x="330" y="148.0" width="5" height="40" rx="2.5" fill="#2f6f9f"/>
+<text x="346" y="161.0" font-size="13.5" font-weight="600" fill="#1f2328">① 采集层</text>
+<text x="346" y="179.0" font-size="11" fill="#6a737d">原始信号，不做解释</text>
+<rect x="660" y="310.0" width="330" height="40" rx="9" fill="#ffffff" stroke="#8a5a2b" stroke-width="1.4"/>
+<rect x="660" y="310.0" width="5" height="40" rx="2.5" fill="#8a5a2b"/>
+<text x="676" y="323.0" font-size="13.5" font-weight="600" fill="#1f2328">小时问答</text>
+<text x="676" y="341.0" font-size="11" fill="#6a737d">83 条事件</text>
+<rect x="660" y="364.0" width="330" height="40" rx="9" fill="#ffffff" stroke="#8a5a2b" stroke-width="1.4"/>
+<rect x="660" y="364.0" width="5" height="40" rx="2.5" fill="#8a5a2b"/>
+<text x="676" y="377.0" font-size="13.5" font-weight="600" fill="#1f2328">问责备注</text>
+<text x="676" y="395.0" font-size="11" fill="#6a737d">60 条事件</text>
+<rect x="660" y="418.0" width="330" height="40" rx="9" fill="#ffffff" stroke="#8a5a2b" stroke-width="1.4"/>
+<rect x="660" y="418.0" width="5" height="40" rx="2.5" fill="#8a5a2b"/>
+<text x="676" y="431.0" font-size="13.5" font-weight="600" fill="#1f2328">记：随手笔记</text>
+<text x="676" y="449.0" font-size="11" fill="#6a737d">接口就绪 · 目前 0 条</text>
+<rect x="660" y="472.0" width="330" height="40" rx="9" fill="#ffffff" stroke="#8a5a2b" stroke-width="1.4"/>
+<rect x="660" y="472.0" width="5" height="40" rx="2.5" fill="#8a5a2b"/>
+<text x="676" y="485.0" font-size="13.5" font-weight="600" fill="#1f2328">每条都带 quote 逐字回查</text>
+<text x="676" y="503.0" font-size="11" fill="#6a737d">对不上就丢弃，防改写事实</text>
+<rect x="330" y="391.0" width="210" height="40" rx="9" fill="#ffffff" stroke="#8a5a2b" stroke-width="1.4"/>
+<rect x="330" y="391.0" width="5" height="40" rx="2.5" fill="#8a5a2b"/>
+<text x="346" y="404.0" font-size="13.5" font-weight="600" fill="#1f2328">② 结构化层</text>
+<text x="346" y="422.0" font-size="11" fill="#6a737d">LLM 把文字变成事件</text>
+<rect x="660" y="526.0" width="330" height="40" rx="9" fill="#ffffff" stroke="#6b4b9a" stroke-width="1.4"/>
+<rect x="660" y="526.0" width="5" height="40" rx="2.5" fill="#6b4b9a"/>
+<text x="676" y="539.0" font-size="13.5" font-weight="600" fill="#1f2328">自评 1–5（3 条）</text>
+<text x="676" y="557.0" font-size="11" fill="#6a737d">本人亲口 · 观测值</text>
+<rect x="660" y="580.0" width="330" height="40" rx="9" fill="#ffffff" stroke="#6b4b9a" stroke-width="1.4"/>
+<rect x="660" y="580.0" width="5" height="40" rx="2.5" fill="#6b4b9a"/>
+<text x="676" y="593.0" font-size="13.5" font-weight="600" fill="#1f2328">AI 补分（21 条）</text>
+<text x="676" y="611.0" font-size="11" fill="#6a737d">20 条带逐字证据</text>
+<rect x="660" y="634.0" width="330" height="40" rx="9" fill="#ffffff" stroke="#6b4b9a" stroke-width="1.4"/>
+<rect x="660" y="634.0" width="5" height="40" rx="2.5" fill="#6b4b9a"/>
+<text x="676" y="647.0" font-size="13.5" font-weight="600" fill="#1f2328">七个维度</text>
+<text x="676" y="665.0" font-size="11" fill="#6a737d">体力 心情 睡眠 · 人际 吃饭 休息 学习</text>
+<rect x="660" y="688.0" width="330" height="40" rx="9" fill="#ffffff" stroke="#6b4b9a" stroke-width="1.4"/>
+<rect x="660" y="688.0" width="5" height="40" rx="2.5" fill="#6b4b9a"/>
+<text x="676" y="701.0" font-size="13.5" font-weight="600" fill="#1f2328">证词边 7 条</text>
+<text x="676" y="719.0" font-size="11" fill="#6a737d">他说过的关联 · 不是因果</text>
+<rect x="330" y="607.0" width="210" height="40" rx="9" fill="#ffffff" stroke="#6b4b9a" stroke-width="1.4"/>
+<rect x="330" y="607.0" width="5" height="40" rx="2.5" fill="#6b4b9a"/>
+<text x="346" y="620.0" font-size="13.5" font-weight="600" fill="#1f2328">③ 标注层</text>
+<text x="346" y="638.0" font-size="11" fill="#6a737d">分数 + 证据 + 关联</text>
+<rect x="660" y="742.0" width="330" height="40" rx="9" fill="#ffffff" stroke="#2c7a5e" stroke-width="1.4"/>
+<rect x="660" y="742.0" width="5" height="40" rx="2.5" fill="#2c7a5e"/>
+<text x="676" y="755.0" font-size="13.5" font-weight="600" fill="#1f2328">课表偏离</text>
+<text x="676" y="773.0" font-size="11" fill="#6a737d">16 时段：6 符合 · 1 偏离 · 9 未观测</text>
+<rect x="660" y="796.0" width="330" height="40" rx="9" fill="#ffffff" stroke="#2c7a5e" stroke-width="1.4"/>
+<rect x="660" y="796.0" width="5" height="40" rx="2.5" fill="#2c7a5e"/>
+<text x="676" y="809.0" font-size="13.5" font-weight="600" fill="#1f2328">第二观测源</text>
+<text x="676" y="827.0" font-size="11" fill="#6a737d">屏幕 9 · 自述 7</text>
+<rect x="660" y="850.0" width="330" height="40" rx="9" fill="#ffffff" stroke="#2c7a5e" stroke-width="1.4"/>
+<rect x="660" y="850.0" width="5" height="40" rx="2.5" fill="#2c7a5e"/>
+<text x="676" y="863.0" font-size="13.5" font-weight="600" fill="#1f2328">数据集 13 行</text>
+<text x="676" y="881.0" font-size="11" fill="#6a737d">今天 + 昨天（prev_gap_days）</text>
+<rect x="330" y="796.0" width="210" height="40" rx="9" fill="#ffffff" stroke="#2c7a5e" stroke-width="1.4"/>
+<rect x="330" y="796.0" width="5" height="40" rx="2.5" fill="#2c7a5e"/>
+<text x="346" y="809.0" font-size="13.5" font-weight="600" fill="#1f2328">④ 合成层</text>
+<text x="346" y="827.0" font-size="11" fill="#6a737d">带参照系的数据</text>
+<rect x="660" y="904.0" width="330" height="40" rx="9" fill="#ffffff" stroke="#9a3b4a" stroke-width="1.4"/>
+<rect x="660" y="904.0" width="5" height="40" rx="2.5" fill="#9a3b4a"/>
+<text x="676" y="917.0" font-size="13.5" font-weight="600" fill="#1f2328">四批题目 · 卡片</text>
+<text x="676" y="935.0" font-size="11" fill="#6a737d">问责 / 实时 / 收尾 / 打卡</text>
+<rect x="660" y="958.0" width="330" height="40" rx="9" fill="#ffffff" stroke="#9a3b4a" stroke-width="1.4"/>
+<rect x="660" y="958.0" width="5" height="40" rx="2.5" fill="#9a3b4a"/>
+<text x="676" y="971.0" font-size="13.5" font-weight="600" fill="#1f2328">打完分追一句「为什么」</text>
+<text x="676" y="989.0" font-size="11" fill="#6a737d">证据的唯一来源</text>
+<rect x="660" y="1012.0" width="330" height="40" rx="9" fill="#ffffff" stroke="#9a3b4a" stroke-width="1.4"/>
+<rect x="660" y="1012.0" width="5" height="40" rx="2.5" fill="#9a3b4a"/>
+<text x="676" y="1025.0" font-size="13.5" font-weight="600" fill="#1f2328">偏离追问（红色卡片）</text>
+<text x="676" y="1043.0" font-size="11" fill="#6a737d">七类理由 → reason_class</text>
+<rect x="660" y="1066.0" width="330" height="40" rx="9" fill="#ffffff" stroke="#9a3b4a" stroke-width="1.4"/>
+<rect x="660" y="1066.0" width="5" height="40" rx="2.5" fill="#9a3b4a"/>
+<text x="676" y="1079.0" font-size="13.5" font-weight="600" fill="#1f2328">今日复盘</text>
+<text x="676" y="1097.0" font-size="11" fill="#6a737d">数据 + 你的回答 + 建议</text>
+<rect x="330" y="985.0" width="210" height="40" rx="9" fill="#ffffff" stroke="#9a3b4a" stroke-width="1.4"/>
+<rect x="330" y="985.0" width="5" height="40" rx="2.5" fill="#9a3b4a"/>
+<text x="346" y="998.0" font-size="13.5" font-weight="600" fill="#1f2328">⑤ 交互层（飞书）</text>
+<text x="346" y="1016.0" font-size="11" fill="#6a737d">问 → 答 → 标注</text>
+<rect x="40" y="566.5" width="210" height="58" rx="9" fill="#ffffff" stroke="#1f2328" stroke-width="1.4"/>
+<rect x="40" y="566.5" width="5" height="58" rx="2.5" fill="#1f2328"/>
+<text x="56" y="588.5" font-size="13.5" font-weight="600" fill="#1f2328">LLS · LifeLogging System</text>
+<text x="56" y="606.5" font-size="11" fill="#6a737d">一个人的可回归生活数据集</text>
+</svg></div>
+<div class="legend"><div class="lg"><span class="dot" style="background:#2f6f9f"></span><b>采集层</b><i>原始信号，不做解释</i></div><div class="lg"><span class="dot" style="background:#8a5a2b"></span><b>结构化层</b><i>LLM 把文字变成事件</i></div><div class="lg"><span class="dot" style="background:#6b4b9a"></span><b>标注层</b><i>分数 + 逐字证据 + 证词边</i></div><div class="lg"><span class="dot" style="background:#2c7a5e"></span><b>合成层</b><i>课表偏离 · 一天一行</i></div><div class="lg"><span class="dot" style="background:#9a3b4a"></span><b>交互层</b><i>飞书卡片：问 → 答 → 标注</i></div></div>
+<div class="sem"><div class="sm"><span class="dot" style="background:#1f6f43"></span><b>观测值</b><i>本人自评 1–5 · 屏幕记录 · 他自己说的活动。可以直接当事实用。</i></div><div class="sm"><span class="dot" style="background:#8a5a2b"></span><b>估计值</b><i>AI 从自由文本推的分。带 confidence，信息不足时是 null 而不是 3。</i></div><div class="sm"><span class="dot" style="background:#8a3b6b"></span><b>证词</b><i>links / reason_class。他说的原因，不是验证过的因果。</i></div></div>
+<div class="foot">
+  数字由 <code>docs/make_mindmap.py</code> 从 <code>state/</code> 现扫生成 ·
+  改完数据重跑一次即可，不要手改这张图。
+</div>
+</html>
