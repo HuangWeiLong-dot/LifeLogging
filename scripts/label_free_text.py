@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""把**自由文本回答**用 LLM 打分 → `state/labels-llm.jsonl`（1–5 / 天 / 维）。
+"""把每天的回答变成**带证据的标签** → `state/labels-llm.jsonl`。
 
 **为什么要有它**
 
@@ -7,33 +7,58 @@
     （人际/吃饭/休息/学习）永远是一段话。话能进日记，进不了回归 ——
     而「这周社交少的那几天，第二天心情是不是更低」这种问题，需要的就是数字。
 
+**但光有数字没用 —— 每个分数都要能追到证据**
+
+    只存「体力 = 4」等于什么都没说。有用的是「体力 = 4，因为
+    『地铁上直接睡着』，那天 07:02–08:02 的实时题里写着『坐地铁』」。
+    所以每一行除了分数，还带四样东西：
+
+        evidence  原文里**逐字存在**的一句话（≤30 字），是打分的依据
+        cause     是什么导致的（≤25 字），必须能被 evidence 支撑
+        links     这一维和**其他维度 / 当天某件事**的关系（0–3 条）
+        confidence high / low —— 含糊的话标 low，别让它冒充观测值
+
+    `evidence` 和每条 link 的 `quote` 会**逐字回查**：在（回答 + 备注 +
+    当天实时问答）里找不到的，直接丢掉。模型编出来的证据进不了文件 ——
+    这是这套东西唯一能防住「编一段合理的解释」的手段。
+
+**三种关系，别混为一谈（这是本文件最该被读懂的一段）**
+
+    1. 证据（evidence）       —— 可以**标注**。今天就能做。
+    2. 关联（links）          —— 可以**记录成假设**。今天就能做，但要标成假设。
+    3. 因果（causality）      —— **不可能**从这些数据里得出。
+
+    所以 links 里存的是「他说『因为昨晚没睡好』，所以这一天的体力和睡眠
+    有关系」—— **是他的说法，不是结论**。模型可以拿这些边当特征，但
+    「吃饭不规律会不会让心情变差」最终要靠跨很多天的统计去检验，不能因为
+    某一天他这么说过就写死成规则。
+
+    换句话说：这里记的是**图的边**，不是**图的权重**。权重得数据自己长出来。
+
 **它和 `labels.jsonl` 的区别（这条必须记住）**
 
     labels.jsonl      本人**亲口**打的 1–5。是观测值。
-    labels-llm.jsonl  模型**从文本推**的 1–5。是估计值。
+    labels-llm.jsonl  模型产出：本人没打分的维度由它打分；所有维度由它补证据。
 
-    两者**永远不合并**。`features.py` 把它们写成 `labels` / `labels_llm`
-    两个字段，模型推出来的只补自评没有的维度，绝不覆盖本人打的分数。
-    混成一列之后，没有任何办法再分清哪个数是人说的。
-
-    这也是为什么 `collect_labels.py` 那条「不猜」的规则仍然有效：
-    没人让你猜的那条路上，一个字都不猜。
+    分数上，本人打的永远优先（`features.py` 只拿 AI 分去补**缺失**的维度）。
+    证据上，没有「本人版」这回事 —— evidence/cause/links 全部是模型的解读，
+    所以每一行都带 `score_from`（self / llm）标清楚分数的来路。
 
 **信息不足就给 null**
 
     提示词里明确要求「不确定就 null，不要默认 3」。3 是一个判断，不是默认值。
-    一个「被默认成 3」的样本，比一个 null 更伤模型 —— 它看起来是观测值。
+    一个「被默认成 3」的样本比 null 更伤模型 —— 它看起来是观测值。
 
 **幂等 + 花钱**
 
-    同一个 qid 只打一次分，结果从 labels-llm.jsonl 里直接复用。所以反复跑
-    不会重复计费。一天一次调用（7 个维度打包在一个 prompt 里），
-    走的还是那份成本台账和每日额度。
+    同一个 qid 只处理一次，结果直接复用，反复跑不会重复计费。
+    一天一次调用（7 个维度 + 当天实时问答打包在一个 prompt 里），
+    走的还是那份成本台账。
 
 用法：
-  python scripts/label_free_text.py                # 只补没打过的
+  python scripts/label_free_text.py                # 只补没处理过的
   python scripts/label_free_text.py --dry-run      # 不调模型、不写盘
-  python scripts/label_free_text.py --rebuild      # 忽略已有结果，全部重打
+  python scripts/label_free_text.py --rebuild      # 忽略已有结果，全部重做
   python scripts/label_free_text.py --max-days 7   # 只处理最近 7 天
 """
 
@@ -57,6 +82,10 @@ from common import (  # noqa: E402
 CFG = load_config()
 STATE = Path(CFG["state_dir"])
 OUT = STATE / "labels-llm.jsonl"
+
+# 提示词一改就 +1。已经处理过的行如果版本号对不上，会重做 ——
+# 否则新旧两种输出会静默混在同一个文件里，而字段缺失是看不出来的。
+PROMPT_VERSION = 2
 
 # 维度和它的量表。⚠️ 维度名要和 `live_questions.ROUTINE_DIMENSIONS` 逐字对得上
 # —— 不然打分打的是另一回事。
@@ -103,88 +132,136 @@ SCALES: dict[str, str] = {
              "；5 有明显收获，能说出学到了什么"),
 }
 
-SYSTEM_PROMPT = """你在把一段自由文本的生活回答，按给定量表打成 1–5 分。
+SYSTEM_PROMPT = """你在把一天的日记式回答，变成**带证据的 1–5 分标签**。
 
 量表（每一维都是 1 = 最差，5 = 最好）：
 __SCALES__
 
 规则（必须遵守）：
 
-1. 只根据给出的那段回答打分。不要引入任何外部信息，不要推测他没说的事。
-2. 每一档都有**它自己的**描述。按最贴近的那一档打分，**不要做插值、不要取平均**。
-   如果回答同时符合两档，选更贴近原话的那档，并在 why 里写出是哪句话决定的。
-3. **信息不足就给 null，不要默认成 3。** 3 是一个判断，不是默认值。
-   一句「还行」打不出 3 分，它是 null。
-4. 回答具体、明确 → confidence 写 "high"；含糊、一句带过 → 照给分数但是
-   confidence 写 "low"；完全没提到这一维 → score null + confidence "low"。
-5. why 不超过 15 个字，指出你是**根据哪个词/哪件事**打的，不要复述回答。
-6. 输出格式：**每行一个 JSON 对象**，一个维度一行，形如
-   {"dim": "体力", "score": 3, "confidence": "high", "why": "…"}
-   每个维度都要有一行，包括 score 为 null 的。
-7. 不要输出任何 JSON 之外的东西，不要代码块围栏。
+1. 只根据给出的材料打分：本人的回答、备注、以及【当天的实时问答】。
+   不要引入任何外部信息，不要推测他没说的事。
+2. 每一档都有**它自己的**描述。按最贴近的那一档打分，**不要插值、不要取平均**。
+3. 如果某一维写着「本人已打分：N」，**score 必须原样返回 N**，不要改。
+   这时 score_from 写 "self"；没有本人分数的写 "llm"。
+4. **信息不足就给 null，不要默认成 3。** 3 是一个判断，不是默认值。
 
-⚠️ 为什么是「一行一个」而不是一个大 JSON 对象：模型的输出可能被 max_tokens
-   截断。大对象一旦在中间断掉，`json.loads` 整段失败，**一整天的分全丢**
-   （实测 2026-10-20 就丢过一次）。一行一个的话，截断最多损失最后一行。"""
+关于证据（这一节比打分重要）：
+
+5. `evidence` 必须从材料里**逐字复制**一段话（≤30 字），不能改写、不能概括。
+   材料里找不到依据就写 ""（空字符串），**不要编一句听起来合理的**。
+6. `cause` 是「是什么导致的」（≤25 字，人或事，不要复述分数）。
+   它必须能被 `evidence` 支撑；支撑不住就写 ""。
+7. `links` 是**这一维和其他维度 / 当天某件事**的关系，0–3 条。
+   - `to` 只能是这七个之一：体力、心情、睡眠、人际、吃饭、休息、学习；
+     或者 "事件"（指【当天的实时问答】里的某一段）。
+   - `relation` 目前只有 "explained_by"：这件事解释了这一维的分数。
+   - `quote` 同样必须逐字存在。
+   - **只在他说了才写。** 他没提到的关联不要凭常识补 —— 这里的每一条边
+     都会进关联图，凭空造的边比没有边糟得多。
+
+输出格式：**每行一个 JSON 对象**，一个维度一行：
+{"dim": "体力", "score": 4, "score_from": "self", "confidence": "high",
+ "why": "…", "evidence": "…", "cause": "…",
+ "links": [{"to": "睡眠", "relation": "explained_by", "quote": "…"}]}
+每个维度都要有一行，包括 score 为 null 的。不要输出任何 JSON 之外的东西。
+
+⚠️ 为什么是「一行一个」而不是一个大 JSON 对象：输出可能被 max_tokens 截断。
+   大对象一旦在中间断掉，`json.loads` 整段失败，**一整天的结果全丢**
+   （实测 2026-10-20 丢过一次）。一行一个的话，截断最多损失最后一行。"""
 
 
 def score_of(answer: str) -> int | None:
-    """答案开头的 1–5。没有就返回 None —— 说明这是自由文本，需要模型。
+    """答案开头的 1–5。没有就返回 None —— 说明这是自由文本。
 
     ⚠️ 复用 `collect_labels.score_of`，不在这里另写一个正则。两条
-       「什么算已经打过分了」的规则一旦分叉，就会出现「collect_labels 认得、
-       这里也认得」，或者反过来 —— 后者会让同一段话被模型再打一次分。
+       「什么算已经打过分了」的规则一旦分叉，同一段话就会被重复打分。
     """
     from collect_labels import score_of as _score_of
 
     return _score_of(answer)
 
 
-def qa_files() -> list[Path]:
-    return sorted(STATE.glob("qa-*.json"))
+def _norm(s: str) -> str:
+    """压平空白，用于逐字回查。"""
+    return " ".join(str(s or "").split())
+
+
+def _qa_payload(path: Path) -> dict | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _all_qa() -> list[tuple[str, dict]]:
+    """[(文件名日期, qa 条目)]，按 ts 排序。"""
+    out: list[tuple[str, dict]] = []
+    for p in sorted(STATE.glob("qa-*.json")):
+        data = _qa_payload(p)
+        if not data:
+            continue
+        for x in (data.get("qa") or []):
+            if isinstance(x, dict):
+                out.append((p.stem.replace("qa-", ""), x))
+    out.sort(key=lambda t: str(t[1].get("ts_utc") or ""))
+    return out
+
+
+def day_context(day: str) -> list[str]:
+    """当天【实时问答】里的那几段 —— 给模型当「那天还发生了什么」的底料。
+
+    ⚠️ 只取**有内容的**回答。`4 不错`、`一致` 这种没有信息量，塞进去只会
+       让模型拿它硬凑证据。
+    """
+    lines: list[str] = []
+    for _, x in _all_qa():
+        if str(x.get("question_day") or "") != day:
+            continue
+        if str(x.get("source") or "") != "live":
+            continue
+        ans = _norm(x.get("answer"))
+        if len(ans) < 6 or score_of(ans) is not None:
+            continue
+        q = _norm(x.get("text")).splitlines()
+        head = q[0][:24] if q else ""
+        lines.append(f"{head} → {ans[:110]}")
+    return lines[:12]
 
 
 def pending_items() -> dict[str, dict[str, dict]]:
-    """`{day: {dim: qa_item}}` —— 只有**自由文本**的那些才进来。
+    """`{day: {dim: item}}` —— 每一个**答过的**维度都进来。
 
-    ⚠️ 已经是 1–5 的答案在这里被跳过：那已经是一个数字，再让模型打一遍分
-       只会引入一层噪音。自评永远优先。
+    ⚠️ 不再只挑「没打分的」。本人打了 4 分但只回了一个数字，**照样需要
+       证据**：那一天到底因为什么给了 4 分，只能从当天的实时问答里找。
     """
-    # qid → 最近一次（一天可能答两次）
     by_qid: dict[str, dict] = {}
-    for p in qa_files():
-        try:
-            payload = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+    for _, x in _all_qa():
+        dim = str(x.get("dim") or "").strip()
+        if dim not in SCALES:
             continue
-        for x in (payload.get("qa") or []):
-            if not isinstance(x, dict):
-                continue
-            dim = str(x.get("dim") or "").strip()
-            if dim not in SCALES:
-                continue
-            qid = str(x.get("id") or "")
-            if not qid:
-                continue
-            old = by_qid.get(qid)
-            if old is None or str(x.get("ts_utc") or "") >= str(old.get("ts_utc") or ""):
-                by_qid[qid] = x
+        qid = str(x.get("id") or "")
+        if not qid:
+            continue
+        old = by_qid.get(qid)
+        if old is None or str(x.get("ts_utc") or "") >= str(old.get("ts_utc") or ""):
+            by_qid[qid] = x
 
     out: dict[str, dict[str, dict]] = {}
     for x in by_qid.values():
         dim = str(x.get("dim") or "").strip()
-        if score_of(x.get("answer") or "") is not None:
-            continue                      # 已经是数字，不需要模型
         answer = str(x.get("answer") or "").strip()
-        if len(answer) < 2:
-            continue                      # 空/占位，问了也只会返回 null
+        note = str(x.get("note") or "").strip()
+        if len(_norm(answer)) < 1 and not note:
+            continue
         day = str(x.get("question_day") or str(x.get("id"))[:10])
         out.setdefault(day, {})[dim] = x
     return out
 
 
 def load_done() -> dict[str, dict]:
-    """已经打过分的 qid → 那一行。用于跳过重复计费。"""
+    """已经处理过的 qid → 那一行。版本号对不上的当作没做过。"""
     done: dict[str, dict] = {}
     try:
         lines = OUT.read_text(encoding="utf-8").splitlines()
@@ -195,8 +272,11 @@ def load_done() -> dict[str, dict]:
             row = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(row, dict) and row.get("qid"):
-            done[str(row["qid"])] = row
+        if not isinstance(row, dict) or not row.get("qid"):
+            continue
+        if row.get("prompt_version") != PROMPT_VERSION:
+            continue
+        done[str(row["qid"])] = row
     return done
 
 
@@ -210,12 +290,7 @@ def write(rows: list[dict]) -> None:
 
 
 def parse_rows(raw: str) -> dict[str, dict]:
-    """逐行解析 `{"dim":…, "score":…}`。坏行跳过，不因为一行坏掉整段丢失。
-
-    ⚠️ 这里**故意宽松**：模型偶尔会包 ```json 围栏、偶尔在中间断掉、
-       偶尔在 JSON 后面多写一句话。逐行扫 + 跳过坏行，比 `json.loads` 整段
-       解析稳得多 —— 后者的失败模式是「这一天一分都没有」。
-    """
+    """逐行解析。坏行跳过，不因为一行坏掉整段丢失。"""
     out: dict[str, dict] = {}
     for line in str(raw or "").splitlines():
         s = line.strip().rstrip(",")
@@ -233,19 +308,41 @@ def parse_rows(raw: str) -> dict[str, dict]:
     return out
 
 
-def build_prompt(day: str, items: dict[str, dict]) -> str:
+def build_prompt(day: str, items: dict[str, dict], context: list[str]) -> str:
     parts = [f"# 日期：{day}", ""]
+    if context:
+        parts += ["## 当天的实时问答（每小时问的那几段）", ""]
+        parts += [f"- {c}" for c in context]
+        parts += ["", "⚠️ 上面的回答是**当时**写的，比晚上回顾更具体。"]
+        parts += [""]
+
+    parts += ["## 七个维度", ""]
     for dim, x in items.items():
-        parts += [f"## {dim}", f"问：{x.get('text') or '(题干缺失)'}",
-                  f"答：{x.get('answer') or ''}", ""]
+        parts.append(f"### {dim}")
+        self_score = score_of(x.get("answer") or "")
+        if self_score is not None:
+            parts.append(f"本人已打分：{self_score}")
+        q = _norm(x.get("text"))
+        parts.append(f"问：{q[:160]}")
+        parts.append(f"答：{_norm(x.get('answer'))[:400]}")
+        note = _norm(x.get("note"))
+        if note:
+            parts.append(f"备注：{note[:200]}")
+        parts.append("")
     return "\n".join(parts)
 
 
+def _valid_quote(quote: str, haystack: str) -> bool:
+    """这句话真的是材料里的一句吗？"""
+    q = _norm(quote)
+    return len(q) >= 4 and q in haystack
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description="自由文本 → 1–5 分数（LLM）")
+    ap = argparse.ArgumentParser(description="自由文本 → 带证据的 1–5 标签（LLM）")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--rebuild", action="store_true",
-                    help="忽略已有结果，全部重打（会重新计费）")
+                    help="忽略已有结果，全部重做（会重新计费）")
     ap.add_argument("--max-days", type=int, default=0,
                     help="只处理最近 N 天（0 = 全部）")
     args = ap.parse_args()
@@ -255,7 +352,7 @@ def main() -> int:
         keep = sorted(pending)[-args.max_days:]
         pending = {d: pending[d] for d in keep}
     if not pending:
-        print("  没有需要打分的自由文本。")
+        print("  没有需要处理的自评回答。")
         return 0
 
     done = {} if args.rebuild else load_done()
@@ -266,14 +363,16 @@ def main() -> int:
         if fresh:
             todo[day] = fresh
 
-    print(f"  自由文本：{len(pending)} 天；其中 {len(todo)} 天需要打分"
+    print(f"  有回答的天：{len(pending)}；其中 {len(todo)} 天需要处理"
           f"（已有 {len(done)} 条结果复用）")
     if not todo:
         return 0
 
     if args.dry_run:
         for day, items in todo.items():
-            print(f"  [dry-run] {day}: {', '.join(items)}")
+            ctx = day_context(day)
+            print(f"  [dry-run] {day}: {', '.join(items)}"
+                  f"（当天实时问答 {len(ctx)} 段可作证据）")
         return 0
 
     ledger = CostLedger(CFG["budget"]["ledger_path"])
@@ -293,8 +392,10 @@ def main() -> int:
     failed = 0
     for day in sorted(todo):
         items = todo[day]
+        context = day_context(day)
         try:
-            raw = llm.complete(system=system, user=build_prompt(day, items),
+            raw = llm.complete(system=system,
+                               user=build_prompt(day, items, context),
                                stage="labels", run_id=new_run_id())
         except (BudgetExceeded, TruncatedOutput) as e:
             print(f"  ❌ {day}: {e}")
@@ -307,34 +408,77 @@ def main() -> int:
 
         got_rows = parse_rows(raw)
         if not got_rows:
-            print(f"  ⚠️  {day}: 模型没给可解析的行，跳过（前 120 字：{raw[:120]!r}）")
+            print(f"  ⚠️  {day}: 模型没给可解析的行，跳过"
+                  f"（前 120 字：{raw[:120]!r}）")
             failed += 1
             continue
 
-        n = 0
+        # 证据只能来自这些材料 —— 逐字回查用的。
+        haystack = _norm("\n".join(context))
+        n_score = n_ev = n_link = 0
         for dim, x in items.items():
             got = got_rows.get(dim)
             if not isinstance(got, dict):
                 continue
+            answer = _norm(x.get("answer"))
+            note = _norm(x.get("note"))
+            local = _norm(f"{answer}\n{note}\n{haystack}")
+
+            self_score = score_of(x.get("answer") or "")
             score = got.get("score")
-            if not isinstance(score, int) or not (1 <= score <= 5):
-                continue                  # null / 越界 —— 不猜，不写
+            if self_score is not None:
+                # 本人打了分，模型不许改 —— 观测值永远压过估计值。
+                score, score_from = self_score, "self"
+            elif isinstance(score, int) and 1 <= score <= 5:
+                score_from = "llm"
+            else:
+                score, score_from = None, "llm"
+
+            evidence = _norm(got.get("evidence"))
+            if evidence and not _valid_quote(evidence, local):
+                evidence = ""              # 编的，丢掉
+            cause = _norm(got.get("cause"))[:25]
+            if not evidence:
+                cause = ""                 # 没有证据就不给原因
+
+            links: list[dict] = []
+            for lk in (got.get("links") or [])[:3]:
+                if not isinstance(lk, dict):
+                    continue
+                to = str(lk.get("to") or "").strip()
+                quote = _norm(lk.get("quote"))
+                if to not in SCALES and to != "事件":
+                    continue
+                if to == dim:
+                    continue
+                if not _valid_quote(quote, local):
+                    continue               # 编的边，丢掉
+                links.append({"to": to, "relation": "explained_by",
+                              "quote": quote[:60]})
+
+            if score is None and not evidence:
+                continue                   # 什么都没有，不必占一行
             rows.append({
                 "day": day,
                 "dim": dim,
                 "score": score,
+                "score_from": score_from,
+                "confidence": str(got.get("confidence") or ""),
+                "why": _norm(got.get("why"))[:40],
+                "evidence": evidence[:60],
+                "cause": cause,
+                "links": links,
                 "qid": str(x.get("id") or ""),
                 "ts_utc": str(x.get("ts_utc") or ""),
-                "answer": str(x.get("answer") or ""),
-                "note": str(x.get("note") or ""),
-                "source": "llm",
-                "confidence": str(got.get("confidence") or ""),
-                "why": str(got.get("why") or "")[:40],
+                "prompt_version": PROMPT_VERSION,
             })
-            n += 1
-        print(f"  OK  {day}: {n}/{len(items)} 维有分")
+            n_score += 1 if score is not None else 0
+            n_ev += 1 if evidence else 0
+            n_link += len(links)
 
-    # 按 (day, dim) 去重，取 ts 最大 —— 和 collect_labels 同一套规则。
+        print(f"  OK  {day}: {n_score}/{len(items)} 维有分，"
+              f"{n_ev} 条有证据，{n_link} 条关联")
+
     by_slot: dict[tuple[str, str], dict] = {}
     for r in rows:
         k = (str(r.get("day")), str(r.get("dim")))

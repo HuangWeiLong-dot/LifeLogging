@@ -189,6 +189,9 @@ function Invoke-OneDay($d) {
         $featArgs = @()
         if (-not $Refresh) { $featArgs = @("--coverage") }
         Invoke-Step "features" "scripts\features.py" $featArgs | Out-Null
+        # 标签 + 证据 → state/graph.json（节点=天×维度，边分证词/统计两种）。
+        # 纯本地计算、不花钱；样本不够时它会明说，不会编统计结论。
+        Invoke-Step "graph" "scripts\link_graph.py" @() | Out-Null
         # 今天和你自己的常态差多少（中位数 + MAD，不预测）。
         # ⚠️ 只在正式跑（不是每 2 小时的刷新）做：拿只过了半天的今天
         #    去和完整的历史比，偏离全是假的。
