@@ -138,6 +138,39 @@ def load_deviations() -> dict[str, dict]:
     return out
 
 
+def load_events() -> dict[str, dict]:
+    """当天的事件小结（来自 `state/events.jsonl`）。
+
+    ⚠️ 只汇总**可数的东西**：各类别多少条、问责题的 outcome 和 reason_class
+       分布。原始句子留不进来 —— 它已经在 events.jsonl 里，而且把自由文本
+       塞进特征表会让这一行没法被任何数值模型直接读。
+    """
+    by_day: dict[str, list[dict]] = defaultdict(list)
+    for r in _jsonl(STATE / "events.jsonl"):
+        day = str(r.get("day") or "")
+        if day:
+            by_day[day].append(r)
+
+    out: dict[str, dict] = {}
+    for day, rows in by_day.items():
+        cats = Counter(str(r.get("category") or "") for r in rows
+                       if str(r.get("category") or ""))
+        reasons = Counter(str(r["reason_class"]) for r in rows
+                          if str(r.get("reason_class") or ""))
+        outcomes = Counter(str(r["outcome"]) for r in rows
+                           if str(r.get("outcome") or ""))
+        out[day] = {
+            "count": len(rows),
+            "by_category": dict(cats),
+            "outcomes": dict(outcomes),
+            "by_reason_class": dict(reasons),
+            # 提到的人/计划 —— 数量本身就是信号（"今天提到 3 个人"）。
+            "people_mentioned": sum(1 for r in rows if r.get("people")),
+            "plans_mentioned": sum(1 for r in rows if r.get("plan")),
+        }
+    return out
+
+
 def compact(row: dict) -> dict:
     """`prev` 里放什么：只放「昨天的状态」，不放全量特征（会把文件撑大一倍）。"""
     f = row.get("features") or {}
@@ -157,6 +190,8 @@ def compact(row: dict) -> dict:
         "labels": labels,
         "deviated": dev.get("deviated"),
         "deviated_minutes": dev.get("deviated_minutes"),
+        "events": (row.get("events") or {}).get("count"),
+        "by_reason_class": (row.get("events") or {}).get("by_reason_class"),
     }
 
 
@@ -164,8 +199,9 @@ def build() -> list[dict]:
     feats = load_features()
     mine, ai, ev = load_labels()
     devs = load_deviations()
+    events = load_events()
 
-    days = sorted(set(feats) | set(mine) | set(ai) | set(devs))
+    days = sorted(set(feats) | set(mine) | set(ai) | set(devs) | set(events))
     rows: list[dict] = []
     for day in days:
         rows.append({
@@ -175,6 +211,7 @@ def build() -> list[dict]:
             "labels_llm": ai.get(day) or {},
             "evidence": ev.get(day) or {},
             "deviations": devs.get(day) or {},
+            "events": events.get(day) or {},
         })
 
     # `prev` = **上一个有记录的日子**，并记下隔了几天。
@@ -220,6 +257,7 @@ def main() -> int:
         have_feat = sum(1 for r in rows if r.get("features"))
         have_lab = sum(1 for r in rows if r.get("labels") or r.get("labels_llm"))
         have_dev = sum(1 for r in rows if (r.get("deviations") or {}).get("slots"))
+        have_ev = sum(1 for r in rows if (r.get("events") or {}).get("count"))
         lag1 = sum(1 for r in rows
                    if r.get("prev_gap_days") == 1
                    and (r.get("labels") or r.get("labels_llm")))
@@ -227,6 +265,7 @@ def main() -> int:
         print(f"  有特征   {have_feat}")
         print(f"  有标签   {have_lab}")
         print(f"  有偏离   {have_dev}")
+        print(f"  有事件   {have_ev}")
         print(f"  严格 lag-1 且有标签的行：{lag1}")
         print()
         print("  ⚠️ lag-1 少于 14 条时，任何「昨天 X 导致今天 Y」的结论都是噪音。")

@@ -377,11 +377,9 @@ def main() -> int:
 
     ledger = CostLedger(CFG["budget"]["ledger_path"])
     try:
-        from common import LLM
-
-        llm = LLM(cfg=CFG, ledger=ledger)
+        from common import LLM  # noqa: F401
     except Exception as e:  # noqa: BLE001
-        print(f"  ❌ 初始化 LLM 失败：{type(e).__name__}: {e}")
+        print(f"  ❌ 加载 LLM 失败：{type(e).__name__}: {e}")
         return 1
 
     system = SYSTEM_PROMPT.replace(
@@ -393,6 +391,9 @@ def main() -> int:
     for day in sorted(todo):
         items = todo[day]
         context = day_context(day)
+        # ⚠️ 每天新建一个 LLM 实例：它的调用计数上限默认是 8，
+        #    复用同一个实例处理到第 9 天就会中止。见 activities.py 里同一条注释。
+        llm = LLM(cfg=CFG, ledger=ledger)
         try:
             raw = llm.complete(system=system,
                                user=build_prompt(day, items, context),

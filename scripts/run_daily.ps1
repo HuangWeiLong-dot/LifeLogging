@@ -169,6 +169,9 @@ function Invoke-OneDay($d) {
         # ⚠️ 这一条会花钱（一天一次调用，已有的结果直接复用）。放在 labels
         #    之后：已经是 1–5 的答案这里不再重复打一遍。
         Invoke-Step "labels-llm" "scripts\label_free_text.py" @() | Out-Null
+        # 自由文本 → 结构化事件（小时回答 + 问责备注 + 记笔记 → state/events.jsonl）。
+        # 一天一次调用；日记正文不在这里处理（那是模型写的，再提一遍是循环论证）。
+        Invoke-Step "structure" "scripts\structure_text.py" @() | Out-Null
     }
     # 手表：先把 Gadgetbridge 导出的 SQLite 从中继取回来，再读它。
     # 两步必须按这个顺序 —— ingest_gadgetbridge 读的是本地那份文件。
