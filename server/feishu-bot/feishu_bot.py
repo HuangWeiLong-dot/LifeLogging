@@ -464,6 +464,15 @@ def save_note(open_id: str, text: str) -> None:
     send_text(open_id, "记下了。")
 
 
+def _survives_close(q: dict) -> bool:
+    """收尾/静音之后，哪些实时题还该发？
+
+    只有两种：**收尾批**（本来就是一天的最后一批）和**轻量打卡**
+    （它是收尾没答时的兜底，封盘之后正是它该出场的时候）。
+    """
+    return str(q.get("kind") or "") in ("summary", "checkin")
+
+
 def pending_filtered(state: dict) -> list[dict]:
     """中继说还没答的题，减去**今天手动跳过**的那些。
 
@@ -493,7 +502,7 @@ def pending_filtered(state: dict) -> list[dict]:
     if day_is_closed(day):
         items = [q for q in items
                  if not (str(q.get("source") or "") == "live"
-                         and str(q.get("kind") or "") != "summary")]
+                         and not _survives_close(q))]
     return items
 
 
@@ -656,6 +665,7 @@ _GROUP_LABEL = {
     "summary": "今日收尾",
     "live": "实时提问",
     "morning": "今日一问",
+    "checkin": "轻量打卡",
 }
 # 飞书卡片 header 的可选色，见「卡片 JSON 结构」文档。
 _GROUP_COLOR = {
@@ -663,6 +673,7 @@ _GROUP_COLOR = {
     "summary": "violet",
     "live": "blue",
     "morning": "turquoise",
+    "checkin": "green",
 }
 
 
@@ -677,6 +688,8 @@ def _group_of(q: dict) -> str:
         return "commitment"
     if kind == "summary":
         return "summary"
+    if kind == "checkin":
+        return "checkin"
     if str(q.get("source") or "") == "live":
         return "live"
     return "morning"
@@ -717,7 +730,9 @@ def _option_row(i: int, label: str) -> str:
 def _hint_of(q: dict) -> str:
     fmt = str(q.get("format") or "yes_no")
     if fmt == "choice":
-        return f"回 1–{len(q.get('options') or [])}，后面可以接着写自己的话"
+        # ⚠️ 用 ASCII 连字符，不用 en dash —— 这条提示是给用户照抄的，
+        #    也有人在按它做断言（smoke_test 里就是找 "1-3"）。
+        return f"回 1-{len(q.get('options') or [])}，后面可以接着写自己的话"
     if fmt == "text":
         return "直接回内容就行"
     return "回「做了」或「没做」，后面可以接着写自己的话"
@@ -900,6 +915,52 @@ def send_report(open_id: str, text: str, template: str = "turquoise",
         print(f"WARN 数据卡片没发出去，退回纯文本：{type(e).__name__}: {e}",
               file=sys.stderr)
         send_text(open_id, text)
+
+
+def done_card(day_iso: str, ack: str = "") -> dict:
+    """「今天的问答结束了」那张卡。
+
+    ⚠️ 原来这一句是纯文本（`今天没有待答的问题了。`）。它是**一天里最后一条**
+       消息，也是最该交代清楚的一条：今天答了多少、都答了什么。一句话的
+       「没有待答的问题了」既不像收尾，也不告诉人到底留下了什么。
+
+    ⚠️ 统计读的是中继的 `/qa`。读不到就退化成一句纯文案 —— 这张卡不能因为
+       一个网络请求就没得发。
+    """
+    buckets: dict[str, int] = {}
+    try:
+        qa = live.relay_qa(day_iso, RELAY_BASE, RELAY_API_KEY)
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN 收尾卡读不到问答：{type(e).__name__}: {e}", file=sys.stderr)
+        qa = []
+    for x in qa:
+        g = _group_of(x)
+        buckets[g] = buckets.get(g, 0) + 1
+
+    elements: list[dict] = []
+    if ack:
+        elements += [_note(ack), {"tag": "hr"}]
+
+    if buckets:
+        order = ("summary", "checkin", "commitment", "live", "morning")
+        rows = [f"**{_GROUP_LABEL[g]}**　{buckets[g]} 题"
+                for g in order if buckets.get(g)]
+        elements.append({"tag": "div",
+                         "text": {"tag": "lark_md", "content": "\n".join(rows)}})
+        elements.append({"tag": "hr"})
+        elements.append(_note(f"{day_iso} 一共 {sum(buckets.values())} 条回答，"
+                              "已经进今天的复盘素材。"))
+    else:
+        elements.append({"tag": "div",
+                         "text": {"tag": "lark_md",
+                                  "content": "今天没有待答的问题了。"}})
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "turquoise",
+                   "title": {"tag": "plain_text", "content": "今日问答 · 已完成"}},
+        "elements": elements,
+    }
 
 
 def render_question(q: dict, remaining: int) -> str:
@@ -1186,8 +1247,14 @@ def advance(open_id: str, ack: str = "") -> None:
     if not questions:
         state["awaiting"] = None
         save_state(state)
-        send_text(open_id, (f"{ack}\n\n" if ack else "")
-                  + "今天没有待答的问题了。")
+        day_iso = target_day_iso(datetime.now(TZ))
+        try:
+            send_card(open_id, done_card(day_iso, ack=ack))
+        except Exception as e:  # noqa: BLE001
+            print(f"WARN 收尾卡没发出去，退回纯文本：{type(e).__name__}: {e}",
+                  file=sys.stderr)
+            send_text(open_id, (f"{ack}\n\n" if ack else "")
+                      + "今天没有待答的问题了。")
         return
 
     q = questions[0]
@@ -1243,6 +1310,67 @@ def target_day_iso(now: datetime) -> str:
     if now.hour < DAY_ROLL_HOUR:
         return (now.date() - timedelta(days=1)).isoformat()
     return now.date().isoformat()
+
+
+CHECKIN_COMMANDS = ("/打卡", "/checkin", "/ck")
+# 兜底打卡的时间。到这个点还没收尾，就只问三个数字。
+# 留空 = 不自动兜底，只有 /打卡 能用。
+CHECKIN_AT = os.environ.get("FEISHU_CHECKIN_AT", "23:50")
+
+
+def _at(now: datetime, hhmm: str) -> datetime | None:
+    """把 "HH:MM" 解析成今天的那个时刻。解析不了返回 None。"""
+    try:
+        hh, _, mm = (hhmm or "").partition(":")
+        return now.replace(hour=int(hh), minute=int(mm or 0),
+                           second=0, microsecond=0)
+    except (TypeError, ValueError):
+        return None
+
+
+def _live_questions():
+    """惰性拿 live_questions 模块（见 _live_questions_module 的说明）。"""
+    return _live_questions_module()
+
+
+def handle_checkin(open_id: str) -> None:
+    """「只给我三个数字」—— 轻量打卡。
+
+    ⚠️ 它**不是**收尾的替代品，是兜底：有些天不想答十道，但那天仍然值得
+       留下三个可回归的数字。答完这一批，收尾那批里同样的三个维度就不会
+       再被问第二遍（`collect_labels` 按 (day, dim) 去重，自评优先）。
+    """
+    lq = _live_questions()
+    if lq is None:
+        send_text(open_id, "打卡不可用：live_questions 加载失败。")
+        return
+    day_iso = target_day_iso(datetime.now(TZ))
+    try:
+        qs = lq.force_checkin(day_iso, RELAY_BASE, RELAY_API_KEY)
+    except Exception as e:  # noqa: BLE001
+        print(f"ERROR 打卡题生成失败：{type(e).__name__}: {e}", file=sys.stderr)
+        send_text(open_id, f"打卡题没生成成：{type(e).__name__}: {e}")
+        return
+    if not qs:
+        send_text(open_id, f"{day_iso} 的打卡已经答完了。")
+        return
+
+    q = qs[0]
+    qid = str(q.get("id") or "")
+    send_question(open_id, q,
+                  sum(1 for x in qs if _group_of(x) == _group_of(q)))
+
+    state = load_state()
+    state["awaiting"] = qid
+    sent = state.get("sent")
+    if not isinstance(sent, dict):
+        sent = {}
+    sent[qid] = datetime.now(TZ).isoformat(timespec="seconds")
+    state["sent"] = sent
+    asked = _asked_map(state, datetime.now(TZ).date().isoformat())
+    asked[qid] = {"text": str(q.get("text") or ""),
+                  "kind": str(q.get("kind") or "")}
+    save_state(state)
 
 
 END_DAY_COMMANDS = ("/收尾", "/结束", "/收工", "/end")
@@ -1425,6 +1553,10 @@ def handle_text(open_id: str, text: str) -> None:
         if not maybe_write_summary(open_id, datetime.now(TZ).date().isoformat(),
                                    force=True):
             send_text(open_id, "今天还没有可复盘的记录。")
+        return
+
+    if stripped in CHECKIN_COMMANDS:
+        handle_checkin(open_id)
         return
 
     if stripped == "/pending":
@@ -1690,9 +1822,8 @@ def push_next_live(open_id: str) -> bool:
     # ⚠️ 已经收尾的一天不再推小时题。收尾之后 timer 还在生成，中继上也还躺着
     #    昨天那个小时的题 —— 不拦的话就是「复盘刚写完，又来一条 07:02–08:02」。
     if quiet or day_is_closed(today):
-        # 静音时段 / 已封盘：只放行收尾题（见上面的说明）。
-        live_qs = [q for q in live_qs
-                   if str(q.get("kind") or "") == "summary"]
+        # 静音时段 / 已封盘：只放行收尾题和轻量打卡（见 _survives_close）。
+        live_qs = [q for q in live_qs if _survives_close(q)]
     if not live_qs:
         return False
 
@@ -1893,6 +2024,64 @@ def reflex_loop() -> None:
         time.sleep(REFLEX_EVERY_MIN * 60)
 
 
+_SCORE_RE = re.compile(r"^\s*([1-5])(?=\s|$|[分。，,、:：])")
+
+
+def _has_scored_answer(day_iso: str) -> bool:
+    """这一天已经有 1–5 的自评分了吗？
+
+    ⚠️ 判据必须是**答案本身**，不能是「收尾题发过没有」。收尾发了但没答，
+       正是最需要兜底的那种情况。
+    """
+    try:
+        qa = live.relay_qa(day_iso, RELAY_BASE, RELAY_API_KEY)
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN 打卡兜底读不到问答：{type(e).__name__}: {e}", file=sys.stderr)
+        return False
+    return any(str(x.get("dim") or "")
+               and _SCORE_RE.match(str(x.get("answer") or ""))
+               for x in qa)
+
+
+def maybe_auto_checkin() -> None:
+    """到点还没有数字 → 发三题轻量打卡。
+
+    ⚠️ 这是**唯一**能保证「每天至少三个数」的机制。七个维度那套很好，但它
+       十道题；十道题答不完的那天，在回归里就是空白。10-21、10-22 两天就是
+       这么没有的。
+
+    ⚠️ 凌晨也算：`target_day_iso` 把 05:00 之前算作前一天，所以 23:50 错过
+       （进程重启、机器睡了）的话，00:10 醒来还会补一次。
+    """
+    if not CHECKIN_AT or not OWNER_OPEN_ID:
+        return
+    now = datetime.now(TZ)
+    when = _at(now, CHECKIN_AT)
+    if when is None:
+        return
+    day_iso = target_day_iso(now)
+    # 凌晨：前一天的窗口早过了，直接补；白天/晚上：没到点就等。
+    if now.hour >= DAY_ROLL_HOUR and now < when:
+        return
+
+    state = load_state()
+    if state.get("checkin_day") == day_iso:
+        return
+    if state.get("awaiting"):
+        # 正在答别的题。下一轮再看 —— 别把正在问的那道顶掉。
+        return
+
+    if _has_scored_answer(day_iso):
+        state["checkin_day"] = day_iso
+        save_state(state)
+        return
+
+    state["checkin_day"] = day_iso
+    save_state(state)
+    print(f"[checkin] {day_iso} 到点还没有数字，发轻量打卡")
+    handle_checkin(OWNER_OPEN_ID)
+
+
 def push_loop() -> None:
     """每天 PUSH_AT 主动推一次。这就是选飞书而不是 QQ 的全部理由。"""
     if not PUSH_AT:
@@ -1935,6 +2124,10 @@ def push_loop() -> None:
                 fresh = load_state()
                 fresh["last_push_day"] = day
                 save_state(fresh)
+
+            # 兜底打卡：每晚到点还没有数字就补三个。和上面那次早间推送
+            # 共用一个 60 秒的节拍，不另起线程。
+            maybe_auto_checkin()
         except Exception as e:  # noqa: BLE001
             print(f"WARN: 推送循环出错：{type(e).__name__}: {e}", file=sys.stderr)
         time.sleep(60)

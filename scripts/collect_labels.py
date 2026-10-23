@@ -92,8 +92,18 @@ def extract(payload: dict) -> list[dict]:
 
 
 def collect() -> list[dict]:
-    """扫全部 qa 文件，按 qid 去重（重答取 ts 最大）。"""
-    latest: dict[str, dict] = {}
+    """扫全部 qa 文件，先按 qid 去重，再按 (day, dim) 去重。
+
+    ⚠️ 第二层去重**不是洁癖**。同一维度一天可能被问两次：
+
+      · 收尾那十道里问一次，轻量打卡又问了同样的三个维度；
+      · 或者收尾答完又补答了一次。
+
+    两条 qid 不同，但它们是**同一天的同一个变量**。两条都留着的话，下游
+    按 ts 挑一条纯粹是碰运气，而直接读 labels.jsonl 的东西会看到两个互相
+    矛盾的值。取 ts 最大的那条：晚答的更接近事实。
+    """
+    by_qid: dict[str, dict] = {}
     for p in sorted(STATE.glob("qa-*.json")):
         try:
             payload = json.loads(p.read_text(encoding="utf-8"))
@@ -104,10 +114,17 @@ def collect() -> list[dict]:
         if not isinstance(payload, dict):
             continue
         for row in extract(payload):
-            old = latest.get(row["qid"])
+            old = by_qid.get(row["qid"])
             if old is None or row["ts_utc"] >= old["ts_utc"]:
-                latest[row["qid"]] = row
-    return sorted(latest.values(), key=lambda r: (r["day"], r["dim"]))
+                by_qid[row["qid"]] = row
+
+    by_slot: dict[tuple[str, str], dict] = {}
+    for row in by_qid.values():
+        k = (row["day"], row["dim"])
+        old = by_slot.get(k)
+        if old is None or row["ts_utc"] >= old["ts_utc"]:
+            by_slot[k] = row
+    return sorted(by_slot.values(), key=lambda r: (r["day"], r["dim"]))
 
 
 def write(rows: list[dict]) -> None:

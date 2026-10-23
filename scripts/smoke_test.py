@@ -1096,8 +1096,22 @@ def t_live_question_rules():
     # ⚠️ 核心：数据平淡也要问。这是「每小时一次」和「够阈值才问」的分水岭。
     quiet = lq.rule_hourly(day, [], [], None, now)
     assert quiet is not None, "这一小时没数据也要问，不能沉默"
-    assert "没有记录到活动" in quiet["text"] or "一次都没解锁" in quiet["text"], \
-        quiet["text"]
+    # ⚠️ 措辞必须是「不知道」，不能是「没有活动」——
+    #    「笔记本没推过快照」和「电脑上一片空白」是两件事，
+    #    后者会一路写进日记，变成一句假话。
+    assert "笔记本还没推过快照" in quiet["text"], quiet["text"]
+    assert "还没有任何上报" in quiet["text"], quiet["text"]
+    assert "今天" not in quiet["text"], f"题干不该写死「今天」：{quiet['text']}"
+
+    # ⚠️ 过期的快照不能当「这一小时」的数据讲。
+    #    实测事故：07:02 / 08:03 / 10:03 三道题复读同一份 Code.exe 数字，
+    #    因为笔记本睡着时快照停在原地，而代码没有判新鲜度。
+    stale = {"day": "2020-01-01", "pushed_at": "2020-01-01T00:00:00+08:00",
+             "last_hour": {"total_minutes": 35.0,
+                           "top_apps": [["Code.exe", 25.0]]}}
+    stale_txt = lq.rule_hourly(day, [], [], stale, now)["text"]
+    assert "Code.exe" not in stale_txt, f"过期快照不该出现：{stale_txt}"
+    assert "数据停在" in stale_txt, stale_txt
 
     # 一小时前就结束的停留，不该被当成「还在那儿」
     old = dict(stay, place="中关村", minutes=80.0,
@@ -2800,7 +2814,10 @@ def t_live_question_expiry():
     fb.relay_answer = lambda qid, v, n="": (
         calls["answer"].append((qid, v, n)) or {"inserted": 1})
     fb.send_text = lambda oid, t: calls["sent"].append(t)
-    fb.advance = lambda oid: calls["sent"].append("ADVANCE")
+    # ⚠️ 用 **kw 吞掉额外参数：advance() 现在还会带 ack（上一题的回执），
+    #    写死成单参数的话，一次签名变化就会让这个测试整个炸掉 ——
+    #    而它要验的是「跨夜不吃下一句话」，跟 ack 一点关系都没有。
+    fb.advance = lambda oid, **kw: calls["sent"].append("ADVANCE")
 
     # ① 昨天没答的实时题 → 今天这句话不该被当成答案
     state.clear()

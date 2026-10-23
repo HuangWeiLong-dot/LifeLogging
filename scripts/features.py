@@ -52,16 +52,24 @@ STATE = Path(CFG["state_dir"])
 OUT = STATE / "features.jsonl"
 
 # ⚠️ 字段定义一改就 +1。不要「反正差不多」就沿用旧版本号。
-FEATURE_VERSION = 1
+#
+# v2：新增 `labels_llm`（AI 从自由文本推出来的分数），和 `labels`（本人自评）
+#     分开存。两者**不能混成一列** —— 自评是观测值，AI 推的是估计值，
+#     混在一起以后没人分得清哪个数是人说的、哪个是模型猜的。
+FEATURE_VERSION = 2
 
-# 自评维度（中文，来自 live_questions.RATED_DIMENSIONS）→ 特征里的英文键。
-# ⚠️ 和 live_questions 那边**必须同步**：那边多一个打分维度，这里不加映射
-#    就只是少一列（不会错）；反过来映射到不存在的维度才会错 —— 所以这里
-#    只写确定会有的。sleep 等维度加进打分表后再加。
+# 维度（中文，来自 live_questions）→ 特征里的英文键。
+#
+# 前三个是**自评**（1–5 打分题）；后四个没有固定的量表，只有自由文本，
+# 由 `label_free_text.py` 用提示词按量表打分，进 `labels_llm`。
 LABEL_KEYS = {
     "心情": "mood",
     "体力": "energy",
     "睡眠": "sleep",
+    "人际": "social",
+    "吃饭": "food",
+    "休息": "rest",
+    "学习": "learn",
 }
 
 _BLOCK_TIME = re.compile(r"^\s*(\d{1,2}):(\d{2})")
@@ -159,8 +167,13 @@ def _health(tl: dict) -> dict | None:
     return {str(k): v for k, v in h.items()}
 
 
-def features_for(day_iso: str, tl: dict, labels: dict[str, int]) -> dict:
-    """一天的原始 timeline + 自评 → 一行特征。纯函数，测试直接喂假数据。"""
+def features_for(day_iso: str, tl: dict, labels: dict[str, int],
+                 labels_llm: dict[str, int] | None = None) -> dict:
+    """一天的原始 timeline + 自评 → 一行特征。纯函数，测试直接喂假数据。
+
+    `labels` 是本人自评，`labels_llm` 是 AI 从自由文本推出来的补位。
+    ⚠️ 两个字段分开存，永远不合并 —— 见 FEATURE_VERSION 的注释。
+    """
     phone = _phone(tl)
     health = _health(tl)
     location = _location(tl)
@@ -190,17 +203,17 @@ def features_for(day_iso: str, tl: dict, labels: dict[str, int]) -> dict:
             "span_km": (tl.get("track") or {}).get("span_km"),
         },
         "labels": dict(labels),
+        "labels_llm": dict(labels_llm or {}),
         "sources": sources,
     }
 
 
-def load_labels() -> dict[str, dict[str, int]]:
-    """`state/labels.jsonl` → `{day: {mood: 4, energy: 2}}`。
+def _read_label_file(path: Path) -> dict[str, dict[str, int]]:
+    """`<path>` → `{day: {mood: 4, energy: 2}}`。
 
     ⚠️ 同一维度同一天有多条时取 ts 最大的（重答）。中文维度名在这里翻译成
        英文键，特征表里不出现中文 —— 以后的模型不想处理两套命名。
     """
-    path = STATE / "labels.jsonl"
     latest: dict[tuple[str, str], str] = {}
     out: dict[str, dict[str, int]] = {}
     try:
@@ -227,8 +240,26 @@ def load_labels() -> dict[str, dict[str, int]]:
     return out
 
 
+def load_labels() -> tuple[dict[str, dict[str, int]],
+                           dict[str, dict[str, int]]]:
+    """返回 (自评, AI 补位)。
+
+    ⚠️ AI 补位**只填自评没有的维度**。本人亲口打的分数永远优先 ——
+       模型推出来的东西是估计值，不能覆盖观测值。
+    """
+    mine = _read_label_file(STATE / "labels.jsonl")
+    llm = _read_label_file(STATE / "labels-llm.jsonl")
+    filled: dict[str, dict[str, int]] = {}
+    for day, dims in llm.items():
+        have = mine.get(day) or {}
+        extra = {k: v for k, v in dims.items() if k not in have}
+        if extra:
+            filled[day] = extra
+    return mine, filled
+
+
 def build() -> list[dict]:
-    labels = load_labels()
+    labels, labels_llm = load_labels()
     rows: list[dict] = []
     for p in sorted(STATE.glob("timeline-*.json")):
         try:
@@ -240,7 +271,8 @@ def build() -> list[dict]:
         if not isinstance(tl, dict):
             continue
         day = str(tl.get("day") or p.stem.replace("timeline-", ""))
-        rows.append(features_for(day, tl, labels.get(day, {})))
+        rows.append(features_for(day, tl, labels.get(day, {}),
+                                 labels_llm.get(day, {})))
     rows.sort(key=lambda r: r["day"])
     return rows
 

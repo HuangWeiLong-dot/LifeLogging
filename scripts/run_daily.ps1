@@ -164,6 +164,11 @@ function Invoke-OneDay($d) {
     # ⚠️ 必须排在上面那步之后 —— collect-phone-events 刚把 qa-<day>.json 拉回来。
     if (-not $DryRun) {
         Invoke-Step "labels" "scripts\collect_labels.py" @() | Out-Null
+        # 自由文本 → 1–5：人际/吃饭/休息/学习这四个维度没有打分题，只有一段话，
+        # 用 LLM 按固定量表打分，写进 labels-llm.jsonl（**和自评分开存**）。
+        # ⚠️ 这一条会花钱（一天一次调用，已有的结果直接复用）。放在 labels
+        #    之后：已经是 1–5 的答案这里不再重复打一遍。
+        Invoke-Step "labels-llm" "scripts\label_free_text.py" @() | Out-Null
     }
     # 手表：先把 Gadgetbridge 导出的 SQLite 从中继取回来，再读它。
     # 两步必须按这个顺序 —— ingest_gadgetbridge 读的是本地那份文件。

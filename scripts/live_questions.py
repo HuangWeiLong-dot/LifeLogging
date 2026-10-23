@@ -276,7 +276,8 @@ def qid(day: str, text: str) -> str:
 
 def make(day: str, text: str, evidence: str, key: str,
          kind: str = "routine", fmt: str = "text",
-         options: list[dict] | None = None) -> dict:
+         options: list[dict] | None = None,
+         id_salt: str = "") -> dict:
     """生成一条实时题。
 
     ⚠️ `ref` 必须是空的。apply_answers 只处理带 ref 的题（见它
@@ -286,8 +287,14 @@ def make(day: str, text: str, evidence: str, key: str,
     ⚠️ 打分题用 choice **不是**为了好看：答案要能被下游算成数字
        （`collect_labels.py` 读的就是选项的 leading digit）。自由文本
        再有人情味，也进不了任何统计。
+
+    ⚠️ `id_salt` 决定 `id`，而 `id` 是「这道题答过没有」的**唯一判据**
+       （中继按它去重、`answered_ids()` 按它过滤）。题面一样的题必须
+       用不同的 salt，否则会被当成同一道：轻量打卡的「体力」和收尾的
+       「体力」题面完全相同，不区分的话打卡会被静默吞掉。
+       `text` 保持逐字一致是为了跨天可比，所以只能在 id 上分开。
     """
-    item = {"id": qid(day, text), "kind": kind, "format": fmt,
+    item = {"id": qid(day, text + id_salt), "kind": kind, "format": fmt,
             "text": text, "evidence": evidence, "ref": "",
             "_key": key}
     if options:
@@ -461,7 +468,10 @@ def rule_hourly(day_iso: str, stays: list[dict], events: list[dict],
     else:
         # ⚠️ 一整天一条事件都没有，更可能是 Tasker / 中继断了，而不是你没碰手机。
         #    这两种情况在数据上长得一模一样，所以话必须说成「不知道」。
-        bits.append("手机：今天还没有任何上报")
+        #
+        # ⚠️ 不能写「今天」—— 实时题可能第二天早上才被读到，题干里任何
+        #    相对时间词都会变成错的（见上面 make() 附近那条约束）。
+        bits.append("手机：还没有任何上报")
 
     if not bits:
         bits.append("这一小时没有任何记录")
@@ -716,6 +726,45 @@ def _rating_options(dim: str) -> list[dict]:
     return [{"label": label} for label in RATED_DIMENSIONS[dim][1]]
 
 
+# ── 轻量打卡（兜底）────────────────────────────────────────────────
+#
+# 为什么要有它：七个维度那套收尾题很好，但它有十道。某天不想答完，那天就
+# **一个标签都没有**（10-21、10-22 就是这么丢的）。而回归需要的是连续每天
+# 同口径的数字 —— 断一天，那个样本就没了。
+#
+# 所以留一条三题的窄通道：只问那三个有 1–5 量表的维度。答完只要十几秒，
+# 但它保住了「这一天有数字」这件事。
+CHECKIN_KIND = "checkin"
+CHECKIN_DIMS = ("体力", "心情", "睡眠")
+
+
+def checkin_questions(day_iso: str) -> list[dict]:
+    """三道快速打分题。和收尾里的那三道**同题面、不同 key**。
+
+    ⚠️ key 前缀必须是 `checkin-`，不能和 `summary-` 混 —— 否则收尾已经问过
+       的维度会被当成没问，同一晚问两遍。
+    """
+    qs: list[dict] = []
+    for dim in CHECKIN_DIMS:
+        rated = RATED_DIMENSIONS.get(dim)
+        if not rated:
+            continue
+        q = make(day_iso, rated[0],
+                 "轻量打卡：三个数字就够了，题面每天一样，所以逐日可比。",
+                 f"checkin-{day_iso}-{dim}",
+                 kind=CHECKIN_KIND,
+                 # ⚠️ 必须是 choice：`collect_labels` 只认答案开头的 1–5。
+                 fmt="choice",
+                 options=[{"label": x} for x in rated[1]],
+                 # ⚠️ 题面和收尾里那三道完全一样，id 必须靠 salt 分开，
+                 #    否则中继会把打卡题当成「已经问过的那道」直接吞掉。
+                 id_salt=f"|{CHECKIN_KIND}")
+        q["routine"] = True
+        q["dim"] = dim
+        qs.append(q)
+    return qs
+
+
 def summary_questions(day_iso: str, stays: list[dict],
                       events: list[dict], snap: dict | None,
                       now: datetime | None = None) -> list[dict]:
@@ -946,6 +995,26 @@ def force_summary(day_iso: str, base: str, key: str) -> list[dict]:
 
     return [q for q in fetch_pending(base, key)
             if str(q.get("kind") or "") == "summary"]
+
+
+def force_checkin(day_iso: str, base: str, key: str) -> list[dict]:
+    """立刻把「轻量打卡」那三道推到中继，返回还挂着的。已经推过就什么都不做。
+
+    ⚠️ 幂等靠 `known` 里的 key，不靠本地状态 —— 和收尾题同一套理由：
+       本地记「已经发过」而中继上其实没有，是最难查的那种。
+    """
+    known = load_asked(day_iso)
+    prefix = f"{CHECKIN_KIND}-{day_iso}"
+    if not any(str(q.get("_key") or "").startswith(prefix) for q in known):
+        qs = checkin_questions(day_iso)
+        if not qs:
+            return []
+        ok, detail = push(day_iso, base, key, known + qs)
+        if not ok:
+            raise RuntimeError(detail)
+
+    return [q for q in fetch_pending(base, key)
+            if str(q.get("kind") or "") == CHECKIN_KIND]
 
 
 def main() -> int:
