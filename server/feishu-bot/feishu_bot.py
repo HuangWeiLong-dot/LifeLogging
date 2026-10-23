@@ -470,7 +470,7 @@ def _survives_close(q: dict) -> bool:
     只有两种：**收尾批**（本来就是一天的最后一批）和**轻量打卡**
     （它是收尾没答时的兜底，封盘之后正是它该出场的时候）。
     """
-    return str(q.get("kind") or "") in ("summary", "checkin")
+    return str(q.get("kind") or "") in ("summary", "checkin", "deviation")
 
 
 def pending_filtered(state: dict) -> list[dict]:
@@ -666,6 +666,7 @@ _GROUP_LABEL = {
     "live": "实时提问",
     "morning": "今日一问",
     "checkin": "轻量打卡",
+    "deviation": "偏离追问",
 }
 # 飞书卡片 header 的可选色，见「卡片 JSON 结构」文档。
 _GROUP_COLOR = {
@@ -674,6 +675,9 @@ _GROUP_COLOR = {
     "live": "blue",
     "morning": "turquoise",
     "checkin": "green",
+    # ⚠️ 偏离追问用红色：它是这套系统里**唯一一条带着指控的问题**
+    #    （「该上课的时候你在干别的」）。和普通提问同色会被当成背景噪音。
+    "deviation": "red",
 }
 
 
@@ -690,6 +694,8 @@ def _group_of(q: dict) -> str:
         return "summary"
     if kind == "checkin":
         return "checkin"
+    if kind == "deviation":
+        return "deviation"
     if str(q.get("source") or "") == "live":
         return "live"
     return "morning"

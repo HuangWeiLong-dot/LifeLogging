@@ -624,10 +624,44 @@ def live_questions_path(day: str) -> Path | None:
 
 
 def save_live_questions(day: str, payload: dict) -> tuple[bool, str]:
+    """实时题的落盘。**按题号合并，不整份覆写。**
+
+    ⚠️ 原来这里是纯覆写，只有 `live_questions.py` 一个写入方 —— 它每次把
+       当天**全部**题目重新推一遍，所以覆写等价于合并。
+
+       现在第二个写入方出现了：笔记本上的 `routine.py` 会把当天的「偏离」
+       推成题目。两边各自覆写的话，后到的会把先到的整批顶掉 ——
+       而且**不报错**，表现只是「今天的收尾题没了」或者「偏离题没了」。
+
+       改成按 id 合并、新值覆盖旧值之后，两个写入方各自推自己的那份都对：
+       `live_questions` 推全量（结果不变），`routine` 只推新增的那几条。
+       题目只会被更新，不会被删除 —— 目前没有任何一方需要删题。
+    """
     dest = live_questions_path(day)
     if dest is None:
         return False, "day must be YYYY-MM-DD"
-    return True, _write_json(dest, payload)
+
+    existing: list[dict] = []
+    try:
+        old = json.loads(dest.read_text(encoding="utf-8"))
+        existing = [q for q in (old.get("questions") or []) if isinstance(q, dict)]
+    except (OSError, json.JSONDecodeError):
+        existing = []
+
+    merged: dict[str, dict] = {}
+    order: list[str] = []
+    for q in existing + [q for q in (payload.get("questions") or [])
+                         if isinstance(q, dict)]:
+        qid = str(q.get("id") or "")
+        if not qid:
+            continue
+        if qid not in merged:
+            order.append(qid)
+        merged[qid] = q
+
+    out = dict(payload)
+    out["questions"] = [merged[i] for i in order]
+    return True, _write_json(dest, out)
 
 
 def load_latest_live_questions(within_days: int = 1) -> dict | None:

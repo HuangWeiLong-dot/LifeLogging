@@ -74,6 +74,26 @@ KIND_TO_CATEGORY: dict[str, tuple[str, ...] | None] = {
 
 WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
+# ── 偏离追问 ────────────────────────────────────────────────────────
+#
+# 判出偏离只是「发现」，不产生标签。真正有用的是那句「为什么」——
+# 而理由必须是**可数**的几类，自由文本进不了回归。
+DEVIATION_KIND = "deviation"
+
+REASON_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("计划变了", "plan_changed"),
+    ("主动选择不做", "chose_not_to"),
+    ("被打断", "interrupted"),
+    ("身体原因", "body"),
+    ("环境 / 工具", "environment"),
+    ("记错 / 忘了", "mistake"),
+    ("本来就不需要", "not_applicable"),
+)
+LABEL_TO_CLASS = {lab: cls for lab, cls in REASON_OPTIONS}
+
+# 一天最多追问几段偏离。多了一晚上变成审问，而且人只会开始乱点。
+MAX_DEVIATION_QS = 2
+
 # 人自己说的活动，按天索引。main() 里加载一次，analyze_day 直接读。
 _EVENTS: dict[str, list[dict]] = {}
 
@@ -377,11 +397,100 @@ def actual_routine(days: list[str]) -> dict:
     return out
 
 
+def _qid(day: str, text: str) -> str:
+    import hashlib
+
+    return f"{day}-{hashlib.sha1(text.encode('utf-8')).hexdigest()[:8]}"
+
+
+def deviation_question(row: dict) -> dict:
+    """把一条偏离变成一道题。题面里必须**写清楚该做什么、实际做了什么**。
+
+    ⚠️ 不能问「你今天为什么没按课表来」——太笼统，答不出有用的东西，
+       而且被问的人会觉得被指责。写具体的时间、课名、实际活动，
+       他才答得出「哦那天是因为要交作业」。
+    """
+    did = row.get("top_other_app") or row.get("top_other_category") or "别的事"
+    text = (f"{row['start']}–{row['end']} 排的是「{row['what']}」，"
+            f"实际在「{did}」，占了 {int(round(float(row['other_minutes'])))} 分钟。"
+            "这一段为什么没按课表来？")
+    return {
+        "id": _qid(row["day"], text),
+        "kind": DEVIATION_KIND,
+        "format": "choice",
+        "text": text,
+        "evidence": ("课表 vs 实际活动；观测方式："
+                     + ("你自己在问答里说的" if row.get("observed_by") == "self"
+                        else "屏幕记录")),
+        "ref": "",
+        "options": [{"label": lab} for lab, _ in REASON_OPTIONS],
+        "day": row["day"],
+    }
+
+
+def push_questions(day: str, questions: list[dict]) -> tuple[bool, str]:
+    """推到中继。走 `/questions/live`（它现在按 id 合并，不会顶掉别的题）。"""
+    cfg = (CFG.get("sources") or {}).get("phone_relay") or {}
+    if not cfg.get("enabled"):
+        return False, "phone_relay 没开"
+    base = str(cfg.get("api_base") or "").rstrip("/")
+    key = str(cfg.get("api_key") or "")
+    if not base or "REPLACE" in base or "REPLACE" in key:
+        return False, "phone_relay 还是占位符"
+    import httpx
+
+    try:
+        r = httpx.post(f"{base}/questions/live",
+                       json={"day": day, "questions": questions},
+                       headers={"X-API-Key": key}, timeout=20.0)
+    except Exception as e:  # noqa: BLE001
+        return False, f"推不到中继：{e}"
+    if r.status_code != 200:
+        return False, f"中继返回 {r.status_code}：{r.text[:160]}"
+    return True, "ok"
+
+
+def attach_reasons(rows: list[dict]) -> int:
+    """把已经答过的偏离题的理由**回填**到偏离记录上。
+
+    ⚠️ 回填而不是另存一份：偏离和理由必须是同一条记录的两个字段。
+       分成两份文件的话，以后一 join 就会出现「有偏离没理由」和
+       「有理由没偏离」两种孤儿行，而且没人会发现。
+    """
+    answers: dict[str, str] = {}
+    for path in sorted(STATE.glob("qa-*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        for x in (payload.get("qa") or []):
+            if not isinstance(x, dict):
+                continue
+            qid = str(x.get("id") or "")
+            if qid:
+                answers[qid] = str(x.get("answer") or "").strip()
+
+    n = 0
+    for r in rows:
+        if r.get("verdict") != "deviated":
+            continue
+        q = deviation_question(r)
+        ans = answers.get(q["id"], "")
+        cls = LABEL_TO_CLASS.get(ans)
+        if cls:
+            r["reason_class"] = cls
+            r["reason_answer"] = ans
+            n += 1
+    return n
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="课表 vs 实际 → 偏离")
     ap.add_argument("--days", type=int, default=14)
     ap.add_argument("--timetable", default="")
     ap.add_argument("--actual", action="store_true", help="只输出实际作息表")
+    ap.add_argument("--push", action="store_true",
+                    help="把今天的偏离推成追问题到中继")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -431,6 +540,11 @@ def main() -> int:
               f"({r['top_other_app']}) {r['other_minutes']:.0f}分"
               f" / 覆盖 {r['coverage']:.0%}")
 
+    # 先回填已经答过的理由 —— 必须在写盘之前，否则写出去的还是空的。
+    filled = attach_reasons(rows)
+    if filled:
+        print(f"  回填了 {filled} 条偏离理由")
+
     if args.dry_run:
         print("  --dry-run，不写盘")
         return 0
@@ -445,6 +559,18 @@ def main() -> int:
                    ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"  → {OUT_DEVIATIONS}（{len(rows)} 行）")
     print(f"  → {OUT_ROUTINE}")
+
+    if args.push:
+        today = datetime.now().date().isoformat()
+        todo = [r for r in rows
+                if r["day"] == today and r["verdict"] == "deviated"
+                and not r.get("reason_class")][:MAX_DEVIATION_QS]
+        if not todo:
+            print("  今天没有待追问的偏离")
+        else:
+            qs = [deviation_question(r) for r in todo]
+            ok, detail = push_questions(today, qs)
+            print(f"  {'OK' if ok else '⚠️ '} 偏离追问 {len(qs)} 条 → {detail}")
     return 0
 
 

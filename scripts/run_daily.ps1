@@ -197,7 +197,9 @@ function Invoke-OneDay($d) {
         Invoke-Step "graph" "scripts\link_graph.py" @() | Out-Null
         # 课表 vs 实际 → state/deviations.jsonl（偏离）。
         # 没有 config/timetable.yaml 时它会明说并退出，不算失败。
-        Invoke-Step "routine" "scripts\routine.py" @() | Out-Null
+        Invoke-Step "routine" "scripts\routine.py" @("--push") | Out-Null
+        # --push：把今天的偏离推成追问题（最多 2 条），收尾之后由飞书来问。
+        # 中继的 /questions/live 现在按题号合并，不会顶掉当天的小时题/收尾题。
         # 今天和你自己的常态差多少（中位数 + MAD，不预测）。
         # ⚠️ 只在正式跑（不是每 2 小时的刷新）做：拿只过了半天的今天
         #    去和完整的历史比，偏离全是假的。
