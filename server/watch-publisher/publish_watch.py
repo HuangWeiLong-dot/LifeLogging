@@ -87,9 +87,24 @@ def to_event(kind: str, path: Path, doc: dict) -> dict:
             "start_utc": doc["start"],
             "end_utc": doc["end"],
             "points": doc["points"],
+            # FIT 有逐秒心率/速度/海拔，GPX 有速度/海拔（见 scripts/track_samples.py）
+            "samples": doc.get("samples"),
             "file": path.name,
         },
     }
+
+
+def _pick_samples(a: dict | None, b: dict | None) -> dict | None:
+    """同一活动的 FIT 和 GPX 各有一份采样：心率只有 FIT 有。
+
+    换路径（留点数更多的那份）时不能顺手把它丢掉，否则跑步弹窗里的心率曲线
+    会因为 GPX 恰好点数多而消失。
+    """
+    if a and a.get("hr"):
+        return a
+    if b and b.get("hr"):
+        return b
+    return a or b
 
 
 def collect() -> dict[str, list[dict]]:
@@ -110,10 +125,20 @@ def collect() -> dict[str, list[dict]]:
                 continue
             event = to_event(kind, path, doc)
             bucket = by_day.setdefault(day, {})
-            # 同一活动（开始时间相同）：只留点数多的那条路径，和站点同一口径。
+            # 同一活动（开始时间相同）：只留点数多的那条路径，和站点同一口径；
+            # 采样则取有心率的那份（只有 FIT 有）。
             prev = bucket.get(doc["start"])
-            if prev is None or len(doc["path"]) > len(prev["meta"]["path"]):
+            if prev is None:
                 bucket[doc["start"]] = event
+            else:
+                keep = event if len(doc["path"]) > len(prev["meta"]["path"]) else prev
+                other = prev if keep is event else event
+                merged = dict(keep)
+                merged["meta"] = dict(keep["meta"])
+                merged["meta"]["samples"] = _pick_samples(
+                    keep["meta"].get("samples"), other["meta"].get("samples"),
+                )
+                bucket[doc["start"]] = merged
             parsed += 1
 
     out = {

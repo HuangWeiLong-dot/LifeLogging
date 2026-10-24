@@ -25,12 +25,25 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import Event, EventsClient, load_config  # noqa: E402
+from track_samples import build_samples  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DIR = ROOT / "state" / "fit"
 STATE_PATH = ROOT / "state" / "fit-imported.json"
 MAX_POINTS = 500
 SEMICIRCLE = 180.0 / (2 ** 31)
+
+
+def _val(frame, *names):
+    """FIT 记录里取一个可选字段。字段不在定义里时 fitdecode 抛 KeyError。"""
+    for name in names:
+        try:
+            v = frame.get_value(name)
+        except (KeyError, ValueError):
+            continue
+        if v is not None:
+            return v
+    return None
 
 
 def _haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
@@ -49,6 +62,9 @@ def parse_fit(path: Path) -> dict[str, Any] | None:
         return None
 
     points: list[tuple[float, float, datetime | None]] = []
+    # 轨迹点之外，FIT 每帧还带心率 / 速度 / 海拔。这些是 Gadgetbridge 数据库里
+    # 没有的（DB 只有整次的平均值），丢掉就再也拿不回来了。
+    series: list[tuple[datetime, float | None, float | None, float | None]] = []
     try:
         with FitReader(str(path)) as fit:
             for frame in fit:
@@ -62,17 +78,23 @@ def parse_fit(path: Path) -> dict[str, Any] | None:
                     continue
                 if getattr(frame, "name", "") != "record":
                     continue
-                try:
-                    lat = frame.get_value("position_lat")
-                    lon = frame.get_value("position_long")
-                except KeyError:
-                    continue
-                if lat is None or lon is None:
-                    continue
-                when = frame.get_value("timestamp")
+                when = _val(frame, "timestamp")
                 if not isinstance(when, datetime):
                     when = None
-                points.append((float(lat) * SEMICIRCLE, float(lon) * SEMICIRCLE, when))
+                lat = _val(frame, "position_lat")
+                lon = _val(frame, "position_long")
+                if lat is not None and lon is not None:
+                    points.append((float(lat) * SEMICIRCLE, float(lon) * SEMICIRCLE, when))
+                if when is not None:
+                    hr = _val(frame, "heart_rate")
+                    speed = _val(frame, "enhanced_speed", "speed")
+                    alt = _val(frame, "enhanced_altitude", "altitude")
+                    series.append((
+                        when,
+                        float(hr) if hr is not None else None,
+                        float(speed) if speed is not None else None,
+                        float(alt) if alt is not None else None,
+                    ))
     except Exception as exc:  # noqa: BLE001
         print(f"  ⚠️  {path.name}: FIT parse failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return None
@@ -98,6 +120,7 @@ def parse_fit(path: Path) -> dict[str, Any] | None:
         for i in range(len(coords) - 1)
     )
     minutes = max(0.0, (end - start).total_seconds() / 60.0)
+    series.sort(key=lambda r: r[0])
     return {
         "start": start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "end": end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -105,6 +128,7 @@ def parse_fit(path: Path) -> dict[str, Any] | None:
         "distance_km": round(distance, 3),
         "path": [[lat, lon] for lat, lon in coords],
         "points": len(points),
+        "samples": build_samples(series, start),
         "file": path.name,
     }
 
@@ -157,6 +181,9 @@ def main() -> int:
                 "start_utc": doc["start"],
                 "end_utc": doc["end"],
                 "points": doc["points"],
+                # 逐帧心率/速度/海拔（见 track_samples.py）。没有就是 None，
+                # 站点那边当「这条没有曲线」处理。
+                "samples": doc.get("samples"),
                 "file": doc["file"],
             },
         )

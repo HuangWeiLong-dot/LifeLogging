@@ -35,6 +35,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import Event, EventsClient, load_config  # noqa: E402
+from track_samples import build_samples  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DIR = ROOT / "state" / "gpx"
@@ -71,7 +72,9 @@ def parse_gpx(path: Path) -> dict[str, Any] | None:
         print(f"  ⚠️  {path.name}: parse failed: {e}", file=sys.stderr)
         return None
 
-    points: list[tuple[float, float, datetime | None]] = []
+    # (lat, lon, time, ele)。海拔跟着点走，不能单独存一个数组 ——
+    # 下面按时间排序会把两个数组拆散。
+    points: list[tuple[float, float, datetime | None, float | None]] = []
     for el in tree.iter():
         if _local(el.tag) not in ("trkpt", "rtept", "wpt"):
             continue
@@ -81,11 +84,17 @@ def parse_gpx(path: Path) -> dict[str, Any] | None:
         except ValueError:
             continue
         when = None
+        ele = None
         for child in el:
-            if _local(child.tag) == "time":
+            tag = _local(child.tag)
+            if tag == "time" and when is None:
                 when = _parse_time(child.text)
-                break
-        points.append((lat, lon, when))
+            elif tag == "ele" and ele is None:
+                try:
+                    ele = float(child.text or "")
+                except ValueError:
+                    ele = None
+        points.append((lat, lon, when, ele))
 
     if len(points) < 2:
         print(f"  ⚠️  {path.name}: fewer than 2 track points", file=sys.stderr)
@@ -114,6 +123,20 @@ def parse_gpx(path: Path) -> dict[str, Any] | None:
     )
     minutes = max(0.0, (end - start).total_seconds() / 60.0)
 
+    # 速度 GPX 不直接给，用相邻点的距离/时间差算；只在整条轨迹都有时间时才算，
+    # 否则会在缺时间的点上编出一个 0 速度的坑。
+    series: list[tuple[datetime, float | None, float | None, float | None]] = []
+    if len(timed) == len(points):
+        prev = None
+        for lat, lon, when, ele in points:
+            speed = None
+            if prev is not None:
+                dt = (when - prev[0]).total_seconds()
+                if dt > 0:
+                    speed = _haversine_km((prev[1], prev[2]), (lat, lon)) * 1000.0 / dt
+            series.append((when, None, speed, ele))
+            prev = (when, lat, lon)
+
     return {
         "start": start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "end": end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -121,6 +144,7 @@ def parse_gpx(path: Path) -> dict[str, Any] | None:
         "distance_km": round(distance, 3),
         "path": [[lat, lon] for lat, lon in coords],
         "points": len(points),
+        "samples": build_samples(series, start) if series else None,
         "file": path.name,
     }
 
@@ -192,6 +216,9 @@ def main() -> int:
                 "start_utc": doc["start"],
                 "end_utc": doc["end"],
                 "points": doc["points"],
+                # 逐帧心率/速度/海拔（见 track_samples.py）。没有就是 None，
+                # 站点那边当「这条没有曲线」处理。
+                "samples": doc.get("samples"),
                 "file": doc["file"],
             },
         )

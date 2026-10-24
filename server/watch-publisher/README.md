@@ -69,6 +69,10 @@ curl -s https://cms.liveinpassion.me/api/life/raw/watch/2026-10-23 | head -c 400
 返回 `{"v":1,"kind":"watch","id":"2026-10-23","format":"json","data":{"day":…,"events":[…]}}`
 就说明通了。
 
+每条事件的 `meta.samples` 是逐帧采样（`t` 秒 / `hr` 心率 / `v` 速度 m/s / `alt` 海拔），
+最多 240 点，由 `scripts/track_samples.py` 压缩。**心率只有 FIT 有**；GPX 有速度和海拔。
+同一活动两份文件都在时，路径取点数多的那份，采样取有心率的那份。
+
 > ⚠️ **部署前要先让 Worker 认识 `watch` 这个 kind**，否则 ingest 会返回
 > `400 invalid kind`。站点仓库的 `worker/src/routes/life_raw.js` 里那个
 > `KINDS` 集合是白名单。
