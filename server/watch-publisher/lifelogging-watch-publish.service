@@ -12,7 +12,7 @@
 
 [Unit]
 Description=LifeLogging - publish watch tracks (GPX/FIT) to the site
-Documentation=https://github.com/  # 指向你自己的仓库
+Documentation=https://github.com/
 After=network-online.target
 Wants=network-online.target
 
