@@ -1346,6 +1346,19 @@ def maybe_write_summary(open_id: str, day_iso: str,
     return True
 
 
+def _reason_pending(state: dict) -> bool:
+    """「为什么」还挂着一句没回吗？
+
+    ⚠️ 只认**今天**的。昨天挂着的 reason_for 不该把今天的实时题全堵死 ——
+       和跨夜 awaiting 是同一个道理（handle_text 会在下一条消息时清掉它，
+       但定时推送不一定等得到那条消息）。
+    """
+    reason_for = state.get("reason_for")
+    if not isinstance(reason_for, dict) or not reason_for.get("qid"):
+        return False
+    return str(reason_for.get("day") or "") == datetime.now(TZ).date().isoformat()
+
+
 def advance(open_id: str, ack: str = "") -> None:
     """拉一次「还没答的题」，把下一题发出去。没有题就明说。
 
@@ -1395,10 +1408,14 @@ def advance(open_id: str, ack: str = "") -> None:
     #    锁住之后，第二个进来的会在读到 awaiting 已非空时直接退出。
     with _send_lock:
         fresh = load_state()
-        if fresh.get("awaiting"):
+        # ⚠️ reason_for 也是「有人在等答案」：打分题答完到「为什么」回来之间，
+        #    awaiting 是空的。这里只看 awaiting 的话，定时推送会把下一题插进
+        #    来，把「为什么」那张卡顶上去 —— 用户以为自己在答下一题。
+        if fresh.get("awaiting") or _reason_pending(fresh):
             # 另一个发送方刚刚抢先了。**要留痕** —— 这条分支曾经在
             # 「答完不清 awaiting」的 bug 里静默吞掉整条对话，而日志上一片空白。
-            print(f"[advance] skipped: still awaiting {fresh.get('awaiting')!r}",
+            print(f"[advance] skipped: still awaiting "
+                  f"{fresh.get('awaiting') or fresh.get('reason_for')!r}",
                   file=sys.stderr)
             return
         # ⚠️ **先发消息，再落状态。**
@@ -1654,6 +1671,14 @@ def handle_data_command(open_id: str, cmd: str, arg: str) -> None:
 
 _SKIP_REASON = {"跳过", "skip", "不", "不用", "不想说", "-", "无", "算了"}
 
+# 「把题给我 / 我在问这是什么」——**永远不是答案**。
+#
+# ⚠️ 实测 2026-10-24 收尾：人际是 text 题，用户回了一个「?」，
+#    canonicalise() 对 text 什么都收，于是那天的人际答案就是一个问号。
+#    它会进复盘、进 label_free_text 的证据链，而用户真正想答的话没了 ——
+#    数据表面完全看不出异常，这比报错糟得多。
+_ASK_WORDS = ("?", "？", "题", "给我题")
+
 
 def _wants_reason(q: dict, note: str) -> bool:
     """答完这一题之后要不要追一句「为什么」。
@@ -1793,6 +1818,14 @@ def handle_text(open_id: str, text: str) -> None:
             state["reason_for"] = None
             save_state(state)
         else:
+            # ⚠️ 「?」不是理由。不拦的话它会被当成证据写进那道题的备注，
+            #    和下面 awaiting 那里是同一个坑。
+            if stripped in _ASK_WORDS:
+                send_text(open_id,
+                          f"Still waiting for one line about "
+                          f"{reason_for.get('dim') or 'this score'} — "
+                          "reply “skip” to leave it blank.")
+                return
             _handle_reason(open_id, reason_for, stripped)
             return
 
@@ -1800,7 +1833,7 @@ def handle_text(open_id: str, text: str) -> None:
         # 数据查询只走上面的斜杠命令；这里剩下的按「要题 / 记一笔」处理。
         # 不再用关键词猜「这句话像不像在问数据」—— 长文里的「手机」「电脑」
         # 太容易被误伤，而误伤的代价是用户写的那段话被吞掉。
-        if stripped in ("?", "？", "题", "给我题"):
+        if stripped in _ASK_WORDS:
             advance(open_id)
             return
 
@@ -1841,6 +1874,13 @@ def handle_text(open_id: str, text: str) -> None:
         print(f"[expire] 昨天的实时题没答，清掉 awaiting：{awaiting}")
         # 这条消息不是答案 —— 按普通消息重新走一遍（现在 awaiting 已经空了）。
         handle_text(open_id, stripped)
+        return
+
+    # ⚠️ 「?」永远不是答案。text 题什么都收，不拦就会静默落成一条数据。
+    #    这里只把题**再显示一遍**，awaiting 一个字节都不动。
+    if stripped in _ASK_WORDS:
+        remaining = sum(1 for x in questions if _group_of(x) == _group_of(q))
+        send_question(open_id, q, remaining, ack="Still waiting on this one.")
         return
 
     value, note, hint = canonicalise(q, stripped)
@@ -2007,8 +2047,9 @@ def push_next_live(open_id: str) -> bool:
       · **别打扰时段不推**（默认 22:00–08:00）。生成器有窗口，但那只管
         「生不生成」；题生成完还躺着等这里推，所以这里也必须看时间。
       · **只推当天的题**。隔了夜的「过去一小时」没有意义，早上收到只会困惑。
-      · **只在没在等答案时推**（`awaiting` 为空）。否则会把正在答的那题顶掉，
-        用户刚打了一半的答案会被当成另一题的答案。
+      · **只在没在等答案时推**（`awaiting` 与 `reason_for` 都为空）。
+        否则会把正在答的那题（或「为什么」的追问）顶掉 —— 用户刚打了一半的
+        答案会被当成另一题的答案。
       · **只推 source="live" 的题**。笔记本那批问责题仍然每天整批推一次 ——
         它们是「晚上的事」，不该在白天插进来。
       · **先发再落状态**，和 advance() 同一个理由：发送失败不该留下一个
@@ -2021,7 +2062,9 @@ def push_next_live(open_id: str) -> bool:
     quiet = in_quiet_hours(now)
 
     state = load_state()
-    if state.get("awaiting"):
+    # reason_for 也是「在等答案」：打完分到「为什么」回来之间 awaiting 是空的，
+    # 只看 awaiting 会让实时题插进来，把追问卡顶上去。
+    if state.get("awaiting") or _reason_pending(state):
         return False
 
     try:
@@ -2057,8 +2100,8 @@ def push_next_live(open_id: str) -> bool:
         # 和 advance() 同一把锁：两边都想发的时候，只有一个能进去。
         with _send_lock:
             fresh = load_state()
-            if fresh.get("awaiting"):
-                return False           # 已经有人在等答案了
+            if fresh.get("awaiting") or _reason_pending(fresh):
+                return False           # 已经有人在等答案（或「为什么」）了
             send_question(open_id, q,
                           sum(1 for x in live_qs if _group_of(x) == _group_of(q)))
             fresh["awaiting"] = qid
