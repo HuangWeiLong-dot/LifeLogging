@@ -43,7 +43,7 @@ def _haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
 
 def parse_fit(path: Path) -> dict[str, Any] | None:
     try:
-        from fitdecode import FitReader
+        from fitdecode import FitDataMessage, FitReader
     except ImportError:
         print("  ⚠️  fitdecode 未安装：.venv\\Scripts\\pip.exe install fitdecode", file=sys.stderr)
         return None
@@ -52,7 +52,13 @@ def parse_fit(path: Path) -> dict[str, Any] | None:
     try:
         with FitReader(str(path)) as fit:
             for frame in fit:
-                if getattr(frame, "frame_type", None) != "data":
+                # ⚠️ 不能用 frame_type 判断。fitdecode 给的是 IntEnum
+                #    （FitFrameType.data == 4），拿它跟字符串 "data" 比永远为真，
+                #    结果一条 record 都进不来 —— FIT 全都"解析成功但 0 个点"，
+                #    而且不报错。
+                # ⚠️ 也不能只按 name 过滤：定义帧（FitDefinitionMessage）的 name
+                #    同样是 "record"，但它没有 get_value()，会抛 AttributeError。
+                if not isinstance(frame, FitDataMessage):
                     continue
                 if getattr(frame, "name", "") != "record":
                     continue

@@ -1,0 +1,46 @@
+# systemd 单元 —— 把中继上的 GPX / FIT 发布成站点的手表路线
+#
+# 安装：
+#   sudo cp lifelogging-watch-publish.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now lifelogging-watch-publish.timer
+#
+# 密钥在 /etc/lifelogging/watch.env（见同目录 README），不要写进这个文件 ——
+# 这个文件是要进 git 的。
+#
+# ⚠️ 改完要 `daemon-reload` 才生效，只 restart 不行。
+
+[Unit]
+Description=LifeLogging - publish watch tracks (GPX/FIT) to the site
+Documentation=https://github.com/  # 指向你自己的仓库
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+
+# 和中继同一个身份、同一个数据目录：它只读中继落下来的 gpx/fit，
+# 再把解析结果 POST 到站点，不写 events.db、不碰笔记本。
+User=root
+Group=root
+
+Environment=RELAY_DATA_DIR=/var/lib/lifelogging
+Environment=WATCH_WINDOW_DAYS=30
+Environment=WATCH_TZ=Asia/Shanghai
+# 需要 LIFE_INGEST_TOKEN（与 Worker secret 相同）
+EnvironmentFile=/etc/lifelogging/watch.env
+
+ExecStart=/opt/lifelogging/venv/bin/python /opt/lifelogging/repo/server/watch-publisher/publish_watch.py
+
+# 和中继同一套加固：只需要「读脚本 + 读 /var/lib/lifelogging + 发 HTTPS」。
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/lifelogging
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+CapabilityBoundingSet=
+AmbientCapabilities=

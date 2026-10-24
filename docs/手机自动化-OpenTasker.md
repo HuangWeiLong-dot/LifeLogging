@@ -137,6 +137,71 @@ Body：
 > ⚠️ **文件必须在 OpenTasker 自己的文件目录里。** 先把 Gadgetbridge 的自动导出
 > 目标指过去，或用它的「接收分享」触发器中转一次。这一步是迁移里唯一需要试的。
 
+### 4.2 锻炼轨迹（GPX / FIT）
+
+换到 OpenTasker **之前**就漏了这一条：中继的 `/upload/gpx`、`/upload/fit`
+早就写好了，笔记本 `run_live.ps1` 每轮也都在拉，但**手机从来没传过文件**，
+所以地图上一条手表路线都没有（中继 `/files/gpx` 返回空列表）。
+
+Gadgetbridge 每结束一次锻炼会导出**一对同名文件**：
+
+```
+2026-10-23T08_54_12+08_00-running.fit
+2026-10-23T08_54_12+08_00-running.gpx
+```
+
+两条任务（或一条任务里两个 HTTP Request 动作），除了 URL 外配置相同：
+
+| 字段 | `.fit` 那条 | `.gpx` 那条 |
+|---|---|---|
+| Method | `POST` | `POST` |
+| URL | `https://relay.liveinpassion.me/upload/fit` | `https://relay.liveinpassion.me/upload/gpx` |
+| Header | 同 §2 三条 | 同 §2 三条 |
+| Content-Type | `application/octet-stream` | `application/octet-stream` |
+| Body | 「来自文件」→ 那个 `.fit` | 「来自文件」→ 那个 `.gpx` |
+
+**「传哪个」：全传，一个不落。** 导出目录里的每一对文件是**一次独立活动**
+（文件名带的是各自开始时间，体积也各不相同），少传一对就少一次锻炼。
+
+> ⚠️ `File To Send` **只能填一个具体路径**，指不到一个目录。所以要先列目录再循环：
+
+**Tasker 的动作顺序**（每 30 分钟触发一次就够）：
+
+1. **List Files** —— Dir `Download/Gadgetbridge`，Match `*.gpx`，Sort `Date`
+   → `%files`（`%files1…%filesN`）
+2. **For** `%f` in `%files`
+3. **HTTP Request** —— URL `/upload/gpx`，`File To Send` =
+   `Download/Gadgetbridge/%f`
+4. **File Move** —— 同一个路径 → `Download/Gadgetbridge/sent/%f`
+5. **End For**
+6. 1–5 整段复制一份，`*.gpx` → `*.fit`，URL → `/upload/fit`
+
+> ⚠️ **第 4 步别省。** 第一次跑会把目录里已有的文件全传一遍 —— 这正是想要的，
+> 历史锻炼一次补齐；但传完不挪走的话，之后每轮都会把几百个文件重传一遍。
+> 挪进 `sent/` 子目录后 `List Files`（只列当前目录）就看不见它们了。
+>
+> ⚠️ **别删**，用「移动」。手机上的原始文件留着，以后要补哪次还有源。
+>
+> ⚠️ **「移动」放在 HTTP Request 之后**，并且 HTTP 返回非 2xx 时不要移动 ——
+> 否则一次断网就把这批锻炼永久跳过（中继没收到、手机也移走了）。
+
+> ✅ **重复传没关系。** 中继按内容 sha1 存成 `<sha1>.fit`，同一份传十次也只有
+> 一份；手机上**不需要记**「上次传到哪了」。这比维护一个 `%lastfile` 变量可靠
+> 得多（那个变量一旦丢了就会静默漏掉一批锻炼）。
+>
+> ✅ **Android 11+ 要授予「所有文件访问」权限**，Tasker 才读得到 `Download/`
+> 下的文件；否则 `List Files` 返回空，任务静默什么都不传。
+
+**验证**（笔记本上，不依赖手机）：
+
+```bash
+python scripts/collect_media.py     # 期望看到 gpx/fit 各有 N 个、N new
+python -c "import sqlite3;c=sqlite3.connect('state/events.db');print(c.execute(\"select source,count(*) from events where metric='watch_track' group by source\").fetchall())"
+```
+
+第一行还是 `0 on relay` 就说明手机没传上去 —— 先查中继日志里有没有
+`POST /upload/gpx`（Cloudflare Tunnel 后面），再看 OpenTasker 的响应码。
+
 ---
 
 ## 5. 迁移顺序（别搞反）

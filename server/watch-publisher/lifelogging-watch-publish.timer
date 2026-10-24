@@ -1,0 +1,25 @@
+# 每 15 分钟跑一次 publish_watch.py。
+#
+# **为什么是轮询而不是「锻炼结束后定点」**
+#
+#   手机什么时候把文件传上来是不确定的（Tasker 每 30 分钟扫一次目录，
+#   而且文件还可能晚到几小时）。脚本本身幂等：按天算内容摘要，和上次发布的
+#   一样就跳过，所以高频轮询的代价只是一次目录扫描（几十个文件）。
+#
+# 为什么不是每天一次：笔记本关机时，站点地图就是靠这份文档才有虚线。
+# 一天一次的延迟配上「今天跑完的马上去看地图」，体验等于坏掉。
+#
+# Persistent=true：服务器重启过的话，欠的那一次开机后补上。
+
+[Unit]
+Description=LifeLogging - publish watch tracks every 15 minutes
+Requires=lifelogging-watch-publish.service
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=15min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

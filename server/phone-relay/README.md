@@ -256,6 +256,44 @@ HTTP Request 配置：Method `POST`，Headers `X-API-Key: <key>`、
 > 没有解锁事件，「切到浏览器 → 锁屏放口袋 → 两小时后再解锁」会把两小时
 > 算成浏览器。详见 `docs/扩展路线图.md` 手机那一节。
 
+### 锻炼轨迹：上传 GPX / FIT
+
+手表每次锻炼结束后，Gadgetbridge 会导出**一对同名文件**（扩展名不同）：
+
+```
+Download/Gadgetbridge/2026-10-23T08_54_12+08_00-running.fit
+Download/Gadgetbridge/2026-10-23T08_54_12+08_00-running.gpx
+```
+
+**两个都传。** 它们最后都变成 `domain=fitness / metric=watch_track`，
+站点地图上画成虚线；入库时按**文件名（去掉扩展名）**认出这是同一次活动，
+只画一条路线、时长只算一次。FIT 的点更密，GPX 能直接打开看，
+各有各的用处，所以两份都留在 events.db 里。
+
+| 端点 | 用途 |
+|---|---|
+| `POST /upload/gpx` / `POST /upload/fit` | 上传（裸 body 或 multipart 都认） |
+| `GET /files/gpx` / `GET /files/fit` | 列表，`{"files":[{"name","bytes","updated"}]}` |
+| `GET /files/gpx/<sha1>.gpx` | 下载 |
+
+跟 `gadgetbridge.db` 那张表的区别：
+
+- **存成 `<sha1>.<ext>`**：文件名由内容决定，同一份文件重复上传不会产生副本，
+  所以手机上不需要记「传到哪了」—— 列一遍导出目录、挨个传、传完挪进 `sent/`
+  即可（Tasker 的具体动作见 `docs/手机自动化-OpenTasker.md` §4.2）。
+  目录里每个文件都是**一次独立活动**，不是同一次锻炼的副本，**不能只传最新的**。
+- **有魔数校验**：GPX 必须以 `<?xml` / `<gpx` 开头，FIT 的第 9–12 字节必须是
+  `.FIT`。传错端点会被 400 拒掉，不会安静地存下一份打不开的文件。
+
+笔记本侧三步（都在 `run_live.ps1` 的重采集里）：
+
+```
+collect_media.py → state/gpx|fit → import_gpx.py / import_fit.py → events.db
+```
+
+`import_fit.py` 需要 `fitdecode`（`.venv\Scripts\pip.exe install fitdecode`），
+没装时只跳过 FIT，GPX 那条照常跑。
+
 ### 每日提问：问题下发 + 答案回收
 
 笔记本生成的「每日提问」需要有地方放，好让手机在笔记本睡着时也能取 ——
