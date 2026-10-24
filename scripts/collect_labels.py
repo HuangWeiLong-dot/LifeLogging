@@ -49,6 +49,26 @@ OUT = STATE / "labels.jsonl"
 #    被 score_of 挡掉 —— 两种失败都**不会**产出错标签，这是有意的。
 RATED_DIMS = ("心情", "体力", "睡眠")
 
+# ⚠️ 个别题目的「归属日」需要纠正时放这里（qid → 正确的那一天）。
+#
+#    为什么需要有这个文件：答案是按 `question_day`（题号前缀里的日期）归类的，
+#    而题号是「**生成题目的那天**」。2026-10-23 00:01 按了一次 /收尾，题是
+#    给 10-23 生成的，人答的却是刚过完的 10-22 —— 那 10 条答案于是被记在
+#    10-23 名下。这不是 bug 报告，是**已经发生的历史数据**：改代码不能让
+#    旧数据自己走回去。
+#
+#    所以这里做一次显式纠正：qid → 真实归属日。文件是 `state/label-day-fixups.json`，
+#    不在代码里硬编码日期 —— 这是数据修正，不是逻辑。
+FIXUPS = STATE / "label-day-fixups.json"
+
+
+def load_fixups() -> dict[str, str]:
+    try:
+        raw = json.loads(FIXUPS.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+
 # 答案形如「4 不错」或「4分，下午开会」——取开头的数字。
 # ⚠️ 不匹配「十分」「4.5」这种：它们不是这套量表产出的，宁可当没有。
 _SCORE_RE = re.compile(r"^\s*([1-5])(?=\s|$|[分。，,、:：])")
@@ -59,7 +79,7 @@ def score_of(answer: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def extract(payload: dict) -> list[dict]:
+def extract(payload: dict, fixups: dict[str, str] | None = None) -> list[dict]:
     """从一个 `qa-<day>.json` 里抽出可用的标签。
 
     ⚠️ 纯函数（不碰文件、不碰网络），smoke_test 直接喂假 payload 测。
@@ -76,7 +96,7 @@ def extract(payload: dict) -> list[dict]:
             # 自由文本 / 没按格式答 —— 不猜。
             continue
         qid = str(x.get("id") or "")
-        day = str(x.get("question_day") or qid[:10])
+        day = (fixups or {}).get(qid) or str(x.get("question_day") or qid[:10])
         if not qid or not day:
             continue
         out.append({
@@ -103,6 +123,7 @@ def collect() -> list[dict]:
     按 ts 挑一条纯粹是碰运气，而直接读 labels.jsonl 的东西会看到两个互相
     矛盾的值。取 ts 最大的那条：晚答的更接近事实。
     """
+    fixups = load_fixups()
     by_qid: dict[str, dict] = {}
     for p in sorted(STATE.glob("qa-*.json")):
         try:
@@ -113,7 +134,7 @@ def collect() -> list[dict]:
             continue
         if not isinstance(payload, dict):
             continue
-        for row in extract(payload):
+        for row in extract(payload, fixups):
             old = by_qid.get(row["qid"])
             if old is None or row["ts_utc"] >= old["ts_utc"]:
                 by_qid[row["qid"]] = row

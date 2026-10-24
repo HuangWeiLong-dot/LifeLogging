@@ -82,6 +82,9 @@ from common import (  # noqa: E402
 CFG = load_config()
 STATE = Path(CFG["state_dir"])
 OUT = STATE / "labels-llm.jsonl"
+# 和 collect_labels 共用同一份「归属日纠正表」—— 两个脚本必须看到同一个日期，
+# 否则同一道题的分数和证据会落在不同的天。
+FIXUPS = STATE / "label-day-fixups.json"
 
 # 提示词一改就 +1。已经处理过的行如果版本号对不上，会重做 ——
 # 否则新旧两种输出会静默混在同一个文件里，而字段缺失是看不出来的。
@@ -187,6 +190,14 @@ def _norm(s: str) -> str:
     return " ".join(str(s or "").split())
 
 
+def load_fixups() -> dict[str, str]:
+    try:
+        raw = json.loads(FIXUPS.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+
+
 def _qa_payload(path: Path) -> dict | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -230,6 +241,9 @@ def day_context(day: str) -> list[str]:
     return lines[:12]
 
 
+_FIXUPS: dict[str, str] = {}
+
+
 def pending_items() -> dict[str, dict[str, dict]]:
     """`{day: {dim: item}}` —— 每一个**答过的**维度都进来。
 
@@ -255,7 +269,8 @@ def pending_items() -> dict[str, dict[str, dict]]:
         note = str(x.get("note") or "").strip()
         if len(_norm(answer)) < 1 and not note:
             continue
-        day = str(x.get("question_day") or str(x.get("id"))[:10])
+        day = (_FIXUPS.get(str(x.get("id") or ""))
+               or str(x.get("question_day") or str(x.get("id"))[:10]))
         out.setdefault(day, {})[dim] = x
     return out
 
@@ -347,6 +362,8 @@ def main() -> int:
                     help="只处理最近 N 天（0 = 全部）")
     args = ap.parse_args()
 
+    global _FIXUPS
+    _FIXUPS = load_fixups()
     pending = pending_items()
     if args.max_days > 0:
         keep = sorted(pending)[-args.max_days:]
@@ -358,8 +375,10 @@ def main() -> int:
     done = {} if args.rebuild else load_done()
     todo: dict[str, dict[str, dict]] = {}
     for day, items in pending.items():
+        # ⚠️ 缓存的行必须**同一天**才算复用。改了归属日之后，qid 没变但
+        #    day 变了 —— 只看 qid 的话，纠正过的题会带着旧日期一直被复用。
         fresh = {dim: x for dim, x in items.items()
-                 if str(x.get("id")) not in done}
+                 if (done.get(str(x.get("id"))) or {}).get("day") != day}
         if fresh:
             todo[day] = fresh
 
@@ -386,7 +405,12 @@ def main() -> int:
         "__SCALES__",
         "\n".join(f"- {d}：{s}" for d, s in SCALES.items()))
 
-    rows: list[dict] = list(done.values())
+    # ⚠️ 只保留**没有被重做**的缓存行。改了归属日之后，同一个 qid 会带着
+    #    新日期重新生成一条；旧的（日期错的）那条必须丢掉，否则文件里会同时
+    #    存在「qid 相同、day 不同」的两条，下游按 day 分组时就多出一个不该
+    #    存在的日子。
+    redone: set[str] = set()
+    rows: list[dict] = []
     failed = 0
     for day in sorted(todo):
         items = todo[day]
@@ -458,7 +482,9 @@ def main() -> int:
                               "quote": quote[:60]})
 
             if score is None and not evidence:
+                redone.add(str(x.get("id") or ""))
                 continue                   # 什么都没有，不必占一行
+            redone.add(str(x.get("id") or ""))
             rows.append({
                 "day": day,
                 "dim": dim,
@@ -479,6 +505,8 @@ def main() -> int:
 
         print(f"  OK  {day}: {n_score}/{len(items)} 维有分，"
               f"{n_ev} 条有证据，{n_link} 条关联")
+
+    rows = [r for r in done.values() if str(r.get("qid")) not in redone] + rows
 
     by_slot: dict[tuple[str, str], dict] = {}
     for r in rows:
