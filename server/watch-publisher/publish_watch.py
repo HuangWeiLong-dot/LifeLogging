@@ -145,8 +145,12 @@ def build_doc(day: str, events: list[dict]) -> tuple[dict, str]:
         "generated_at": datetime.now(TZ).isoformat(timespec="seconds"),
         "events": events,
     }
-    content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    digest = hashlib.sha1(content.encode("utf-8")).hexdigest()
+    # ⚠️ 摘要**不能**把 generated_at 算进去：它每次运行都变，那样状态文件永远对不上，
+    #    「内容没变就跳过」会退化成每 15 分钟往 R2 重写一遍（一天 96 次）。
+    #    只对真正的内容 —— 版本、日期、轨迹点 —— 取哈希。
+    key = json.dumps({"v": payload["v"], "day": day, "events": events},
+                     ensure_ascii=False, separators=(",", ":"))
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()
     return payload, digest
 
 
@@ -170,10 +174,9 @@ def main() -> int:
     for day in sorted(by_day):
         if day < since:
             continue
-        _, digest = build_doc(day, by_day[day])
+        payload, digest = build_doc(day, by_day[day])
         if state.get(day) == digest:
             continue
-        payload, _ = build_doc(day, by_day[day])
         docs.append({
             "kind": "watch",
             "id": day,
