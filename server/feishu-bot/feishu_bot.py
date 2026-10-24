@@ -1396,7 +1396,11 @@ def advance(open_id: str, ack: str = "") -> None:
     with _send_lock:
         fresh = load_state()
         if fresh.get("awaiting"):
-            return                     # 另一个发送方刚刚抢先了
+            # 另一个发送方刚刚抢先了。**要留痕** —— 这条分支曾经在
+            # 「答完不清 awaiting」的 bug 里静默吞掉整条对话，而日志上一片空白。
+            print(f"[advance] skipped: still awaiting {fresh.get('awaiting')!r}",
+                  file=sys.stderr)
+            return
         # ⚠️ **先发消息，再落状态。**
         #    反过来写的话，发送失败会留下一个「正在等一题、但用户从没见过它」
         #    的状态，于是他下一条消息会被当成那道看不见的题的答案。
@@ -1867,6 +1871,16 @@ def handle_text(open_id: str, text: str) -> None:
         if note:
             stored += f"\n{note}"
     print(f"[answer] {awaiting} = {value!r} note={note!r} -> relay {res}")
+
+    # ⚠️ **答完立刻清 awaiting。**
+    #
+    #    这一行是血的教训：`advance()` 里加了「有人正在等答案就别发」的闸门
+    #    （防两个发送方连发同一题），而这里没清 awaiting 的话，那个闸门会把
+    #    **刚答完的这一题**当成「还在等答案」，于是下一题永远发不出去 ——
+    #    表现是「答完之后机器人一声不吭」。实测踩到过一次。
+    _st = load_state()
+    _st["awaiting"] = None
+    save_state(_st)
 
     # ── 补一句「为什么」──
     #

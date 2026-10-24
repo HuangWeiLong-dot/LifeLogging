@@ -2919,6 +2919,55 @@ check("feishu: /收尾 立刻出收尾题（不等 21:30），答完会明说",
       t_end_day_command)
 
 
+def t_answer_advances():
+    """答完一题之后，**下一题必须发出去**。
+
+    ⚠️ 这是一条真实的线上事故的回归：
+       `advance()` 里加了「有人在等答案就别发」的闸门（防两个发送方连发
+       同一题），但答完的那一刻 `awaiting` 还指着刚答过的那道 —— 闸门把
+       「刚答完」当成了「还在等」，于是下一题永远发不出去。
+       表现：你答完一句话，机器人一声不吭。答案存进去了，日志里也只有
+       `[answer]`，看不出任何异常。
+    """
+    root = Path(__file__).resolve().parent.parent
+    sys.path.insert(0, str(root / "server" / "feishu-bot"))
+    import feishu_bot as fb
+
+    calls: list = []
+    a = {"id": "a", "kind": "routine", "format": "text",
+         "source": "live", "day": "2026-10-24", "text": "Q1"}
+    b = {"id": "b", "kind": "routine", "format": "text",
+         "source": "live", "day": "2026-10-24", "text": "Q2"}
+    box = {"n": 0}
+
+    def pending():
+        box["n"] += 1
+        return [a] if box["n"] == 1 else [b]
+
+    fb.relay_pending = pending
+    fb.relay_answer = lambda qid, val, note: {}
+    fb.send_question = lambda oid, q, n, ack="": calls.append(("q", q["id"], ack))
+    fb.send_text = lambda oid, t: calls.append(("text", t))
+    fb.send_card = lambda oid, c: calls.append(("card", str(c)))
+    fb.pending_filtered = lambda st: pending()
+
+    st = fb.load_state()
+    st["awaiting"] = "a"
+    fb.save_state(st)
+
+    fb.handle_text("u1", "wrote some code today")
+
+    assert calls, "答完之后什么都不发 = 线上那个「一声不吭」"
+    kind, qid, ack = calls[0]
+    assert kind == "q" and qid == "b", calls
+    assert "saved" in ack, calls
+    assert fb.load_state().get("awaiting") == "b", "awaiting 要指向新的一题"
+
+
+check("feishu: 答完一题必须接着发下一题（不能一声不吭）",
+      t_answer_advances)
+
+
 def t_recap_command():
     """/复盘：强制重做一次复盘。
 
