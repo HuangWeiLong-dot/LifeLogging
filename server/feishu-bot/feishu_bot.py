@@ -456,7 +456,7 @@ def save_note(open_id: str, text: str) -> None:
         relay_note(text)
     except Exception as e:  # noqa: BLE001
         print(f"ERROR 记笔记失败：{type(e).__name__}: {e}", file=sys.stderr)
-        send_text(open_id, f"没存进去：{e}")
+        send_text(open_id, f"Could not save: {e}")
         return
     # 记下原文（截断）：排查「我说的话它怎么没存/怎么当成问句了」时，
     # 日志里得有那句话本身，光有「记下了」什么都查不出来。
@@ -652,6 +652,12 @@ def canonicalise(q: dict, raw: str) -> tuple[str | None, str, str]:
         "想补充就写在后面，比如「做了，花了两小时」—— 后半句会记成备注。")
 
 
+# 发题必须独占：`advance()`（worker 线程）和 `push_next_live()`（轮询线程）
+# 都会发题，两边都是「读 awaiting → 发 → 写 awaiting」。实测同一道题被连发
+# 两遍，就是中间那个窗口。见 advance() 里的注释。
+_send_lock = threading.Lock()
+
+
 # ── 渲染 ────────────────────────────────────────────────────────────
 #
 # 题分**四批**，每一批的来路、节奏、该在哪儿答都不一样。把它们混成一个
@@ -661,12 +667,12 @@ def canonicalise(q: dict, raw: str) -> tuple[str | None, str, str]:
 #
 # 所以计数**按批算**：每一批只有自己那几道题。
 _GROUP_LABEL = {
-    "commitment": "今日问责",
-    "summary": "今日收尾",
-    "live": "实时提问",
-    "morning": "今日一问",
-    "checkin": "轻量打卡",
-    "deviation": "偏离追问",
+    "commitment": "Accountability",
+    "summary": "Wrap-up",
+    "live": "Live",
+    "morning": "Daily",
+    "checkin": "Check-in",
+    "deviation": "Deviation",
 }
 # 飞书卡片 header 的可选色，见「卡片 JSON 结构」文档。
 _GROUP_COLOR = {
@@ -735,13 +741,14 @@ def _option_row(i: int, label: str) -> str:
 
 def _hint_of(q: dict) -> str:
     fmt = str(q.get("format") or "yes_no")
+    # ⚠️ 提示只回答一个问题：**回什么格式**。
+    #    原来写「直接回内容就行」——那等于没说，人不知道系统收的是什么。
     if fmt == "choice":
-        # ⚠️ 用 ASCII 连字符，不用 en dash —— 这条提示是给用户照抄的，
-        #    也有人在按它做断言（smoke_test 里就是找 "1-3"）。
-        return f"回 1-{len(q.get('options') or [])}，后面可以接着写自己的话"
+        # ASCII 连字符，不用 en dash：这条是让人照抄的，smoke_test 也在找 "1-3"
+        return f"reply: 1-{len(q.get('options') or [])}  (optional note after)"
     if fmt == "text":
-        return "直接回内容就行"
-    return "回「做了」或「没做」，后面可以接着写自己的话"
+        return "reply: any text"
+    return "reply: done / not done  (optional note after)"
 
 
 def question_card(q: dict, remaining: int, ack: str = "") -> dict:
@@ -789,7 +796,7 @@ def question_card(q: dict, remaining: int, ack: str = "") -> dict:
     if evidence and group != "live":
         elements.append(_note(evidence))
 
-    elements.append(_note(f"{_hint_of(q)}　·　还剩 {remaining} 题"))
+    elements.append(_note(f"{_hint_of(q)}　· {remaining} left"))
 
     return {
         "config": {"wide_screen_mode": True},
@@ -935,15 +942,37 @@ def reason_card(q: dict, score: str) -> dict:
         "config": {"wide_screen_mode": True},
         "header": {"template": "violet",
                    "title": {"tag": "plain_text",
-                             "content": f"{dim} · 补一句为什么"}},
+                             "content": f"{dim} · why?"}},
         "elements": [
             {"tag": "div",
              "text": {"tag": "lark_md",
-                      "content": f"**{score}** 收到。是什么让它变成这个分数的？\n\n"
-                                 "一件事、一个人、或者身体本身都行，一句话就够。"}},
+                      "content": f"**{score}** saved. What made it that?\n\n"
+                                 "One line is enough — an event, a person, "
+                                 "or just how your body felt."}},
             {"tag": "hr"},
-            _note("这句会作为证据存进标签。不想说就回「跳过」。"),
+            _note("This line becomes the evidence attached to the score. "
+                  "Reply “skip” to leave it blank."),
         ],
+    }
+
+
+def alert_card(alert: dict) -> dict:
+    """反射弧（没人问的时候它自己开口）的那张卡。
+
+    ⚠️ 它必须**长得和题目不一样**：题目在等你回答，提醒不需要回答。
+       所以用黄色 + 没有选项 + 底部一句「不用回」。
+    """
+    title = str(alert.get("title") or "Heads up")
+    lines = [str(x) for x in (alert.get("lines") or []) if str(x).strip()]
+    elements = [{"tag": "div",
+                 "text": {"tag": "lark_md", "content": "\n".join(lines)}}] if lines else []
+    elements.append({"tag": "hr"})
+    elements.append(_note("No reply needed."))
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "yellow",
+                   "title": {"tag": "plain_text", "content": title}},
+        "elements": elements,
     }
 
 
@@ -978,19 +1007,69 @@ def done_card(day_iso: str, ack: str = "") -> dict:
         elements.append({"tag": "div",
                          "text": {"tag": "lark_md", "content": "\n".join(rows)}})
         elements.append({"tag": "hr"})
-        elements.append(_note(f"{day_iso} 一共 {sum(buckets.values())} 条回答，"
-                              "已经进今天的复盘素材。"))
+        elements.append(_note(f"{sum(buckets.values())} answers recorded for "
+                              f"{day_iso}; they feed the recap."))
     else:
         elements.append({"tag": "div",
                          "text": {"tag": "lark_md",
-                                  "content": "今天没有待答的问题了。"}})
+                                  "content": "No pending questions."}})
 
     return {
         "config": {"wide_screen_mode": True},
         "header": {"template": "turquoise",
-                   "title": {"tag": "plain_text", "content": "今日问答 · 已完成"}},
+                   "title": {"tag": "plain_text", "content": "Questions · done"}},
         "elements": elements,
     }
+
+
+def help_card() -> dict:
+    """命令清单。做成卡片而不是一坨文本 —— 这是最常被翻的一条。"""
+    sections = [
+        ("Data", [
+            ("/today [YYYY-MM-DD]", "day at a glance"),
+            ("/phone", "phone usage"),
+            ("/where", "location and stays"),
+            ("/desktop", "current computer snapshot"),
+            ("/watch", "watch summary"),
+            ("/qa [YYYY-MM-DD]", "everything you answered"),
+        ]),
+        ("Ask", [("/ask <question>", "free-form question")]),
+        ("Flow", [
+            ("/pending", "send the next question"),
+            ("/skip", "skip the current one"),
+            ("/end", "start the wrap-up now"),
+            ("/recap", "regenerate today's recap"),
+            ("/checkin", "just the three numbers"),
+        ]),
+    ]
+    elements: list[dict] = []
+    for title, rows in sections:
+        body = "\n".join(f"**{cmd}**　{desc}" for cmd, desc in rows)
+        if elements:
+            elements.append({"tag": "hr"})
+        elements.append({"tag": "div",
+                         "text": {"tag": "lark_md",
+                                  "content": f"**{title}**\n{body}"}})
+    elements += [
+        {"tag": "hr"},
+        _note("Plain text becomes a note. Reply ? for the next question."),
+        _note("Use “note: …” to save a note while a question is waiting."),
+    ]
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "grey",
+                   "title": {"tag": "plain_text", "content": "Commands"}},
+        "elements": elements,
+    }
+
+
+def send_help(open_id: str) -> None:
+    try:
+        send_card(open_id, help_card())
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN 帮助卡片没发出去：{type(e).__name__}: {e}", file=sys.stderr)
+        send_text(open_id, "Commands: /today /phone /where /desktop /watch /qa "
+                           "/ask /pending /skip /end /recap /checkin /help")
 
 
 def render_question(q: dict, remaining: int) -> str:
@@ -1210,7 +1289,17 @@ def maybe_write_summary(open_id: str, day_iso: str,
 
     # 优先从 /qa 取**当天全部**回答（早晨批 + 实时批 + 收尾批），
     # 不再只挑 kind=summary。旧版中继没有 /qa 时退回原来的 summary-only。
-    qa = live.relay_qa(qa_day, RELAY_BASE, RELAY_API_KEY)
+    # ⚠️ 答案落在**作答那天**，而复盘看的是**被回顾那天**。凌晨收尾时两者
+    #    不是同一天（10-23 的复盘在 10-24 00:30 答）。不知道答案具体落在哪边，
+    #    所以两天都取，按 qid 合并、新的覆盖旧的 —— 比猜哪一天稳。
+    merged: dict[str, dict] = {}
+    for d in {qa_day, day_iso}:
+        for x in (live.relay_qa(d, RELAY_BASE, RELAY_API_KEY) or []):
+            qid = str(x.get("id") or "")
+            old_row = merged.get(qid)
+            if old_row is None or str(x.get("ts_utc") or "") >= str(old_row.get("ts_utc") or ""):
+                merged[qid] = x
+    qa = list(merged.values())
     if not qa:
         state = load_state()
         asked = state.get("asked") if isinstance(state.get("asked"), dict) else {}
@@ -1284,7 +1373,7 @@ def advance(open_id: str, ack: str = "") -> None:
             print(f"WARN 收尾卡没发出去，退回纯文本：{type(e).__name__}: {e}",
                   file=sys.stderr)
             send_text(open_id, (f"{ack}\n\n" if ack else "")
-                      + "今天没有待答的问题了。")
+                      + "No pending questions.")
         return
 
     q = questions[0]
@@ -1296,25 +1385,34 @@ def advance(open_id: str, ack: str = "") -> None:
     group = _group_of(q)
     remaining = sum(1 for x in questions if _group_of(x) == group)
 
-    # ⚠️ **先发消息，再落状态。**
-    #    反过来写的话，发送失败会留下一个「正在等一题、但用户从没见过它」的状态，
-    #    于是他下一条消息会被当成那道看不见的题的答案 —— 而且他还不知道为什么。
-    #    这个顺序下最坏只是「用户看到了题、状态没存上」，他下次说话时重新走一遍
-    #    advance()，能自愈。
-    send_question(open_id, q, remaining, ack=ack)
+    # ⚠️ **发题必须独占。**
+    #
+    #    实测事故：同一道「07:02–08:02」连着发了两遍。原因是这里和
+    #    `push_next_live()` 是两个线程，两边都是「读 awaiting 为空 → 发 →
+    #    写 awaiting」。中间那个窗口足够宽（发一条卡片要一次 HTTP），
+    #    于是两边各发了一次。
+    #
+    #    锁住之后，第二个进来的会在读到 awaiting 已非空时直接退出。
+    with _send_lock:
+        fresh = load_state()
+        if fresh.get("awaiting"):
+            return                     # 另一个发送方刚刚抢先了
+        # ⚠️ **先发消息，再落状态。**
+        #    反过来写的话，发送失败会留下一个「正在等一题、但用户从没见过它」
+        #    的状态，于是他下一条消息会被当成那道看不见的题的答案。
+        send_question(open_id, q, remaining, ack=ack)
 
-    state["awaiting"] = qid
-    sent = state.get("sent")
-    if not isinstance(sent, dict):
-        sent = {}
-    sent[qid] = datetime.now(TZ).isoformat(timespec="seconds")
-    state["sent"] = sent
-    # 记下题干 —— 收尾时要用它和答案配成问答对。中继那边只存答案（`qid|值|备注`），
-    # 题目原文在答完之后就不在待答列表里了。
-    asked = _asked_map(state, datetime.now(TZ).date().isoformat())
-    asked[qid] = {"text": str(q.get("text") or ""),
-                  "kind": str(q.get("kind") or "")}
-    save_state(state)
+        fresh["awaiting"] = qid
+        sent = fresh.get("sent")
+        if not isinstance(sent, dict):
+            sent = {}
+        sent[qid] = datetime.now(TZ).isoformat(timespec="seconds")
+        fresh["sent"] = sent
+        # 记下题干 —— 收尾时要用它和答案配成问答对。
+        asked = _asked_map(fresh, datetime.now(TZ).date().isoformat())
+        asked[qid] = {"text": str(q.get("text") or ""),
+                      "kind": str(q.get("kind") or "")}
+        save_state(fresh)
 
 
 # 「凌晨几点之前，收尾算前一天」。
@@ -1383,17 +1481,17 @@ def handle_checkin(open_id: str) -> None:
     """
     lq = _live_questions()
     if lq is None:
-        send_text(open_id, "打卡不可用：live_questions 加载失败。")
+        send_text(open_id, "Check-in unavailable: live_questions failed to load.")
         return
     day_iso = target_day_iso(datetime.now(TZ))
     try:
         qs = lq.force_checkin(day_iso, RELAY_BASE, RELAY_API_KEY)
     except Exception as e:  # noqa: BLE001
         print(f"ERROR 打卡题生成失败：{type(e).__name__}: {e}", file=sys.stderr)
-        send_text(open_id, f"打卡题没生成成：{type(e).__name__}: {e}")
+        send_text(open_id, f"Check-in questions failed: {type(e).__name__}: {e}")
         return
     if not qs:
-        send_text(open_id, f"{day_iso} 的打卡已经答完了。")
+        send_text(open_id, f"Check-in for {day_iso} is already done.")
         return
 
     q = qs[0]
@@ -1585,15 +1683,15 @@ def _handle_reason(open_id: str, reason_for: dict, text: str) -> None:
             relay_answer(qid, value, text[:500])
         except Exception as e:  # noqa: BLE001
             # ⚠️ 不清 reason_for —— 让这句话还在，用户重发一次就能补上。
-            send_text(open_id, f"这半句没存进去：{e}\n再发一次就行。")
+            send_text(open_id, f"Could not save that line: {e}\nSend it again.")
             return
         print(f"[reason] {qid} {dim} = {text[:60]!r}")
 
     state = load_state()
     state["reason_for"] = None
     save_state(state)
-    advance(open_id, ack=(f"✓ 跳过（{dim} 没有原因）" if skip
-                          else f"✓ 已补上 {dim} 的原因"))
+    advance(open_id, ack=(f"✓ skipped ({dim} has no reason)"
+                          if skip else f"✓ reason saved for {dim}"))
 
 
 def handle_text(open_id: str, text: str) -> None:
@@ -1606,25 +1704,8 @@ def handle_text(open_id: str, text: str) -> None:
     cmd = parts[0].lower() if parts else ""
     arg = parts[1].strip() if len(parts) > 1 else ""
 
-    if stripped in ("/help", "帮助", "/?") or cmd == "/help":
-        send_text(open_id,
-                  "命令（只有斜杠命令会查数据）：\n"
-                  "  /today [YYYY-MM-DD]    当天总览\n"
-                  "  /phone [YYYY-MM-DD]    手机使用\n"
-                  "  /where [YYYY-MM-DD]    位置 / 停留\n"
-                  "  /desktop               电脑当前快照\n"
-                  "  /watch                 手表汇总\n"
-                  "  /qa [YYYY-MM-DD]       当天问答\n"
-                  "  /ask <问题>            自由提问\n"
-                  "  /pending               下一道题\n"
-                  "  /skip                  跳过当前题\n"
-                  "  /end                   开始收尾\n"
-                  "  /recap                 重新生成今日复盘\n"
-                  "  /help                  这份列表\n"
-                  "\n"
-                  "直接发文字 = 记一笔，不会触发查数据。\n"
-                  "正有题在等答案时，普通文字会被当成答案；只想记一笔请用「记：」。\n"
-                  "回「?」= 下一道题。")
+    if stripped in ("/help", "/?", "帮助") or cmd == "/help":
+        send_help(open_id)
         return
 
     if cmd in END_DAY_COMMANDS:
@@ -1637,7 +1718,10 @@ def handle_text(open_id: str, text: str) -> None:
         #    见 2026-10-17 那次 DEEPSEEK_API_KEY 缺失）。而**答完的题不会再
         #    被问一遍**，没有这个命令就永远补不回来 —— 数据和回答都在，只差
         #    那一段总结。
-        if not maybe_write_summary(open_id, datetime.now(TZ).date().isoformat(),
+        # ⚠️ 用 `target_day_iso`：05:00 之前的 /recap 是在给**前一天**重做复盘。
+        #    直接用 now.date() 的话，凌晨按一下就会生成一份「今天」的复盘 ——
+        #    而今天才刚开始，内容全是前一天串进来的。
+        if not maybe_write_summary(open_id, target_day_iso(datetime.now(TZ)),
                                    force=True):
             send_text(open_id, "今天还没有可复盘的记录。")
         return
@@ -1666,7 +1750,7 @@ def handle_text(open_id: str, text: str) -> None:
         state["skipped"] = skipped
         state["awaiting"] = None
         save_state(state)
-        advance(open_id, ack="已跳过，今天不再问这题。")
+        advance(open_id, ack="Skipped — not asked again today.")
         return
 
     # ── 数据命令 ──
@@ -1688,7 +1772,7 @@ def handle_text(open_id: str, text: str) -> None:
     forced_note = split_note_prefix(stripped)
     if forced_note is not None:
         if not forced_note:
-            send_text(open_id, "记什么？在「记：」后面写内容。")
+            send_text(open_id, "Note what? Put the text after “note:”.")
             return
         save_note(open_id, forced_note)
         return
@@ -1768,17 +1852,18 @@ def handle_text(open_id: str, text: str) -> None:
     try:
         res = relay_answer(str(awaiting), value, note)
     except Exception as e:  # noqa: BLE001
-        send_text(open_id, f"答案没存进去：{e}")
+        send_text(open_id, f"Answer not saved: {e}")
         return
 
     # 回显「记下了什么」：有备注的时候尤其要回显，否则用户不知道
     # 自己写的那半句是被收下了还是被丢了。
     if fmt == "text":
-        stored = "✓ 已记下"
+        stored = "✓ saved"
         if dup_of:
-            stored += f" · 这段在《{_brief(dup_of, 18)}》里也答过，只算一次"
+            stored += (f" · same text as “{_brief(dup_of, 18)}”, "
+                       "counted once")
     else:
-        stored = f"✓ 已记下 · {value}"
+        stored = f"✓ saved · {value}"
         if note:
             stored += f"\n{note}"
     print(f"[answer] {awaiting} = {value!r} note={note!r} -> relay {res}")
@@ -1955,15 +2040,19 @@ def push_next_live(open_id: str) -> bool:
         qid = str(q.get("id") or "")
         if not qid or qid in sent:
             continue
-        send_question(open_id, q,
-                      sum(1 for x in live_qs if _group_of(x) == _group_of(q)))
-        state["awaiting"] = qid
-        sent[qid] = datetime.now(TZ).isoformat(timespec="seconds")
-        state["sent"] = sent
-        asked = _asked_map(state, today)
-        asked[qid] = {"text": str(q.get("text") or ""),
-                      "kind": str(q.get("kind") or "")}
-        save_state(state)
+        # 和 advance() 同一把锁：两边都想发的时候，只有一个能进去。
+        with _send_lock:
+            fresh = load_state()
+            if fresh.get("awaiting"):
+                return False           # 已经有人在等答案了
+            send_question(open_id, q,
+                          sum(1 for x in live_qs if _group_of(x) == _group_of(q)))
+            fresh["awaiting"] = qid
+            fresh["sent"] = {**sent, qid: datetime.now(TZ).isoformat(timespec="seconds")}
+            asked = _asked_map(fresh, today)
+            asked[qid] = {"text": str(q.get("text") or ""),
+                          "kind": str(q.get("kind") or "")}
+            save_state(fresh)
         print(f"[live-push] {qid}")
         return True
     return False
@@ -2110,7 +2199,10 @@ def reflex_tick() -> None:
     for a in alerts:
         alert_id = f"{a['key']}-{now:%Y%m%dT%H%M%S}"
         try:
-            send_text(OWNER_OPEN_ID, a["text"])
+            try:
+                send_card(OWNER_OPEN_ID, alert_card(a))
+            except Exception:  # noqa: BLE001
+                send_text(OWNER_OPEN_ID, a.get("text") or "")
         except Exception as e:  # noqa: BLE001
             # 发失败**不记已发** —— 下一轮还会再试。
             print(f"[reflex] 发送失败（{a['key']}）：{type(e).__name__}: {e}",

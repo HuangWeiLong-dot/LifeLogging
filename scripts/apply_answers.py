@@ -58,25 +58,37 @@ def _norm(s: str) -> str:
     return re.sub(r"[\s。．.,，;；:：!？?!]+", " ", s).strip()
 
 
-def answered_done(q: dict, value: str) -> bool:
-    """这条答案算不算「做到了」—— 决定要不要把任务勾掉。
+def answer_action(q: dict, value: str) -> str:
+    """这条答案对任务做什么：``"done"`` / ``"drop"`` / ``""``。
 
     三种形态各有各的判法：
       yes_no  看是不是 yes
-      choice  看选中的**那个选项**有没有被标成 done（生成问题那一步标好的）
+      choice  看选中的**那个选项**标的是 done 还是 drop
       text    永远不算 —— 文字题压根没有「完成」这个概念，它的 ref 必须是空的
+
+    ⚠️ **`drop` 是新增的第三种结果，不是 `done` 的变体。** 一条任务「不做了」
+       和「做完了」在任务表里是两件不同的事：前者不该被勾成完成，也不该
+       继续挂在 Open 上等明天再问一遍。之前只有完成/没完成两种状态，
+       于是「不做了」只能落到「没做」—— 第二天照问，问到你烦。
 
     ⚠️ 默认当 yes_no：问题文件里没有 format 字段的（比如老数据）仍然是二值。
     """
     fmt = str(q.get("format") or "yes_no").strip().lower()
     if fmt == "text":
-        return False
+        return ""
     if fmt == "choice":
         for o in (q.get("options") or []):
             if isinstance(o, dict) and str(o.get("label") or "") == value:
-                return bool(o.get("done"))
-        return False          # 选中的选项对不上任何一条 —— 别猜，就当没完成
-    return value.strip().lower() == "yes"
+                if o.get("drop"):
+                    return "drop"
+                return "done" if o.get("done") else ""
+        return ""             # 选中的选项对不上任何一条 —— 别猜
+    return "done" if value.strip().lower() == "yes" else ""
+
+
+def answered_done(q: dict, value: str) -> bool:
+    """兼容旧调用点：只关心「做到了没有」。"""
+    return answer_action(q, value) == "done"
 
 
 def find_task(open_items: list[str], ref: str) -> str | None:
@@ -205,43 +217,72 @@ def read_questions(day: Day) -> list[dict]:
     return list(by_id.values())
 
 
-def mark_done(done: list[tuple[str, str]]) -> None:
-    """把 Open 里的条目挪到 Done 并勾上。**行级改写**，其余内容原样保留。
+def mark_tasks(done: list[tuple[str, str]],
+               dropped: list[tuple[str, str]] | None = None) -> None:
+    """把 Open 里的条目挪走。**行级改写**，其余内容原样保留。
 
-    不重建整个文件：Tasks.md 里有用户手写的东西（Done 段的注释、
-    Rolled up 那段 Dataview），全量重写很容易把没预料到的东西冲掉。
+    完成的进 ``## Done`` 并勾上；放弃的进 ``## Dropped``，**不勾**。
+
+    ⚠️ 放弃的任务不能删掉，要留痕。删了以后你翻不到「这条我什么时候决定
+       不做的」，而那条决定往往比完成更有信息量（比如「不需要做」「买了
+       正版」这种）。留在一个单独小节里，既不在 Open 里被反复追问，
+       也没有假装完成。
     """
+    dropped = dropped or []
     lines = TASKS.read_text(encoding="utf-8").splitlines()
     stamp = datetime.now(TZ).strftime("%Y-%m-%d")
-    targets = {_norm(t) for t, _ in done}
+    targets = {_norm(t) for t, _ in done} | {_norm(t) for t, _ in dropped}
 
     out: list[str] = []
     done_at: int | None = None
+    dropped_at: int | None = None
     for line in lines:
         s = line.strip()
         if s.startswith("## Done"):
             done_at = len(out)
+        if s.startswith("## Dropped"):
+            dropped_at = len(out)
         if s.startswith("- [ ]") and _norm(s) in targets:
             continue                       # 从 Open 里摘掉
         out.append(line)
 
-    entries = []
-    for text, note in done:
-        # 用 HTML 注释记来源：Obsidian 里不显示，但翻原文时看得出是手机确认的
-        entries.append(f"- [x] {text}  <!-- {stamp} 手机确认"
-                       + (f" · {note}" if note else "") + " -->")
-
-    if done_at is None:
-        out += ["", "## Done", ""] + entries + [""]
-    else:
-        at = done_at + 1
+    def _insert_at(at: int, entries: list[str]) -> None:
+        i = at + 1
         # 跳过空行和那句「完成的直接移到这里」的注释
-        while at < len(out) and (not out[at].strip() or out[at].strip().startswith("<!--")):
-            at += 1
-        # 尾随一个空行，否则下一个小节标题会紧贴着任务行
-        out[at:at] = entries + [""]
+        while i < len(out) and (not out[i].strip() or out[i].strip().startswith("<!--")):
+            i += 1
+        out[i:i] = entries + [""]
+
+    done_entries = [f"- [x] {text}  <!-- {stamp} 手机确认"
+                    + (f" · {note}" if note else "") + " -->"
+                    for text, note in done]
+    drop_entries = [f"- [-] {text}  <!-- {stamp} 手机确认放弃"
+                    + (f" · {note}" if note else "") + " -->"
+                    for text, note in dropped]
+
+    # ⚠️ 两个小节各自可能不存在，插入又会让后面的下标整体位移，所以：
+    #    先补上缺的小节，再**按位置从后往前**插内容。
+    if dropped_at is None and drop_entries:
+        out.extend(["", "## Dropped", ""])
+        dropped_at = len(out) - 2          # 指向 "## Dropped" 那一行
+    if done_at is None and done_entries:
+        out.extend(["", "## Done", ""])
+        done_at = len(out) - 2
+
+    jobs: list[tuple[int, list[str]]] = []
+    if drop_entries and dropped_at is not None:
+        jobs.append((dropped_at, drop_entries))
+    if done_entries and done_at is not None:
+        jobs.append((done_at, done_entries))
+    for at, entries in sorted(jobs, key=lambda x: x[0], reverse=True):
+        _insert_at(at, entries)
 
     TASKS.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
+
+
+def mark_done(done: list[tuple[str, str]]) -> None:
+    """兼容旧调用点。"""
+    mark_tasks(done)
 
 
 def main() -> None:
@@ -269,21 +310,23 @@ def main() -> None:
     open_items = read_open_items()
     done_items = read_done_items()
     to_close: list[tuple[str, str]] = []
+    to_drop: list[tuple[str, str]] = []
     unmatched: list[str] = []
 
     for qid, (val, note, _ts) in sorted(answers.items(), key=lambda kv: kv[1][2]):
         q = by_id.get(qid) or {}
         text = q.get("text") or f"(题号 {qid} 不在本地问题文件里 —— 可能是别的机器生成的)"
-        mark = {"yes": "做了", "no": "没做"}.get(val.strip().lower(), val)
-        print(f"  [{mark}] {text}" + (f"\n         备注：{note}" if note else ""))
-        if not answered_done(q, val):
+        mark = {"yes": "done", "no": "not done"}.get(val.strip().lower(), val)
+        print(f"  [{mark}] {text}" + (f"\n         note: {note}" if note else ""))
+        action = answer_action(q, val)
+        if not action:
             continue
         ref = q.get("ref") or ""
         if not ref:
             continue
         hit = find_task(open_items, ref)
         if hit:
-            to_close.append((hit, note))
+            (to_close if action == "done" else to_drop).append((hit, note))
         elif find_task(done_items, ref):
             # 已经勾过了（比如这个脚本今天已经跑过一次）。不是问题，别报警，
             # 否则每天第二次运行都会刷一条吓人的「对不上」。
@@ -292,20 +335,23 @@ def main() -> None:
             unmatched.append(ref)
 
     for ref in unmatched:
-        print(f"  ⚠️  答了「做了」但对不上任务表里任何一条：{ref}")
+        print(f"  ⚠️  答案对不上任务表里任何一条：{ref}")
 
-    if not to_close:
+    if not to_close and not to_drop:
         print("-> nothing to tick off")
         return
 
     if args.no_write:
-        print("-> --no-write, Tasks.md untouched. Would move to Done:")
+        print("-> --no-write, Tasks.md untouched.")
         for text, _ in to_close:
-            print(f"     {text}")
+            print(f"     [done] {text}")
+        for text, _ in to_drop:
+            print(f"     [drop] {text}")
         return
 
-    mark_done(to_close)
-    print(f"-> {len(to_close)} item(s) moved from Open to Done in {TASKS.name}")
+    mark_tasks(to_close, to_drop)
+    print(f"-> {len(to_close)} done, {len(to_drop)} dropped — "
+          f"moved out of Open in {TASKS.name}")
 
 
 if __name__ == "__main__":

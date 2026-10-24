@@ -214,8 +214,12 @@ def gather(day: str) -> list[dict]:
         kind = str(x.get("kind") or "")
         src = str(x.get("source") or "")
 
-        if (kind == "routine" and src == "live"
-                and "这一段" in qtext and _SPAN_RE.search(qtext)):
+        # ⚠️ 判据不能只看「这一段」：题干 2026-10-24 起改成英文了
+        #    （`07:02–08:02` + `What were you doing?`）。两种写法都要认，
+        #    否则改语言那天之后的小时回答会一条都进不来 —— 而且是静默的。
+        hourly = (kind == "routine" and src == "live" and _SPAN_RE.search(qtext)
+                  and ("这一段" in qtext or "What were you doing" in qtext))
+        if hourly:
             if not answer:
                 continue
             items.append({"src": "hourly", "key": str(x.get("id")),

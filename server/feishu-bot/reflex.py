@@ -45,17 +45,17 @@ ACTIVE_MIN = int(os.environ.get("REFLEX_ACTIVE_MIN", "20"))
 # 两条提醒之间至少隔这么久。连着响三次的提醒 = 噪音。
 MIN_GAP_MIN = int(os.environ.get("REFLEX_MIN_GAP_MIN", "60"))
 
-# 传感器哑了：白天（>=13 点）最近一次手机活动已经过去这么久。
+# Sensors哑了：白天（>=13 点）最近一次手机活动已经过去这么久。
 # ⚠️ 这个阈值要能容忍一次长睡。8 小时睡眠是常态，13 小时才值得怀疑 ——
 #    而 Tasker 半夜被杀的话，到下午正好就是这个数。
 SENSOR_STALE_HOURS = float(os.environ.get("REFLEX_SENSOR_STALE_HOURS", "13"))
 SENSOR_CHECK_FROM_HOUR = 13
 
-# 夜里这几个小时只有「熬夜」能说话；其余规则白天才有意义。
+# 夜里这几个小时只有「Late night」能说话；其余规则白天才有意义。
 QUIET_FROM_HOUR = 23
 QUIET_TO_HOUR = 8
 
-# 熬夜规则的窗口（左闭右开）。
+# Late night规则的窗口（左闭右开）。
 LATE_FROM = (0, 30)
 LATE_TO_HOUR = 4
 
@@ -91,10 +91,10 @@ def _hm(minutes: float) -> str:
     total = int(round(minutes))
     h, m = divmod(total, 60)
     if h and m:
-        return f"{h} 小时 {m} 分"
+        return f"{h}h {m}m"
     if h:
-        return f"{h} 小时"
-    return f"{m} 分"
+        return f"{h}h"
+    return f"{m}m"
 
 
 def _last_activity(events: list[dict]) -> datetime | None:
@@ -111,13 +111,15 @@ def _quiet(now: datetime) -> bool:
 
 
 def _late(now: datetime) -> bool:
-    """现在是不是熬夜窗口。跨零点写成「分钟数」比较，避免 23 → 0 的日界问题。"""
+    """现在是不是Late night窗口。跨零点写成「分钟数」比较，避免 23 → 0 的日界问题。"""
     minutes = now.hour * 60 + now.minute
     return LATE_FROM[0] * 60 + LATE_FROM[1] <= minutes < LATE_TO_HOUR * 60
 
 
 def _alert(key: str, title: str, lines: list[str]) -> dict:
-    return {"key": key, "text": f"⚡ 反射弧 · {title}\n" + "\n".join(lines)}
+    # title / lines 都是英文，卡片那边直接拿去排版（见 feishu_bot.alert_card）
+    return {"key": key, "title": title, "lines": lines,
+            "text": f"⚡ {title}\n" + "\n".join(lines)}
 
 
 def evaluate(now: datetime, day_iso: str, *, events: list[dict],
@@ -134,7 +136,7 @@ def evaluate(now: datetime, day_iso: str, *, events: list[dict],
 
        机器人那边的判据比这个布尔更细：它看「这题是什么时候发的」，
        只拦最近一小时内的题 —— 昨晚 23:00 没答的题会一直挂在 awaiting 上，
-       拿它挡的话凌晨的熬夜提醒就永远发不出去（见 feishu_bot.reflex_tick）。
+       拿它挡的话凌晨的Late night提醒就永远发不出去（见 feishu_bot.reflex_tick）。
     """
     if awaiting:
         return []
@@ -157,17 +159,18 @@ def evaluate(now: datetime, day_iso: str, *, events: list[dict],
         if a:
             alerts.append(a)
 
-    # 1. 熬夜 —— 唯一一条允许在夜里响的规则。
+    # 1. Late night —— 唯一一条允许在夜里响的规则。
     if _late(now):
         def _late_alert() -> dict | None:
             last = _last_activity(events)
             if last is None or now - last > timedelta(minutes=ACTIVE_MIN):
                 return None
-            lines = [f"现在 {now:%H:%M}，手机 {max(0, int((now - last).total_seconds() // 60))} 分钟前还在用。"]
+            lines = [f"It is {now:%H:%M} and the phone was in use "
+                     f"{max(0, int((now - last).total_seconds() // 60))} minutes ago."]
             if phone and phone.get("screen_minutes"):
-                lines.append(f"今天亮屏已经 {_hm(phone['screen_minutes'])}。")
-            lines.append("要睡就现在睡 —— 再刷下去，明天的第一段专注多半就没了。")
-            return _alert("late_night", "熬夜", lines)
+                lines.append(f"Screen time so far today: {_hm(phone['screen_minutes'])}.")
+            lines.append("Sleep now — keep scrolling and tomorrow's first focus block is gone.")
+            return _alert("late_night", "Late night", lines)
         take("late_night", _late_alert)
 
     # 白天/傍晚的规则：静音时段不说话。
@@ -178,11 +181,11 @@ def evaluate(now: datetime, day_iso: str, *, events: list[dict],
                 minutes = float(phone.get("screen_minutes") or 0)
                 if minutes < SCREEN_MIN:
                     return None
-                lines = [f"今天手机亮屏 {_hm(minutes)}（阈值 {_hm(SCREEN_MIN)}）。"]
+                lines = [f"{_hm(minutes)} of screen time today (threshold {_hm(SCREEN_MIN)})."]
                 top = phone.get("top_apps") or []
                 if top:
-                    lines.append(f"最多的是 {top[0][0]} {_hm(top[0][1])}。")
-                return _alert("screen_heavy", "屏幕时间", lines)
+                    lines.append(f"Most of it in {top[0][0]} ({_hm(top[0][1])}).")
+                return _alert("screen_heavy", "Screen time", lines)
             take("screen_heavy", _screen_alert)
 
             # 3. 单个娱乐应用
@@ -195,8 +198,8 @@ def evaluate(now: datetime, day_iso: str, *, events: list[dict],
                 app, minutes = max(top, key=lambda x: x[1])
                 if minutes < LEISURE_MIN:
                     return None
-                return _alert("leisure_heavy", "娱乐时长", [
-                    f"{app} 今天 {_hm(minutes)}（阈值 {_hm(LEISURE_MIN)}）。",
+                return _alert("leisure_heavy", "Entertainment", [
+                    f"{app}: {_hm(minutes)} today (threshold {_hm(LEISURE_MIN)}).",
                 ])
             take("leisure_heavy", _leisure_alert)
 
@@ -212,15 +215,15 @@ def evaluate(now: datetime, day_iso: str, *, events: list[dict],
                 minutes = float(cur.get("minutes") or 0)
                 if minutes < DESKTOP_MIN:
                     return None
-                app = str(cur.get("app") or "").strip() or "这个窗口"
+                app = str(cur.get("app") or "").strip() or "this window"
                 ago = max(0, int((now - pushed).total_seconds() // 60))
-                return _alert("long_desktop", "久坐", [
-                    f"{app} 已经连续 {_hm(minutes)}，快照 {ago} 分钟前。",
-                    "站起来走五分钟再继续。",
+                return _alert("long_desktop", "Long sitting", [
+                    f"{app} running for {_hm(minutes)}; snapshot {ago} min ago.",
+                    "Stand up and walk five minutes before continuing.",
                 ])
             take("long_desktop", _desktop_alert)
 
-        # 5. 传感器哑了 —— 先让系统感知自己的感官。
+        # 5. Sensors哑了 —— 先让系统感知自己的感官。
         #
         # ⚠️ 这是唯一一条「关于系统自己」的规则。没有它，Tasker 半夜被杀
         #    这种事只会表现为「今天数据很少」，然后被当成「今天很安静」。
@@ -234,10 +237,10 @@ def evaluate(now: datetime, day_iso: str, *, events: list[dict],
                 gap = now - last
                 if gap < timedelta(hours=SENSOR_STALE_HOURS):
                     return None
-                return _alert("sensor_silent", "传感器", [
-                    f"手机事件已经 {_hm(gap.total_seconds() / 60)} 没更新"
-                    f"（最后一条 {last:%H:%M}）。",
-                    "要么手机没电，要么 Tasker 被系统杀了 —— 查一下。",
+                return _alert("sensor_silent", "Sensors", [
+                    f"No phone events for {_hm(gap.total_seconds() / 60)}"
+                    f" (last one {last:%H:%M}).",
+                    "Either the phone is dead or Tasker was killed — go check.",
                 ])
             take("sensor_silent", _sensor_alert)
 

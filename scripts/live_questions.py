@@ -125,16 +125,16 @@ def snapshot_state(snap: dict | None, day_iso: str, now: datetime,
     前者是「不知道」，后者会被读成「你没用电脑」。
     """
     if not isinstance(snap, dict) or not snap:
-        return False, "笔记本还没推过快照"
+        return False, "laptop has not pushed a snapshot yet"
     day = _snap_day(snap)
     if day and day != day_iso:
-        return False, f"数据停在 {day}"
+        return False, f"data stops at {day}"
     age = _snap_age_min(snap, now)
     if age is None:
         # 老版本推的快照没有 pushed_at。宁可照用，也不要因为缺字段就整天哑掉。
         return True, ""
     if age > max_age_min:
-        return False, f"最后上报是 {_hm(age)}前"
+        return False, f"last report {_hm(age)} ago"
     return True, ""
 
 # 晚上几点开始「一天的收尾」。到点之后不再发小时的题，改发三条总结题；
@@ -345,8 +345,8 @@ def _hm(minutes: float) -> str:
     total = int(round(minutes))
     h, m = divmod(total, 60)
     if h and m:
-        return f"{h} 小时 {m} 分"
-    return f"{h} 小时" if h else f"{m} 分"
+        return f"{h}h {m}m"
+    return f"{h}h" if h else f"{m}m"
 
 
 def _stay_span(stay: dict) -> str:
@@ -360,10 +360,10 @@ def _stay_span(stay: dict) -> str:
     a = start.strftime("%H:%M") if start else ""
     b = end.strftime("%H:%M") if end else ""
     if a and b and end > start:
-        return f"{a}–{b}，共 {_hm(mins)}"
+        return f"{a}–{b}, {_hm(mins)} total"
     if a:
-        return f"{a} 起，已停留 {_hm(mins)}"
-    return f"已停留 {_hm(mins)}"
+        return f"since {a}, {_hm(mins)}"
+    return f"{_hm(mins)} total"
 
 
 # ── 规则 ────────────────────────────────────────────────────────────
@@ -436,19 +436,19 @@ def rule_hourly(day_iso: str, stays: list[dict], events: list[dict],
         #    的标题下面 —— 读者当然会以为「这一段待了 3 小时 46 分」，
         #    而那个数是**从进门到现在**的累计值。同一份数据两小时前是
         #    「46 分」，一小时前是「2 小时 46 分」，全是同一个停留。
-        bits.append(f"位置：{tag}{where}（{_stay_span(stay)}）")
+        bits.append(f"Location: {tag}{where} ({_stay_span(stay)})")
     if d_apps:
-        bits.append("电脑：" + " · ".join(f"{a} {_hm(m)}" for a, m in d_apps[:3]))
+        bits.append("Computer: " + " · ".join(f"{a} {_hm(m)}" for a, m in d_apps[:3]))
     elif not snap_ok:
         # ⚠️ 不能说「没有记录到活动」—— 那是在拿「没有数据」冒充「没有干活」，
         #    而且这句假话会一路进到日记里。
-        bits.append(f"电脑：{snap_why}")
+        bits.append(f"Computer: {snap_why}")
     elif d_total <= 0:
         # 快照是新的、这一小时确实是空的 —— 这一句是**真**的。
-        bits.append("电脑：这一小时没有活动")
+        bits.append("Computer: no activity this hour")
 
     if unlocks:
-        line = f"手机：解锁 {len(unlocks)} 次"
+        line = f"Phone: {len(unlocks)} unlocks"
         # ⚠️ 桌面 / 系统界面不是「在用的应用」。不滤掉的话「切换最多」永远是
         #    启动器（实测第一次跑就报了个 `com.miui.home`）——那这条信息就废了。
         #    名单直接复用 normalize 里现成的那张，不另立一份。
@@ -460,29 +460,29 @@ def rule_hourly(day_iso: str, stays: list[dict], events: list[dict],
         real = [s for s in switches if s not in PHONE_NOT_AN_APP]
         if real:
             top = Counter(real).most_common(1)[0][0]
-            line += f"，{phone_app_name(top)} 切换最多"
+            line += f", most switches in {phone_app_name(top)}"
         bits.append(line)
     elif events:
         # 今天**有**事件，只是这一小时没有 —— 那才是「真的没解锁」。
-        bits.append("手机：这一小时没解锁")
+        bits.append("Phone: no unlocks this hour")
     else:
         # ⚠️ 一整天一条事件都没有，更可能是 Tasker / 中继断了，而不是你没碰手机。
         #    这两种情况在数据上长得一模一样，所以话必须说成「不知道」。
         #
         # ⚠️ 不能写「今天」—— 实时题可能第二天早上才被读到，题干里任何
         #    相对时间词都会变成错的（见上面 make() 附近那条约束）。
-        bits.append("手机：还没有任何上报")
+        bits.append("Phone: nothing reported yet")
 
     if not bits:
-        bits.append("这一小时没有任何记录")
+        bits.append("Nothing recorded this hour")
 
     # ⚠️ 正文不写「今天」（这题可能隔天才被读到，见 feishu_bot.render_question）。
     #    这里写的是**具体的小时区间**，本身就没有歧义。
-    text = (f"{span} 这一段：\n"
+    text = (f"{span}\n"
             + "\n".join(f"· {b}" for b in bits)
-            + "\n\n主要在忙什么？")
-    evidence = ("位置来自 Dawarich；电脑来自笔记本每 10 分钟推的快照；"
-                f"手机来自中继。（{day_iso}）")
+            + "\n\nWhat were you doing?")
+    evidence = ("Location from Dawarich; computer from the laptop's 10-minute "
+                f"snapshot; phone from the relay. ({day_iso})")
     return make(day_iso, text, evidence,
                 f"hour-{day_iso}T{now.strftime('%H')}")
 
@@ -552,8 +552,42 @@ def _commitment_keys(day_iso: str, known: list[dict]) -> list[str]:
             if str(q.get("_key") or "").startswith(prefix)]
 
 
+def _refs_already_asked(day_iso: str, base: str, key: str) -> set[str]:
+    """今天**已经被问过或答过**的任务行。
+
+    ⚠️ 这是僵尸任务和重复提问的共同根源。问责有成两批：
+       早晨批（笔记本生成，走 `questions-<day>.json`）
+       实时批（这里生成，走 `questions-live-<day>.json`）
+    两批各自都不知道对方问过谁，于是同一条任务一天里被问两遍 ——
+    实测「学习通」早上问一次、14:04 又问一次，答案还互相矛盾。
+
+    所以取两个来源的并集：中继上还挂着的（`ref` 字段）+ 已经答过的。
+    """
+    refs: set[str] = set()
+    try:
+        for q in fetch_pending(base, key):
+            r = str(q.get("ref") or "").strip()
+            if r:
+                refs.add(r)
+    except Exception as e:  # noqa: BLE001
+        print(f"  ⚠️  读待答题失败（去重会漏早晨批）：{type(e).__name__}: {e}")
+    try:
+        r = httpx.get(f"{base}/qa", params={"day": day_iso},
+                      headers={"X-API-Key": key}, timeout=20.0)
+        if r.status_code == 200:
+            for x in (r.json().get("qa") or []):
+                if isinstance(x, dict):
+                    ref = str(x.get("ref") or "").strip()
+                    if ref:
+                        refs.add(ref)
+    except Exception as e:  # noqa: BLE001
+        print(f"  ⚠️  读当天问答失败（去重会漏已答的）：{type(e).__name__}: {e}")
+    return refs
+
+
 def commitment_question(day_iso: str, tasks: list[str],
-                        now: datetime, known: list[dict]) -> dict | None:
+                        now: datetime, known: list[dict],
+                        asked_elsewhere: set[str] | None = None) -> dict | None:
     """到了检查时段，挑一条没问过的任务生成问责题。
 
     ⚠️ 它**替换**普通小时题，不是追加 —— 一天 4 条已经够多了，再加会让人
@@ -578,6 +612,7 @@ def commitment_question(day_iso: str, tasks: list[str],
         return None
 
     asked_refs = {str(q.get("ref") or "") for q in known if q.get("ref")}
+    asked_refs |= (asked_elsewhere or set())
     candidates = [t for t in tasks if t not in asked_refs]
     if not candidates:
         return None
@@ -598,18 +633,23 @@ def commitment_question(day_iso: str, tasks: list[str],
 
     task = min(candidates, key=score)
     display = task if len(task) <= 90 else task[:87] + "…"
-    text = f"现在 {now:%H:%M}。任务表里还挂着「{display}」——到现在做到了吗？"
+    text = (f"It is {now:%H:%M}. The task list still carries “{display}” "
+            "— did it happen?")
     return {
         "id": qid(day_iso, text),
         "kind": "commitment",
         "format": "choice",
         "text": text,
-        "evidence": "来自任务表 Open 项 / 昨天日记里未完成的任务。",
+        "evidence": "From the Open section of the task list.",
         "ref": task,
         "options": [
-            {"label": "做了", "done": True},
-            {"label": "做了一部分", "done": False},
-            {"label": "没做", "done": False},
+            {"label": "Done", "done": True},
+            {"label": "Partly", "done": False},
+            {"label": "Not done", "done": False},
+            # ⚠️ 第四个选项是**关闭这条任务**的唯一出口。没有它，「不做了」
+            #    只能落到「没做」，任务继续挂在 Open 上，明天再问一遍 ——
+            #    这就是僵尸任务的来源（实测同一条被连问三天）。
+            {"label": "Dropped — close this task", "drop": True},
         ],
         # ⚠️ key 里**不带**任务 hash：见上面「一个检查时段只发一条」。
         "_key": f"task-{day_iso}T{now:%H}",
@@ -644,47 +684,47 @@ def relay_desktop(base: str, key: str) -> dict | None:
 # 元组结构：(维度名, 几套问法, 依据)。依据说明「为什么这件事数据看不到」。
 ROUTINE_DIMENSIONS: tuple[tuple[str, tuple[str, ...], str], ...] = (
     ("体力", (
-        "今天体力上是什么状态？什么时候开始明显下降的？",
-        "今天精力最好的是哪一段，最差的是哪一段？",
-        "今天大概几点开始觉得撑不住了？之前的状态怎么样？",
-        "今天身体有没有哪里不舒服，或者反而比平时好？",
-    ), "身体的感觉数据看不到 —— 步数和心率只能说明你动过。"),
+        "How was your physical energy today? When did it start dropping?",
+        "Which stretch had your best energy today, and which the worst?",
+        "Around what time did you start feeling drained? How were you before that?",
+        "Anything off physically today, or better than usual?",
+    ), "How your body feels is not in the data — step count only says you moved."),
     ("心情", (
-        "今天心情怎么样？有没有哪一段明显好起来或者沉下去？",
-        "今天什么时候情绪最好，什么时候最糟？",
-        "今天有没有一件事让你明显高兴，或者明显堵得慌？",
-        "今天整体情绪更像哪一种：平静、起伏，还是绷着？",
-    ), "情绪数据看不到。"),
+        "How was your mood today? Any stretch that lifted or sank?",
+        "When were you in the best mood today, and when the worst?",
+        "Did anything today clearly pick you up, or clearly weigh on you?",
+        "Which is closer to today overall: steady, up and down, or wound tight?",
+    ), "Mood is not in the data."),
     ("人际", (
-        "今天和谁待在一起的时间比较长？聊了什么？",
-        "今天有没有一次聊天让你印象比较深？和谁？",
-        "今天有没有想联系谁但没联系？",
-        "今天独处的时间和跟人相处的时间，哪个更多？",
-    ), "人际数据看不到 —— 位置只说明你们在同一个地方。"),
+        "Who did you spend the most time with today? What did you talk about?",
+        "Any conversation today that stuck with you? With whom?",
+        "Anyone you wanted to reach out to but didn't?",
+        "Today, more time alone or more time with people?",
+    ), "Who you were with is not in the data — location only says you were nearby."),
     ("睡眠", (
-        "昨晚睡得怎么样？今天有没有因此受影响？",
-        "昨晚大概几点睡着、几点醒的？中间醒过吗？",
-        "今天的困意主要在什么时候？靠什么撑过去的？",
-        "昨晚的睡眠和前一晚比，好一些还是差一些？",
-    ), "睡眠质量只有你知道，手环只能测时长。"),
+        "How did you sleep last night? Did it affect today?",
+        "About what time did you fall asleep and wake up last night? Wake up in between?",
+        "When did the tiredness hit hardest today? How did you push through it?",
+        "Compared with the night before, better or worse?",
+    ), "Sleep quality is only knowable to you — a band measures duration, not rest."),
     ("吃饭", (
-        "今天的饭是按点吃的吗？有没有哪一餐跳过了？",
-        "今天吃了什么？有没有一顿是认真吃的？",
-        "今天有没有饿过头或者吃撑的时候？",
-        "今天的饮食和平时比，正常吗？",
-    ), "吃饭不产生事件。"),
+        "Did you eat on schedule today? Any meal skipped?",
+        "What did you eat today? Was any meal a real one?",
+        "Did you get too hungry or overly full at any point?",
+        "Compared with usual, was today's eating normal?",
+    ), "Meals do not produce events."),
     ("休息", (
-        "今天有没有一段是真正休息的（不是刷手机）？",
-        "今天有没有离开屏幕超过半小时？在做什么？",
-        "今天有没有觉得「缓过来了」的时刻？",
-        "今天忙完之后是怎么收的尾？",
-    ), "「休息」和「娱乐」在数据上分不开。"),
+        "Was there any stretch today that was real rest (not scrolling)?",
+        "Did you step away from a screen for more than half an hour? Doing what?",
+        "Did you have a moment today where you actually felt recovered?",
+        "How did you wind down after the day's work?",
+    ), "\"Rest\" and \"entertainment\" look the same in the data."),
     ("学习", (
-        "今天学到了什么以前不知道的？",
-        "今天有没有哪件事让你改变了对某个东西的看法？",
-        "今天看的东西里，哪一条最值得留下来？",
-        "今天有没有哪个问题现在比早上更清楚了？",
-    ), "学到的东西不会出现在窗口标题里。"),
+        "What did you learn today that you did not know before?",
+        "Did anything change your mind about something today?",
+        "Of everything you read or watched today, which one is worth keeping?",
+        "Is any question clearer to you now than it was this morning?",
+    ), "What you learn never shows up in a window title."),
 )
 
 
@@ -703,16 +743,19 @@ ROUTINE_DIMENSIONS: tuple[tuple[str, tuple[str, ...], str], ...] = (
 #    把原来那种「什么时候最好/最差」的细节留在备注里。
 RATED_DIMENSIONS: dict[str, tuple[str, tuple[str, ...]]] = {
     "心情": (
-        "今天整体心情打几分？想补一句的话：今天什么时候情绪最好、什么时候最糟？",
-        ("1 很差", "2 偏低", "3 一般", "4 不错", "5 很好"),
+        "How would you rate your mood today, 1-5? Add a line if you want: "
+        "when was it best, when was it worst?",
+        ("1 bad", "2 low", "3 okay", "4 good", "5 great"),
     ),
     "体力": (
-        "今天整体体力打几分？想补一句的话：今天什么时候精力最好、什么时候最差？",
-        ("1 没电", "2 偏低", "3 一般", "4 不错", "5 充沛"),
+        "How would you rate your physical energy today, 1-5? Add a line if you want: "
+        "when did you have the most, when the least?",
+        ("1 drained", "2 low", "3 okay", "4 good", "5 full"),
     ),
     "睡眠": (
-        "昨晚整体睡得怎么样？想补一句的话：几点睡、几点醒、中间醒过吗？",
-        ("1 很差", "2 偏低", "3 一般", "4 不错", "5 很好"),
+        "How did you sleep last night, 1-5? Add a line if you want: "
+        "when did you fall asleep and wake up, any waking in between?",
+        ("1 bad", "2 low", "3 okay", "4 good", "5 great"),
     ),
 }
 
@@ -750,7 +793,8 @@ def checkin_questions(day_iso: str) -> list[dict]:
         if not rated:
             continue
         q = make(day_iso, rated[0],
-                 "轻量打卡：三个数字就够了，题面每天一样，所以逐日可比。",
+                 "Quick check-in — three numbers, same wording every day, "
+                 "so they stay comparable across days.",
                  f"checkin-{day_iso}-{dim}",
                  kind=CHECKIN_KIND,
                  # ⚠️ 必须是 choice：`collect_labels` 只认答案开头的 1–5。
@@ -825,31 +869,31 @@ def summary_questions(day_iso: str, stays: list[dict],
         qs.append(q)
 
     # 1. 只能问你的那一件
-    add("今天最值得记住的一件事是什么？",
-        "数据里永远没有这个 —— 只有你知道。一句话就行，会进日记。")
+    add("What is the one thing from today worth remembering?",
+        "Never in the data — only you know. One line is enough; it goes into the journal.")
 
     # 2. 电脑分布：和他自己的体感对一下
     if total:
-        dist = " / ".join(f"{k} {v}h" for k, v in cats[:4]) or "无分类"
-        top = f"；最久的是 {d_apps[0][0]}（{d_apps[0][1]}h）" if d_apps else ""
-        add(f"今天电脑合计 {total} 小时（{dist}）{top}。"
-            "这个分布和你的体感一致吗？",
-            "来自笔记本每 10 分钟推的快照：today.total_hours / by_category / top_apps。")
+        dist = " / ".join(f"{k} {v}h" for k, v in cats[:4]) or "uncategorized"
+        top = f"; longest was {d_apps[0][0]} ({d_apps[0][1]}h)" if d_apps else ""
+        add(f"Computer logged {total}h today ({dist}){top}. "
+            "Does that split match how the day felt?",
+            "From the laptop's 10-minute snapshot: total_hours / by_category / top_apps.")
 
     # 3. 手机节奏：次数是实测的
     if unlocks or switches:
-        add(f"今天手机解锁 {unlocks} 次、切换应用 {switches} 次。"
-            "哪一段时间是真正投入的？",
-            "来自中继上的手机事件（Tasker 上报），次数是实测的，不是估的。")
+        add(f"Phone: {unlocks} unlocks, {switches} app switches today. "
+            "Which stretch was genuinely focused?",
+            "From the relay's phone events (Tasker); counts are measured, not estimated.")
 
     # 4. 位置：只有 ≥20 分钟的停留才算
     if places:
         best = max(places, key=lambda s: float(s.get("minutes") or 0))
-        tag = "坐标 " if best.get("is_coord") else ""
-        add(f"今天去过 {len(places)} 个地方，最久的是{tag}{best.get('place')}"
-            f"（{_hm(float(best.get('minutes') or 0))}）。"
-            "这些停留里有哪一次是计划外的？",
-            "位置来自 Dawarich 的停留推导；只有 ≥20 分钟的停留才算。")
+        tag = "at " if best.get("is_coord") else ""
+        add(f"You were in {len(places)} places today; the longest was {tag}{best.get('place')} "
+            f"({_hm(float(best.get('minutes') or 0))}). "
+            "Was any of those unplanned?",
+            "From Dawarich stay detection; only stays of 20 minutes or more count.")
 
     # 常规题：七个维度**每天全问**，但每天的措辞不同。
     try:
@@ -869,8 +913,8 @@ def summary_questions(day_iso: str, stays: list[dict],
         add(text, evidence, routine=True, dim=dim)
 
     # 最后一道：留给明天的问责线索
-    add("今天有什么没做成、想留到明天的？",
-        "这条会成为明天问责的线索（也会进周回顾的素材）。")
+    add("What did not get done today that you want to carry into tomorrow?",
+        "This becomes tomorrow's accountability thread.")
 
     return qs
 
@@ -915,7 +959,8 @@ def build(day: Day, base: str, key: str) -> list[dict]:
     if now.hour in COMMITMENT_HOURS:
         try:
             cq = commitment_question(day.iso, load_commitment_tasks(day.iso),
-                                     now, known)
+                                     now, known,
+                                     asked_elsewhere=_refs_already_asked(day.iso, base, key))
         except Exception as e:  # noqa: BLE001
             print(f"  ⚠️  任务检查生成失败：{type(e).__name__}: {e}")
             cq = None

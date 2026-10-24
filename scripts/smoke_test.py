@@ -1085,7 +1085,7 @@ def t_live_question_rules():
     assert q["text"].startswith(start.strftime("%H:%M")), q["text"]
     assert "望京" in q["text"], q["text"]
     assert "Code.exe" in q["text"], q["text"]
-    assert "解锁 2 次" in q["text"], q["text"]
+    assert "2 unlocks" in q["text"], q["text"]
     assert "WeChat" in q["text"], f"包名要翻成人话：{q['text']}"
     assert "今天" not in q["text"], f"题干不该写死「今天」：{q['text']}"
     assert q["_key"] == f"hour-{day}T{now.strftime('%H')}", q["_key"]
@@ -1099,8 +1099,8 @@ def t_live_question_rules():
     # ⚠️ 措辞必须是「不知道」，不能是「没有活动」——
     #    「笔记本没推过快照」和「电脑上一片空白」是两件事，
     #    后者会一路写进日记，变成一句假话。
-    assert "笔记本还没推过快照" in quiet["text"], quiet["text"]
-    assert "还没有任何上报" in quiet["text"], quiet["text"]
+    assert "laptop has not pushed a snapshot" in quiet["text"], quiet["text"]
+    assert "nothing reported yet" in quiet["text"], quiet["text"]
     assert "今天" not in quiet["text"], f"题干不该写死「今天」：{quiet['text']}"
 
     # ⚠️ 过期的快照不能当「这一小时」的数据讲。
@@ -1111,7 +1111,7 @@ def t_live_question_rules():
                            "top_apps": [["Code.exe", 25.0]]}}
     stale_txt = lq.rule_hourly(day, [], [], stale, now)["text"]
     assert "Code.exe" not in stale_txt, f"过期快照不该出现：{stale_txt}"
-    assert "数据停在" in stale_txt, stale_txt
+    assert "data stops at" in stale_txt, stale_txt
 
     # 一小时前就结束的停留，不该被当成「还在那儿」
     old = dict(stay, place="中关村", minutes=80.0,
@@ -1240,7 +1240,11 @@ def t_commitment_questions():
     q = lq.commitment_question("2026-10-19", tasks, now, [])
     assert q and q["kind"] == "commitment" and q["format"] == "choice", q
     assert q["ref"] == "14:00-16:00 学习通网课", q
-    assert q["options"][0] == {"label": "做了", "done": True}, q["options"]
+    # ⚠️ 最后一项必须是「关掉这条任务」。没有它，放弃的任务永远出不来出口，
+    #    每天照问 —— 实测同一条被连问三天。这一断言就是为了钉住那个出口。
+    assert q["options"][0]["done"] is True, q["options"]
+    assert q["options"][-1].get("drop") is True, q["options"]
+    assert not any(o.get("done") and o.get("drop") for o in q["options"]), q["options"]
 
     # 不在固定时段就不生成
     assert lq.commitment_question("2026-10-19", tasks,
@@ -1830,7 +1834,7 @@ def t_summary_questions():
                    "top_apps": [["Code.exe", 2.1]]}},
     )
     assert len(rich) == 12, [q["text"] for q in rich]
-    assert any("解锁 1 次" in q["text"] for q in rich), "手机那题没出"
+    assert any("1 unlocks" in q["text"] for q in rich), "phone line missing"
     assert any("望京" in q["text"] for q in rich), "位置那题没出"
     assert any("Code.exe" in q["text"] for q in rich), "电脑那题没带最久的应用"
 
@@ -1974,7 +1978,7 @@ def t_reflex_rules():
     # 亮屏 6h40 + 微信 3h20：先报屏幕（一次只报一条）
     got = rx.evaluate(evening, day, events=[], phone=phone, snap=None, state={})
     assert [a["key"] for a in got] == ["screen_heavy"], got
-    assert "6 小时" in got[0]["text"] or "6 小" in got[0]["text"], got[0]
+    assert "6h" in got[0]["text"], got[0]
 
     # 屏幕没超、微信超了 → 报娱乐
     phone2 = {"screen_minutes": 120.0, "top_apps": [("WeChat", 200.0)]}

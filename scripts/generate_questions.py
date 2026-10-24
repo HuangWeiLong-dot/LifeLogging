@@ -136,6 +136,13 @@ means "it happened", mark none.
 i.e. when there is actually a task to tick off. A routine question grounded in the \
 data has no task behind it, so every one of its options is "done": false.
 
+    **A choice question about a task MUST offer a way to close it.** Add one option \
+marked "drop": true meaning "not doing this — drop it from the list" (already solved \
+another way, no longer relevant, decided against it). Without that option a task the \
+person has abandoned keeps returning every morning — that is exactly how a task list \
+turns into a zombie list. At most one option may carry "drop": true, and it must \
+never be combined with "done": true.
+
 - format="text" - the question where any short option would be a lie: what you want \
 to remember from the day, what was actually on your mind, what got in the way. No \
 options at all. At most ONE per batch.
@@ -181,7 +188,8 @@ Output ONLY a JSON array, no prose and no code fences:
    "text": "<the question>",
    "evidence": "<the specific thing you are basing it on>",
    "ref": "<verbatim source line, or empty string>",
-   "options": [{"label": "<short>", "done": true}, {"label": "<short>", "done": false}]}
+   "options": [{"label": "<short>", "done": true}, {"label": "<short>", "done": false}, \
+{"label": "<short>", "drop": true}]}
 ]
 
 "options" is REQUIRED for format="choice" (3-5 of them, at most one "done": true) and \
@@ -513,15 +521,20 @@ def parse_options(raw) -> list[dict]:
         if isinstance(o, dict):
             label = " ".join(str(o.get("label") or "").split())
             done = bool(o.get("done"))
+            drop = bool(o.get("drop"))
         else:
             label = " ".join(str(o or "").split())
-            done = False
+            done = drop = False
         if not label:
             continue
         if done and done_taken:
             done = False
         done_taken = done_taken or done
-        out.append({"label": label[:MAX_LABEL], "done": done})
+        # ⚠️ `drop` 是「不做了，把这条任务关掉」。它和 `done` 互斥：
+        #    一条任务不可能既完成又放弃。两个都标的话只认 done。
+        if done:
+            drop = False
+        out.append({"label": label[:MAX_LABEL], "done": done, "drop": drop})
         if len(out) >= MAX_OPTIONS:
             break
     return out
