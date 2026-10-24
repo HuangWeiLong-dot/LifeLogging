@@ -2307,7 +2307,7 @@ def t_push_health_and_render():
     lv.relay_watch = lambda b, k: snap
     out = lv.render_watch("2026-10-21", "x", "k")
     assert "4426" in out and "79" in out, out
-    assert "睡眠        —" in out, "没有睡眠数据时用破折号，不能写成 0 小时"
+    assert "sleep        —" in out, f"missing sleep must be a dash: {out!r}"
     assert "跑步" in out and "4.2 km" in out, out
     assert "2026-10-20" in out, "隔天的汇总必须在标题里带日期"
 
@@ -2316,7 +2316,7 @@ def t_push_health_and_render():
                  health=dict(snap["health"], sleep_hours=7.5))
     lv.relay_watch = lambda b, k: fresh
     out = lv.render_watch("2026-10-21", "x", "k")
-    assert "7 小时 30 分" in out and "不是今天" not in out, out
+    assert "7h 30m" in out and "不是今天" not in out, out
 
     # 没推过 → 给一条能照着修的提示
     lv.relay_watch = lambda b, k: None
@@ -2464,7 +2464,7 @@ def t_freeform_history():
                 {"day": "2026-10-18", "excerpt": "〔外包〕项目聊到很晚，晚上很累"}]
             lv.answer_freeform("我上次觉得累是什么时候",
                                day_iso="2026-10-21", base="x", key="k")
-        assert "过去的相关记录" in captured[0], captured[0]
+        assert "Relevant past records" in captured[0], captured[0]
         assert "2026-10-18" in captured[0] and "外包" in captured[0], captured[0]
 
         # 检索为空 → 不附这一节（空标题会被模型读成「必须引用历史」）
@@ -2474,7 +2474,7 @@ def t_freeform_history():
             lv.cfg = lambda: {"state_dir": td}
             lv.answer_freeform("我上次觉得累是什么时候",
                                day_iso="2026-10-21", base="x", key="k")
-        assert "过去的相关记录" not in captured[0], captured[0]
+        assert "Relevant past records" not in captured[0], captured[0]
     finally:
         (lv.cfg, lv._digest, lv._run_llm_turn, rc.search) = originals
 
@@ -2703,24 +2703,24 @@ def t_day_recap():
     lv = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(lv)
 
-    lv.data_snapshot = lambda d, b, k: ["电脑：9.5 小时（Work 6h）",
-                                        "手机：解锁 16 次"]
+    lv.data_snapshot = lambda d, b, k: ["Computer: 9.5h (Work 6h)",
+                                        "Phone: 16 unlocks"]
     qa = [("今天体力怎么样？", "还行"), ("今天学到了什么？", "SQLite FTS5")]
 
     sections = {"summary": "今天主要在写代码。",
                 "did": ["把飞书机器人的收尾题改成七个维度"],
                 "advice": ["明天 15:00 前把 AE 的安装验证掉"]}
     out = lv.day_recap("2026-10-17", "http://x", "k", qa, sections)
-    assert "【数据】" in out and "电脑：9.5 小时" in out, out
-    assert "【你的回答】" in out and "SQLite FTS5" in out, out
-    assert "【总结】" in out and "写代码" in out, out
-    assert "【今天做了什么】" in out and "七个维度" in out, out
-    assert "【明天的建议】" in out and "1. 明天 15:00" in out, out
+    assert "[Data]" in out and "Computer: 9.5h" in out, out
+    assert "[Your answers]" in out and "SQLite FTS5" in out, out
+    assert "[Summary]" in out and "写代码" in out, out
+    assert "[What you did]" in out and "七个维度" in out, out
+    assert "[Suggestions for tomorrow]" in out and "1. 明天 15:00" in out, out
 
     # 模型什么都没给时，数据和回答照样要发
     out2 = lv.day_recap("2026-10-17", "x", "k", qa, None)
-    assert "【数据】" in out2 and "【你的回答】" in out2, out2
-    assert "【总结】" not in out2 and "【明天的建议】" not in out2, out2
+    assert "[Data]" in out2 and "[Your answers]" in out2, out2
+    assert "[Summary]" not in out2 and "[Suggestions for tomorrow]" not in out2, out2
 
     # 解析：正常 JSON / 带围栏 / 没按 JSON 回（原文当总结，不丢内容）
     p = lv.parse_day_summary('{"summary":"s","did":["a","b"],"advice":["x"]}')
@@ -2912,7 +2912,7 @@ def t_end_day_command():
             sys.modules["live_questions"] = old
         else:
             sys.modules.pop("live_questions", None)
-    assert calls and "都已经答完" in calls[0], calls
+    assert calls and "already answered" in calls[0], calls
 
 
 check("feishu: /收尾 立刻出收尾题（不等 21:30），答完会明说",

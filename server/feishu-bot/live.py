@@ -76,11 +76,11 @@ def deps() -> dict[str, Any]:
             import geo                                    # noqa: F401
         except SystemExit as e:                           # load_config 的 sys.exit
             raise LiveUnavailable(
-                "服务器上的 config/config.yaml 读不了（多半是还没建，或者 "
-                f"sources.dawarich 没填）。查数据的功能暂时不可用。（exit {e.code}）"
+                "config/config.yaml on the server cannot be read (probably missing, "
+                f"or sources.dawarich is not filled in). Data queries are unavailable. (exit {e.code})"
             ) from None
         except Exception as e:  # noqa: BLE001
-            raise LiveUnavailable(f"加载数据模块失败：{type(e).__name__}: {e}") from None
+            raise LiveUnavailable(f"Failed to load data modules: {type(e).__name__}: {e}") from None
 
         from common import Day, load_config
         from normalize import summarize_phone
@@ -177,7 +177,7 @@ def location_stays(day_iso: str) -> list[dict]:
     try:
         pts = m["fetch_points"](day)
     except Exception as e:  # noqa: BLE001
-        raise LiveUnavailable(f"拉不到位置数据（Dawarich）：{type(e).__name__}: {e}") from None
+        raise LiveUnavailable(f"Cannot reach location data (Dawarich): {type(e).__name__}: {e}") from None
 
     if not pts:
         return []
@@ -185,7 +185,7 @@ def location_stays(day_iso: str) -> list[dict]:
     try:
         stays = m["derive_stays"](day, pts)
     except Exception as e:  # noqa: BLE001
-        raise LiveUnavailable(f"推导停留失败：{type(e).__name__}: {e}") from None
+        raise LiveUnavailable(f"Stay detection failed: {type(e).__name__}: {e}") from None
 
     out: list[dict] = []
     for ev in stays:
@@ -218,24 +218,24 @@ def _hm(minutes: float) -> str:
     total = int(round(minutes))
     h, m = divmod(total, 60)
     if h and m:
-        return f"{h} 小时 {m} 分"
+        return f"{h}h {m}m"
     if h:
-        return f"{h} 小时"
-    return f"{m} 分"
+        return f"{h}h"
+    return f"{m}m"
 
 
 def render_location(day_iso: str) -> str:
     stays = location_stays(day_iso)
     if not stays:
-        return f"位置 · {day_iso}\n没有位置数据。"
+        return f"Location · {day_iso}\nNo location data."
 
     total = sum(s["minutes"] for s in stays)
-    lines = [f"位置 · {day_iso}", ""]
+    lines = [f"Location · {day_iso}", ""]
     for s in stays:
         span = f"{s['start']}–{s['end']}" if s["start"] and s["end"] else "—"
-        place = s["place"] + ("（坐标）" if s["is_coord"] else "")
+        place = s["place"] + (" (coords)" if s["is_coord"] else "")
         lines.append(f"  {span}  {place}  ·  {_hm(s['minutes'])}")
-    lines += ["", f"合计 {_hm(total)}。"]
+    lines += ["", f"Total {_hm(total)}."]
     return "\n".join(lines)
 
 
@@ -245,30 +245,30 @@ def render_phone(events: list[dict], day_iso: str | None = None) -> str:
     except LiveUnavailable:
         raise
     except Exception as e:  # noqa: BLE001
-        raise LiveUnavailable(f"汇总手机数据失败：{type(e).__name__}: {e}") from None
+        raise LiveUnavailable(f"Phone summary failed: {type(e).__name__}: {e}") from None
 
     if not s["unlocks"] and not s["app_switches"]:
-        return "今天没有手机事件。"
+        return "No phone events today."
 
     # ⚠️ 「有屏幕数据」和「屏幕时间恰好是 0」是两回事：没有屏幕事件时
     #    只写「—」，不能写「0 分钟」。
     screen_evs = [e for e in events
                   if e.get("metric") in ("screen_on", "screen_off")]
 
-    lines = [f"手机 · {day_iso}" if day_iso else "手机", ""]
+    lines = [f"Phone · {day_iso}" if day_iso else "Phone", ""]
     if screen_evs:
-        lines.append(f"  屏幕亮着     {_hm(s['screen_minutes'])}")
-        lines.append(f"  前台合计     {_hm(s['foreground_minutes'])}（下界）")
+        lines.append(f"  screen on    {_hm(s['screen_minutes'])}")
+        lines.append(f"  foreground   {_hm(s['foreground_minutes'])} (lower bound)")
     else:
-        lines.append("  屏幕时间     —")
-    lines.append(f"  解锁         {s['unlocks']} 次")
+        lines.append("  screen time  —")
+    lines.append(f"  unlocks      {s['unlocks']}")
     if s["first_unlock"]:
-        lines.append(f"  首次 / 末次  {s['first_unlock']} / {s['last_unlock']}")
-    lines.append(f"  应用切换     {s['app_switches']} 次")
+        lines.append(f"  first/last   {s['first_unlock']} / {s['last_unlock']}")
+    lines.append(f"  switches     {s['app_switches']}")
 
     top = s["top_apps"][:6]
     if top:
-        lines += ["", "  用得最多："]
+        lines += ["", "  top apps:"]
         for name, mins in top:
             lines.append(f"    {name}  {_hm(mins)}")
 
@@ -293,9 +293,9 @@ def data_snapshot(day_iso: str, base: str, key: str) -> list[str]:
     if events:
         try:
             s = deps()["summarize_phone"](events)
-            line = f"手机：解锁 {s['unlocks']} 次 · 切换 {s['app_switches']} 次"
+            line = f"Phone: {s['unlocks']} unlocks · {s['app_switches']} switches"
             if s.get("screen_minutes"):
-                line += f" · 亮屏 {_hm(s['screen_minutes'])}"
+                line += f" · screen {_hm(s['screen_minutes'])}"
             out.append(line)
         except Exception:  # noqa: BLE001
             pass
@@ -323,7 +323,7 @@ def data_snapshot(day_iso: str, base: str, key: str) -> list[str]:
                 if total:
                     cats = " / ".join(f"{k} {v}h" for k, v in
                                       (today.get("by_category") or [])[:4])
-                    out.append(f"电脑：{total} 小时（{cats}）")
+                    out.append(f"Computer: {total}h ({cats})")
         except Exception:  # noqa: BLE001
             pass
 
@@ -331,8 +331,8 @@ def data_snapshot(day_iso: str, base: str, key: str) -> list[str]:
         stays = location_stays(day_iso)
         if stays:
             best = max(stays, key=lambda s: s["minutes"])
-            out.append(f"位置：{len(stays)} 处，最久 {best['place']}"
-                       f"（{_hm(best['minutes'])}）")
+            out.append(f"Location: {len(stays)} places, longest {best['place']} "
+                       f"({_hm(best['minutes'])})")
     except Exception:  # noqa: BLE001
         pass
 
@@ -341,15 +341,15 @@ def data_snapshot(day_iso: str, base: str, key: str) -> list[str]:
         health = snap.get("health") or {}
         steps = health.get("steps")
         if steps is not None:
-            out.append(f"手表：{int(round(float(steps)))} 步"
-                       f"（{snap.get('day') or '—'}）")
+            out.append(f"Watch: {int(round(float(steps)))} steps "
+                       f"({snap.get('day') or '—'})")
     except Exception:  # noqa: BLE001
         pass
 
     return out
 
 
-_QA_BUCKETS = ("白天的实时回答", "早晨的问责与常规", "收尾回答", "其他回答")
+_QA_BUCKETS = ("Live answers", "Morning questions", "Wrap-up answers", "Other answers")
 
 
 def _norm_qa(qa: list[Any] | None) -> list[dict]:
@@ -385,12 +385,12 @@ def _norm_qa(qa: list[Any] | None) -> list[dict]:
 
 def _qa_bucket(x: dict) -> str:
     if x.get("kind") == "summary":
-        return "收尾回答"
+        return "Wrap-up answers"
     if x.get("source") == "laptop":
-        return "早晨的问责与常规"
+        return "Morning questions"
     if x.get("source") == "live":
-        return "白天的实时回答"
-    return "其他回答"
+        return "Live answers"
+    return "Other answers"
 
 
 # 日报快照最多能旧多久。比小时题宽松（一天的总量两三个小时里变化不大），
@@ -442,12 +442,12 @@ def _qa_line(x: dict, q_limit: int = 56, a_limit: int = 120,
              dup_of: str = "") -> str:
     """一行问答。`dup_of` 非空表示这段答案今天已经出现过一次 —— 只指向它，
     不把同一段长文贴第二遍。"""
-    q = _one_line(x.get("text") or "(题号不在问题文件里)", q_limit)
+    q = _one_line(x.get("text") or "(question not found)", q_limit)
     if dup_of:
-        return f"{q} → 同《{_one_line(dup_of, 26)}》"
+        return f"{q} → same as “{_one_line(dup_of, 26)}”"
     a = _one_line(x.get("answer") or "", a_limit)
     n = _one_line(x.get("note") or "", a_limit)
-    return f"{q} → {a}" + (f"（{n}）" if n else "")
+    return f"{q} → {a}" + (f" ({n})" if n else "")
 
 
 def _answer_key(x: dict) -> str:
@@ -479,9 +479,9 @@ def _dedupe_qa(qa: list[dict]) -> list[tuple[dict, str]]:
 def render_qa(day_iso: str, base: str, key: str) -> str:
     """某一天的全部问答，一条一行。只给事实，不解释。"""
     qa = _norm_qa(relay_qa(day_iso, base, key))
-    lines = [f"问答 · {day_iso}"]
+    lines = [f"Q&A · {day_iso}"]
     if not qa:
-        lines.append("没有回答。")
+        lines.append("No answers.")
         return "\n".join(lines)
 
     lines.append("")
@@ -500,17 +500,17 @@ def day_recap(day_iso: str, base: str, key: str,
        这样即使 LLM 挂了、额度用完了，复盘里仍然有今天的事实和你自己说的话 ——
        那才是这份东西的主体。
     """
-    lines = [f"今日复盘 · {day_iso}", ""]
+    lines = [f"Daily recap · {day_iso}", ""]
 
     snap = data_snapshot(day_iso, base, key)
     if snap:
-        lines.append("【数据】")
+        lines.append("[Data]")
         lines += [f"· {x}" for x in snap]
         lines.append("")
 
     q_all = _norm_qa(qa)
     if q_all:
-        lines.append("【你的回答】")
+        lines.append("[Your answers]")
         marked = _dedupe_qa(q_all)
         for label in _QA_BUCKETS:
             group = [(x, dup) for x, dup in marked if _qa_bucket(x) == label]
@@ -527,16 +527,16 @@ def day_recap(day_iso: str, base: str, key: str,
     advice = [str(x).strip() for x in (sec.get("advice") or []) if str(x).strip()]
 
     if summary:
-        lines += ["【总结】", summary, ""]
+        lines += ["[Summary]", summary, ""]
 
     if did:
-        lines.append("【今天做了什么】")
+        lines.append("[What you did]")
         lines += [f"· {x}" for x in did]
         lines.append("")
 
     if advice:
         # 编号而不是圆点 —— 这是**待办**，明天要照着做的。
-        lines.append("【明天的建议】")
+        lines.append("[Suggestions for tomorrow]")
         lines += [f"{i}. {x}" for i, x in enumerate(advice, 1)]
 
     return "\n".join(lines).strip()
@@ -570,7 +570,7 @@ def _ago(v: Any, now: datetime) -> tuple[str, float | None]:
     return f"{h // 24} 天前", mins
 
 
-DESKTOP_NO_DATA = "还没有电脑快照。笔记本上跑一次 scripts/push_desktop.py。"
+DESKTOP_NO_DATA = "No desktop snapshot yet. Run scripts/push_desktop.py on the laptop."
 
 
 def render_desktop(day_iso: str, base: str, key: str) -> str:
@@ -578,7 +578,7 @@ def render_desktop(day_iso: str, base: str, key: str) -> str:
     try:
         snap = relay_desktop(base, key)
     except Exception as e:  # noqa: BLE001
-        raise LiveUnavailable(f"拉不到电脑快照：{type(e).__name__}: {e}") from None
+        raise LiveUnavailable(f"Cannot read the desktop snapshot: {type(e).__name__}: {e}") from None
     if not snap:
         return DESKTOP_NO_DATA
 
@@ -589,7 +589,7 @@ def render_desktop(day_iso: str, base: str, key: str) -> str:
     push_txt, _ = _ago(snap.get("pushed_at"), now) if now else ("", None)
 
     day = str(snap.get("day") or "")
-    head = f"电脑 · {day or day_iso}"
+    head = f"Computer · {day or day_iso}"
     fresh = ev_txt or push_txt
     if fresh:
         head += f" · {fresh}"
@@ -597,31 +597,31 @@ def render_desktop(day_iso: str, base: str, key: str) -> str:
 
     cur = snap.get("current")
     if isinstance(cur, dict) and cur.get("app"):
-        lines.append(f"现在在：{cur.get('app')}")
+        lines.append(f"Now: {cur.get('app')}")
         title = str(cur.get("title") or "").strip()
         if title:
             lines.append(f"  {title[:70]}")
-        lines.append(f"  分类 {cur.get('category')} · 已持续 "
-                     f"{int(cur.get('minutes') or 0)} 分钟")
+        lines.append(f"  {cur.get('category')} · for "
+                     f"{int(cur.get('minutes') or 0)} min")
     elif snap.get("afk") is True:
-        lines.append("现在：AFK")
+        lines.append("Now: AFK")
     else:
-        lines.append("现在：没有窗口活动")
+        lines.append("Now: no window activity")
 
     today = snap.get("today") or {}
-    label = "今天合计" if (not day or day == day_iso) else "当天合计"
-    lines += ["", f"{label} {today.get('total_hours')} 小时"]
+    label = "Today total" if (not day or day == day_iso) else "That day total"
+    lines += ["", f"{label} {today.get('total_hours')}h"]
     cats = today.get("by_category") or []
     if cats:
         lines.append("  " + " · ".join(f"{k} {v}h" for k, v in cats))
     apps = today.get("top_apps") or []
     if apps:
-        lines.append("  用得最多 " + " · ".join(f"{a} {v}h" for a, v in apps[:5]))
+        lines.append("  top apps: " + " · ".join(f"{a} {v}h" for a, v in apps[:5]))
 
     return "\n".join(lines)
 
 
-WATCH_NO_DATA = "还没有手表汇总。笔记本上跑一次 scripts/push_health.py。"
+WATCH_NO_DATA = "No watch summary yet. Run scripts/push_health.py on the laptop."
 
 
 def render_watch(day_iso: str, base: str, key: str) -> str:
@@ -633,7 +633,7 @@ def render_watch(day_iso: str, base: str, key: str) -> str:
     try:
         snap = relay_watch(base, key)
     except Exception as e:  # noqa: BLE001
-        raise LiveUnavailable(f"拉不到健康汇总：{type(e).__name__}: {e}") from None
+        raise LiveUnavailable(f"Cannot read the health summary: {type(e).__name__}: {e}") from None
     if not snap:
         return WATCH_NO_DATA
 
@@ -642,7 +642,7 @@ def render_watch(day_iso: str, base: str, key: str) -> str:
     push_txt, _ = _ago(snap.get("pushed_at"), now) if now else ("", None)
 
     day = str(snap.get("day") or "")
-    head = f"手表 · {day or day_iso}"
+    head = f"Watch · {day or day_iso}"
     if push_txt:
         head += f" · {push_txt}"
     health = snap.get("health") if isinstance(snap.get("health"), dict) else {}
@@ -651,30 +651,30 @@ def render_watch(day_iso: str, base: str, key: str) -> str:
 
     steps = health.get("steps")
     if steps is not None:
-        lines.append(f"  步数        {int(round(float(steps)))} 步")
+        lines.append(f"  steps        {int(round(float(steps)))}")
         shown = True
     hr_avg = health.get("heart_rate_avg")
     if hr_avg is not None:
-        lines.append(f"  心率        平均 {round(float(hr_avg))} bpm")
+        lines.append(f"  heart rate   avg {round(float(hr_avg))} bpm")
         shown = True
     hr_min = health.get("heart_rate_min")
     if hr_min is not None:
-        lines.append(f"              最低 {round(float(hr_min))} bpm")
+        lines.append(f"               min {round(float(hr_min))} bpm")
     sleep = health.get("sleep_hours")
     if sleep is not None:
-        lines.append(f"  睡眠        {_hm(float(sleep) * 60)}")
+        lines.append(f"  sleep        {_hm(float(sleep) * 60)}")
         shown = True
 
     if not shown:
-        lines.append("  没有步数 / 心率记录")
+        lines.append("  no steps / heart rate recorded")
 
     if sleep is None:
         # 不能说「睡眠 0 小时」：这台表的导出里没有睡眠样本。
-        lines.append("  睡眠        —")
+        lines.append("  sleep        —")
 
     workouts = [w for w in (snap.get("workouts") or []) if isinstance(w, dict)]
     if workouts:
-        lines += ["", "  最近运动："]
+        lines += ["", "  recent workouts:"]
         for w in workouts[-3:]:
             text = _one_workout(w)
             if text:
@@ -697,7 +697,7 @@ def _one_workout(w: dict) -> str:
         bits.append(f"{float(km):.1f} km")
     hr = w.get("avg_hr")
     if hr:
-        bits.append(f"平均 {int(hr)} bpm")
+        bits.append(f"avg {int(hr)} bpm")
     return " ".join(bits)
 
 
@@ -786,18 +786,21 @@ LLM_DAILY_CAP = int(os.environ.get("FEISHU_LLM_DAILY_CAP", "10"))
 # ⚠️ 这里不是「让它聪明一点」的地方 —— 一个把「大概是在开会吧」编得像真事的
 #    机器人，比一个说「数据里没有这条」的机器人糟得多。
 #    行踪是有隐私含义的数据，编错了会真的误导人。
-_LLM_SYSTEM = """你在回答用户关于**他自己**的问题（今天的数据，以及过去写下的日记）。
+_LLM_SYSTEM = """You are answering the user's questions about **their own** day
+(today's data, and their past journal entries).
 
-规则（必须遵守）：
-1. 只使用下面【今天的原始数据】和【过去的相关记录】里出现的事实。
-   两处都没有的，直接说「记录里没有」，**不要推测、不要补充常识、不要编造
-   地点、时间或原因**。
-2. 引用【过去的相关记录】时，要说明是哪一天（例如「10 月 18 日那天…」）。
-   没找到相关记录就直说没找到，不要拿今天的数据冒充过去。
-3. 数据可能不完整或过时（尤其电脑/手表那份）—— 如果数据里有「最后上报」
-   或「这是哪一天的」，要把它说出来。
-4. 回答用中文，两三句话讲完，不要复述整份数据。
-5. 如果问的是这台系统根本没在采集的东西，就说那类数据没有接进来。"""
+Rules (all mandatory):
+1. Use only facts present in [Today's raw data] and [Relevant past records].
+   If neither has it, say "not in the records" — **do not speculate, do not fill
+   in common sense, do not invent places, times or causes**.
+2. When citing [Relevant past records], say which day it was (e.g. "on Oct 18").
+   If nothing relevant was found, say so; never pass today's data off as the past.
+3. The data may be incomplete or stale (especially the computer and watch parts).
+   If it says "last report" or "which day this is", state that.
+4. Answer in English, in two or three sentences. Do not restate the whole dataset.
+5. If the question is about something this system does not collect at all, say
+   that data is not wired in."""
+
 
 
 def _digest(day_iso: str, base: str, key: str) -> str:
@@ -896,7 +899,7 @@ def answer_freeform(text: str, *, day_iso: str, base: str, key: str) -> str | No
         import recall
         hits = recall.search(text, 5)
         if hits:
-            history = "\n\n【过去的相关记录（按相关度排序）】\n" + "\n".join(
+            history = "\n\n[Relevant past records, most relevant first]\n" + "\n".join(
                 f"- [{h['day']}] {h['excerpt']}" for h in hits)
     except Exception as e:  # noqa: BLE001
         print(f"WARN 历史检索不可用：{type(e).__name__}: {e}", file=sys.stderr)
@@ -904,52 +907,60 @@ def answer_freeform(text: str, *, day_iso: str, base: str, key: str) -> str | No
     out, err = _run_llm_turn(
         conf, counter, day_iso,
         system=_LLM_SYSTEM,
-        user=(f"【今天的原始数据】\n{digest}{history}\n\n"
-              f"【用户的问题】\n{text}"),
+        user=(f"[Today's raw data]\n{digest}{history}\n\n"
+              f"[The user's question]\n{text}"),
         stage="feishu_ask")
     if out is None:
         return f"问不了：{err}"
     return out
 
 
-_SUMMARY_SYSTEM = """你在给用户写**一天的收尾复盘**。
+_SUMMARY_SYSTEM = """You are writing the user's **end-of-day recap**.
 
-输出**一个 JSON 对象**，不要任何代码块之外的文字：
+Output **one JSON object**, nothing outside it:
 
 {
-  "summary": "3–5 句话，回顾今天",
-  "did": ["今天具体做了什么", "..."],
-  "advice": ["明天可以执行的一件事", "..."]
+  "summary": "3-5 sentences reviewing the day",
+  "did": ["something concrete they did", "..."],
+  "advice": ["one thing they can do tomorrow", "..."]
 }
 
-规则（必须遵守）：
+Rules (all mandatory):
 
-1. 只用下面给的数据，以及用户自己写下的东西。数据里没有的不要说，不要推测。
-2. `summary` 三到五句话。不分点、不加标题、不罗列整张表。语气平实，像朋友
-   回顾一天 —— 不要打气、不要评价好坏。
-3. `did` 是**事实清单**，3–6 条，每条一件具体的事：做了什么、去了哪、推进了什么。
-   不要写成「工作 / 生活」这种分类，要写「把飞书机器人的收尾题改成七个维度」。
-4. `advice` 是**明天可以执行的具体动作**，1–3 条。不要写「多休息」「保持专注」
-   这种空话 —— 要能直接照着做：比如「明天 15:00 前把 AE 的安装验证掉」、
-   「把学习通的网课刷完，别拖到周末」。优先参考他回答里「没做成、想留到明天」的那条。
-5. 用户自己写的笔记和回答**优先于任何推断**。两者冲突时以用户说的为准。
-6. 如果今天记录很少，照实说，不要编。
-7. `【白天的实时回答】` 是**当时发生的事实**（每小时问的），`【收尾回答】` 是
-   晚上回顾。两者都要用：不要只看收尾那几条，也不要用收尾的概括覆盖掉
-   白天更具体的细节。冲突时以时间更近、更具体的那条为准。
+1. Use only the data below and what the user wrote themselves. Do not invent,
+   do not speculate.
+2. `summary` is 3-5 sentences. No bullets, no headings, no re-listing the table.
+   Plain tone, like a friend looking back on the day — no pep talk, no judging.
+3. `did` is a **list of facts**, 3-6 items, one concrete thing each: what they
+   did, where they went, what moved forward. Not "work / life" categories —
+   write "rewrote the bot's wrap-up questions into seven dimensions".
+4. `advice` is **concrete actions for tomorrow**, 1-3 items. No "rest more" or
+   "stay focused" — it has to be directly executable: "verify the AE install
+   before 15:00 tomorrow", "finish the remaining course videos, don't push it
+   to the weekend". Prefer the item from their answer to "what did not get done".
+5. What the user wrote themselves **outranks any inference**. If they conflict,
+   their words win.
+6. If there is very little recorded today, say so plainly. Do not pad.
+7. `[Live answers]` are facts recorded **at the time** (asked hourly);
+   `[Wrap-up answers]` are the evening review. Use both: do not read only the
+   wrap-up, and do not let the wrap-up's summary overwrite the more specific
+   details from the day. On conflict, prefer the nearer, more specific one.
 
-另外三条，都和「别把不确定的东西说成确定」有关：
+Three more, all about not stating uncertain things as certain:
 
-8. **标了过期/停在哪天的数据不能当今天用。** 如果原始数据里出现「最后一次上报是
-   X 小时前」「数据停在某天」这类话，那块数字属于**那一天**，不是今天。可以在
-   summary 里提一句「电脑那边今天没上来」，但不要把它写进 `did`。
-9. **窗口标题不是行为。** 「在 VS Code 里开着 life-pipeline.drawio」只能说明
-   屏幕上开着什么，不能推出「今天在弄那张图」。`did` 里写的每一件事，必须能在
-   他的回答或明确的活动时长里找到依据；只有窗口标题支撑的那条，要么删掉，
-   要么写成「窗口一直停在 X」。
-10. **同一段回答不会出现两次。** 如果某题的回答写着「同一段回答，见《…》」，
-    那是他把同一段话答了两道题 —— 当成**一件事**，不要拆成两条 `did`，
-    也不要据此认为今天有两件同样重要的事。"""
+8. **Data marked stale cannot be used as today's.** If the raw data says "last
+   report X hours ago" or "data stops at <date>", that block belongs to that
+   day, not today. You may mention "the computer side did not report today" in
+   `summary`, but do not put it in `did`.
+9. **A window title is not a behaviour.** "life-pipeline.drawio open in VS Code"
+   only says what was on screen, not that they worked on it. Every item in
+   `did` must be supported by their answers or by a clear activity duration;
+   an item supported only by a window title should be dropped or phrased as
+   "the window stayed on X".
+10. **The same answer never appears twice.** If an answer reads "same as
+    “...”", it means they answered two questions with one passage —
+    treat it as **one event**, do not split it into two `did` items."""
+
 
 
 def _extract_json_obj(raw: str) -> dict | None:
@@ -1012,7 +1023,7 @@ def write_day_summary(day_iso: str, base: str, key: str,
             group = [(x, dup) for x, dup in marked if _qa_bucket(x) == label]
             if not group:
                 continue
-            chunks.append(f"【{label}】")
+            chunks.append(f"[{label}]")
             for x, dup in group:
                 qt = _one_line(x.get("text") or "(题号不在问题文件里)", 200)
                 if dup:
@@ -1033,8 +1044,8 @@ def write_day_summary(day_iso: str, base: str, key: str,
     out, err = _run_llm_turn(
         conf, counter, day_iso,
         system=_SUMMARY_SYSTEM,
-        user=(f"【今天的原始数据】\n{digest}\n\n"
-              f"【今天我问你、你回答的】\n{answers}"),
+        user=(f"[Today's raw data]\n{digest}\n\n"
+              f"[What I asked you today, and what you answered]\n{answers}"),
         stage="feishu_summary")
     if out is None:
         return None, err

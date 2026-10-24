@@ -461,7 +461,7 @@ def save_note(open_id: str, text: str) -> None:
     # 记下原文（截断）：排查「我说的话它怎么没存/怎么当成问句了」时，
     # 日志里得有那句话本身，光有「记下了」什么都查不出来。
     print(f"[note] {text[:80]!r}")
-    send_text(open_id, "记下了。")
+    send_text(open_id, "Noted.")
 
 
 def _survives_close(q: dict) -> bool:
@@ -1002,7 +1002,7 @@ def done_card(day_iso: str, ack: str = "") -> dict:
 
     if buckets:
         order = ("summary", "checkin", "commitment", "live", "morning")
-        rows = [f"**{_GROUP_LABEL[g]}**　{buckets[g]} 题"
+        rows = [f"**{_GROUP_LABEL[g]}**　{buckets[g]}"
                 for g in order if buckets.get(g)]
         elements.append({"tag": "div",
                          "text": {"tag": "lark_md", "content": "\n".join(rows)}})
@@ -1074,7 +1074,7 @@ def send_help(open_id: str) -> None:
 
 def render_question(q: dict, remaining: int) -> str:
     """**纯文本**版本的题目。卡片发不出去时的兜底，同时是 /pending 的输出。"""
-    lines = [f"{_group_label(q)} · 还剩 {remaining} 题"]
+    lines = [f"{_group_label(q)} · {remaining} left"]
 
     day = str(q.get("day") or "")
     today = datetime.now(TZ).date().isoformat()
@@ -1329,7 +1329,7 @@ def maybe_write_summary(open_id: str, day_iso: str,
     #    模型那一段只是收尾。整条链路里最不该因为 LLM 挂了就什么都不给。
     recap = live.day_recap(day_iso, RELAY_BASE, RELAY_API_KEY, qa, text)
     if text is None:
-        recap += f"\n\n（总结没写成：{err}）"
+        recap += f"\n\n(summary not written: {err})"
     try:
         send_card(open_id, recap_card(recap))
     except Exception as e:  # noqa: BLE001
@@ -1533,18 +1533,18 @@ def handle_end_day(open_id: str) -> None:
         # 不想让「配置文件有问题」把整个机器人拖得启动不了。
         import live_questions as lq
     except Exception as e:  # noqa: BLE001
-        send_text(open_id, f"收尾功能不可用：{type(e).__name__}: {e}")
+        send_text(open_id, f"Wrap-up unavailable: {type(e).__name__}: {e}")
         return
 
     try:
         qs = lq.force_summary(day_iso, RELAY_BASE, RELAY_API_KEY)
     except Exception as e:  # noqa: BLE001
         print(f"ERROR 收尾题生成失败：{type(e).__name__}: {e}", file=sys.stderr)
-        send_text(open_id, f"收尾题没生成成：{type(e).__name__}: {e}")
+        send_text(open_id, f"Wrap-up questions were not generated: {type(e).__name__}: {e}")
         return
 
     if not qs:
-        send_text(open_id, "今天的收尾题都已经答完了。")
+        send_text(open_id, "All of today's wrap-up questions are already answered.")
         return
 
     q = qs[0]
@@ -1640,7 +1640,7 @@ def handle_data_command(open_id: str, cmd: str, arg: str) -> None:
         return
     except Exception as e:  # noqa: BLE001
         print(f"ERROR 查数据失败：{type(e).__name__}: {e}", file=sys.stderr)
-        send_text(open_id, f"查不到：{e}")
+        send_text(open_id, f"Query failed: {e}")
         return
 
     # /ask 的回话是散文，没有「第一行当标题」这回事，必须显式给标题。
@@ -1723,7 +1723,7 @@ def handle_text(open_id: str, text: str) -> None:
         #    而今天才刚开始，内容全是前一天串进来的。
         if not maybe_write_summary(open_id, target_day_iso(datetime.now(TZ)),
                                    force=True):
-            send_text(open_id, "今天还没有可复盘的记录。")
+            send_text(open_id, "There is nothing recorded to recap yet.")
         return
 
     if stripped in CHECKIN_COMMANDS:
@@ -1736,7 +1736,7 @@ def handle_text(open_id: str, text: str) -> None:
 
     if stripped == "/skip":
         if not awaiting:
-            send_text(open_id, "现在没有在问的题。")
+            send_text(open_id, "No question is waiting.")
             return
         # 跳过 = **今天**不再问这题。⚠️ 不写任何答案事件 —— 写一条假的
         # 「没做」会让 Tasks.md 被勾错，那比不答更糟。
@@ -1809,7 +1809,7 @@ def handle_text(open_id: str, text: str) -> None:
     try:
         questions = relay_pending()
     except Exception as e:  # noqa: BLE001
-        send_text(open_id, f"拉不到题目内容：{e}")
+        send_text(open_id, f"Cannot fetch the question: {e}")
         return
 
     q = next((x for x in questions if str(x.get("id")) == str(awaiting)), None)
