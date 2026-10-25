@@ -59,7 +59,11 @@ APP_RULES: list[tuple[str, list[str]]] = [
         "notion", "obsidian", "typora", "confluence", "jira", "trello",
         "figma", "photoshop", "illustrator", "blender", "premiere", "after effects",
         "github", "gitlab", "bitbucket", "sourcegraph",
-        "claude", "cursor", "copilot", "chatgpt", "chat.openai",
+        # 编辑器/IDE 里的 AI 助手跟随所在活动 → 写代码就是 Work。
+        # Gemini/Antigravity 这种「编辑器 + 助手」按进程名走，不能因为
+        # 标题里出现 Gemini 就被算成 Study。
+        "antigravity",
+        "cursor", "copilot",
     ]),
     ("Study", [
         "anki", "zotero", "mendeley", "endnote", "calibre", "kindle",
@@ -67,6 +71,10 @@ APP_RULES: list[tuple[str, list[str]]] = [
         "arxiv", "jstor", "scholar", "pubmed", "wikipedia",
         "duolingo", "baicizhan", "shanbay",
         "acrobat", "sumatrapdf", "foxit", "pdf",
+        # 对话式 AI：电脑端（网页/独立 App）和手机端一律算学习。
+        # ⚠️ 只收「对话界面」；IDE 内嵌助手（cursor/copilot/antigravity）
+        #    留在 Work 里，别让写代码的时间被改写。
+        "deepseek", "chatgpt", "chat.openai", "claude", "gemini", "perplexity",
     ]),
     ("Transport", [
         "amap", "gaode", "baidumap", "google maps", "maps", "didi", "uber",
@@ -74,6 +82,9 @@ APP_RULES: list[tuple[str, list[str]]] = [
     ]),
     ("Leisure", [
         "steam", "epic games", "battle.net", "riot", "genshin", "原神",
+        # 游戏本体的进程名/标题。实测 PUBG 的 TslGame.exe 既不含 "steam"，
+        # 也不含任何休闲关键词，于是被当成了 Other，再被相邻的工作块吸走。
+        "pubg", "tslgame", "battlegrounds",
         "netflix", "iqiyi", "youku", "tencent video", "spotify", "netease music",
         "qqmusic", "music", "potplayer", "vlc", "mpv",
         "weibo", "zhihu", "douban", "reddit", "twitter", "x.com",
@@ -120,13 +131,19 @@ TITLE_HINTS: list[tuple[str, list[str]]] = [
         "figma", "pull request", "merge request", "issue #", "dashboard",
         "admin console", "控制台", "后台管理", "gmail", "outlook",
         "docs.google", "飞书", "钉钉", "slack", "企业微信",
-        "stack overflow", "stackoverflow", "localhost",
+        "stack overflow", "stackoverflow",
+        # 这里**不能**再收 "localhost"：同一个项目在浏览器里开着，
+        # 带 localhost 的标签页判 Work、不带的走浏览器兜底判 Study，
+        # 同一件事一天里会被拆成两类。按「浏览器里的项目内容一律算学习」，
+        # 本地 dev server 也归 Study。
     ]),
     ("Study", [
         "教程", "课程", "讲义", "课件", "论文", "文献", "复习",
         "documentation", "docs", "tutorial", "lecture", "handbook",
         "arxiv", "pubmed", "wikipedia", "维基", "手册", "reference",
         "how to", "如何", "指南", "入门", "api reference",
+        # 浏览器里的对话式 AI → 学习（与 APP_RULES 的口径一致）
+        "deepseek", "chatgpt", "chat.openai", "claude", "gemini", "perplexity",
     ]),
     ("Leisure", [
         "bilibili", "哔哩", "youtube", "netflix", "爱奇艺", "腾讯视频",
@@ -216,8 +233,15 @@ def classify(app: str, title: str) -> tuple[str, str]:
         for cat, hints in TITLE_HINTS:
             if any(h in title_l for h in hints):
                 return (cat, "rule")
-        # 标题也没线索 → 交给 LLM，别猜
-        return ("Other", "ambiguous")
+        # 没有命中任何强信号 → 按「浏览 = 看资料/研究」记 Study。
+        #
+        # 这是 2026-10-24 定的口径：HER/IT 这类项目内容没法穷举成关键词，
+        # 与其每天丢给 LLM 猜、结果又不回写（第二天的分类照样飘），
+        # 不如给浏览器一个确定的默认值。强信号仍然优先：GitHub/Notion/
+        # 后台 → Work，视频/社交 → Leisure，购物/账单 → Life。
+        # 代价是「随便逛逛新闻/论坛」也会被算成 Study —— 接受这个偏差，
+        # 比让一大片时间落进 Other 更接近「浏览器时间大多是在查东西」。
+        return ("Study", "rule")
 
     for cat, keys in APP_RULES:
         for k in keys:
@@ -479,16 +503,28 @@ def build_blocks(slices: list[dict[str, Any]]) -> tuple[list[Block], dict[str, f
             last = blocks[-1]
             gap = start - last.end
             if _should_merge(last, cat, conf, s["app"], s["dur"], gap):
-                # 之前不知道、现在认出来了 → 采用认出来的那个分类
+                # 之前不知道、现在认出来了 → 采用认出来的那个分类。
+                #
+                # ⚠️ 只接受**同一应用**的更正。焦点闪动允许跨应用并块（那段时间
+                #    确实还是原来那件事），但**别的应用不能改写这一块的分类**：
+                #    实测 TslGame.exe（PUBG）的块被一条 10 秒的 msedge 切片
+                #    「更正」成了 Work，只因为那条切片开着 localhost。块的应用、
+                #    标题都还是 PUBG，分类却变成了工作，七维里凭空多出半小时 Work。
                 if (_is_unknown(last.category, last.confidence)
-                        and not _is_unknown(cat, conf)):
+                        and not _is_unknown(cat, conf)
+                        and s["app"] == last.app):
                     last.category = cat
                     last.confidence = conf
                 last.end = max(last.end, end)
                 last.seconds += s["dur"]
-                if s["title"] and s["title"] not in last.titles:
+                # 标题同理：跨应用的闪动只贡献时长，不把它的窗口标题塞进块里，
+                # 否则会出现「PUBG: BATTLEGROUNDS / LIVEINPASSION / ...」这种
+                # 应用对不上标题的串。
+                if s["title"] and s["app"] == last.app and s["title"] not in last.titles:
                     last.titles.append(s["title"])
-                if not last.url and s.get("url"):
+                # URL 同理：别的应用的地址不属于这一块。不然 PUBG 的块会带上
+                # 一条浏览器 URL，原始归档里就成了「应用和地址对不上」。
+                if not last.url and s.get("url") and s["app"] == last.app:
                     last.url = s["url"]
                 # 只有「认出来了但判不准」才把整块降级成待复核。
                 #
@@ -550,9 +586,13 @@ def fold_short_blocks(blocks: list[Block],
         if b.start - prev.end <= MERGE_GAP:
             prev.end = max(prev.end, b.end)
             prev.seconds += b.seconds
-            for t in b.titles:
-                if t and t not in prev.titles:
-                    prev.titles.append(t)
+            # 只有同一应用的短块才把标题带进来。跨应用的短块照样并进去算时长
+            # （丢时长更糟），但它的窗口标题不属于这一块，塞进来只会让
+            # 「PUBG 的块里出现 LIVEINPASSION」这种串看起来像数据错误。
+            if b.app == prev.app:
+                for t in b.titles:
+                    if t and t not in prev.titles:
+                        prev.titles.append(t)
             if b.confidence == "ambiguous":
                 prev.confidence = "ambiguous"
         else:
@@ -862,6 +902,47 @@ def _active_seconds(
     return total
 
 
+def _unlock_slices(
+    start: datetime, end: datetime, unlocks: list[datetime],
+) -> list[tuple[datetime, datetime]]:
+    """``_unlock_seconds`` 的区间版本：第一个解锁之前的那一段。"""
+    if end <= start:
+        return []
+    for u in unlocks:
+        if start < u <= end:
+            return [(start, u)] if u > start else []
+    return [(start, end)]
+
+
+def _active_intervals(
+    start: datetime, end: datetime,
+    unlocks: list[datetime], screen_iv: list[tuple[datetime, datetime]],
+    covered: tuple[datetime, datetime] | None = None,
+) -> list[tuple[datetime, datetime]]:
+    """``_active_seconds`` 的区间版本 —— 口径必须和它逐条一致。
+
+    给站点算 collapsedHours 用：union 需要真实的时间区间，不能只看总分钟数。
+    """
+    if end <= start:
+        return []
+    if not screen_iv or covered is None:
+        return _unlock_slices(start, end, unlocks)
+
+    cov_lo, cov_hi = covered
+    out: list[tuple[datetime, datetime]] = []
+    if start < cov_lo:
+        out.extend(_unlock_slices(start, min(end, cov_lo), unlocks))
+    if end > cov_hi:
+        out.extend(_unlock_slices(max(start, cov_hi), end, unlocks))
+    s, e = max(start, cov_lo), min(end, cov_hi)
+    if e > s:
+        for a, b in screen_iv:
+            lo, hi = max(s, a), min(e, b)
+            if hi > lo:
+                out.append((lo, hi))
+    return out
+
+
 def _end_of_screen_window(
     ts: datetime, screen_iv: list[tuple[datetime, datetime]],
 ) -> datetime | None:
@@ -960,7 +1041,9 @@ def summarize_phone(events: list[dict[str, Any]]) -> dict[str, Any]:
         if end is not None:
             attribute(raw_last, (end - t_last).total_seconds())
 
-    top = sorted(fore.items(), key=lambda x: -x[1])[:10]
+    # 40 而不是 10：手机应用列表也要能在单日详情里完整展开。
+    # 真实一天通常 15–30 个应用，这个上限只是防止异常数据撑爆 payload。
+    top = sorted(fore.items(), key=lambda x: -x[1])[:40]
 
     return {
         "unlocks": len(unlocks),
@@ -979,6 +1062,67 @@ def summarize_phone(events: list[dict[str, Any]]) -> dict[str, Any]:
         "unknown_apps": [[pkg, round(secs / 60.0, 1)]
                          for pkg, secs in sorted(unknown.items(), key=lambda x: -x[1])],
     }
+
+
+def phone_app_intervals(
+    events: list[dict[str, Any]], apps: set[str],
+) -> list[tuple[datetime, datetime]]:
+    """指定应用的前台时间区间 —— ``summarize_phone`` 的区间版本。
+
+    为什么要单独要区间：站点要算「一天里被各个数据源覆盖的**并集**」，
+    只知道「微信 184 分钟」是不够的，必须知道这 184 分钟落在哪些时刻，
+    才能和桌面块求交、把重复的部分扣掉。
+
+    归属口径（屏幕裁剪、跨应用切换的一阶差分、最后一个应用到熄屏为止、
+    超过 60 分钟的空档不算）和 ``summarize_phone`` 保持一致；
+    那边改规则时这里要一起改。
+    """
+    unlocks: list[datetime] = []
+    switches: list[tuple[datetime, str]] = []
+    screen_events: list[tuple[datetime, str]] = []
+
+    for e in events:
+        ts = _parse(e.get("ts_utc"))
+        if ts is None:
+            continue
+        met = e.get("metric")
+        if met == "unlock":
+            unlocks.append(ts)
+        elif met == "app_switch":
+            switches.append((ts, (e.get("value_text") or "").strip()))
+        elif met in ("screen_on", "screen_off"):
+            screen_events.append((ts, met))
+
+    unlocks.sort()
+    switches.sort(key=lambda x: x[0])
+    screen_iv = _screen_intervals(screen_events)
+    covered: tuple[datetime, datetime] | None = (
+        (min(t for t, _ in screen_events), max(t for t, _ in screen_events))
+        if screen_events else None
+    )
+
+    out: list[tuple[datetime, datetime]] = []
+
+    def add(raw_app: str, lo: datetime, hi: datetime) -> None:
+        span = (hi - lo).total_seconds()
+        if not (0 <= span <= MAX_FOREGROUND_GAP.total_seconds()):
+            return
+        if raw_app in PHONE_NOT_AN_APP or raw_app.startswith("%"):
+            return
+        if phone_app_name(raw_app) not in apps:
+            return
+        out.extend(_active_intervals(lo, hi, unlocks, screen_iv, covered))
+
+    for (t0, raw_app), (t1, _) in zip(switches, switches[1:]):
+        add(raw_app, t0, t1)
+
+    if switches:
+        t_last, raw_last = switches[-1]
+        end = _end_of_screen_window(t_last, screen_iv)
+        if end is not None:
+            add(raw_last, t_last, end)
+
+    return out
 
 
 def attach_other_domains(tl: Timeline, day: Day) -> None:

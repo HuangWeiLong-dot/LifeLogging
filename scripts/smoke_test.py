@@ -465,10 +465,20 @@ def t_rules():
         got, conf = classify(app, title)
         assert got == want, f"{app!r}/{title!r} expected {want}，got {got}（conf={conf}）"
 
-    # 浏览器但标题没线索 → 必须标 ambiguous 交给 AI，而不是猜
+    # 浏览器但标题没线索 → 2026-10-24 起默认 Study（浏览 = 看资料/研究），
+    # 不再丢给 LLM 猜：模型判断不回写，第二天的分类照样会飘。
     got, conf = classify("msedge.exe", "New Tab")
-    assert conf == "ambiguous", f"a browser with no clues should be ambiguous, got {conf}"
-    assert got == "Other", f"got {got}"
+    assert (got, conf) == ("Study", "rule"), f"got ({got}, {conf})"
+
+    # 对话式 AI：浏览器/独立 App 一律 Study；编辑器里的助手仍是 Work
+    assert classify("msedge.exe", "DeepSeek - Into the Unknown")[0] == "Study"
+    assert classify("msedge.exe", "ChatGPT")[0] == "Study"
+    assert classify("claude.exe", "Claude")[0] == "Study"
+    assert classify("Antigravity.exe", "Gemini - project")[0] == "Work"
+    assert classify("Cursor.exe", "main.py")[0] == "Work"
+
+    # 游戏本体不能落到 Work（PUBG: TslGame.exe）
+    assert classify("TslGame.exe", "PUBG: BATTLEGROUNDS")[0] == "Leisure"
 
     # 浏览器里的 bilibili 走标题判断，直接定 Leisure（不再走 ambiguous 分支）
     got, conf = classify("chrome.exe", "bilibili 首页")
@@ -524,14 +534,25 @@ def t_block_merging():
     assert not N._is_unknown("Leisure", "ambiguous"), "认出来了、只是判不准，不算未知"
 
     # 1. 一条认不出的记录不构成活动切换
+    #    ⚠️ 用非浏览器应用：浏览器现在没有「认不出」这个出口了 ——
+    #    没命中强信号一律默认 Study（见 t_rules 里的口径）。
     blocks, _ = N.build_blocks([
-        sl(0, 60, "msedge.exe", "GitHub - Pull Request"),   # Work（规则命中）
-        sl(60, 30, "msedge.exe", "New Tab"),                # Other，无线索
-        sl(90, 60, "msedge.exe", "GitHub - Issue"),         # Work
+        sl(0, 60, "SomeTool.exe", "GitHub - Pull Request"),  # Work（标题命中）
+        sl(60, 30, "SomeTool.exe", "whatever"),              # Other/default，同应用
+        sl(90, 60, "SomeTool.exe", "GitHub - Issue"),        # Work
     ])
     assert len(blocks) == 1, f"认不出的记录不该切断活动，得到 {len(blocks)} 块"
     assert blocks[0].category == "Work", blocks[0].category
     assert blocks[0].seconds == 150, blocks[0].seconds
+
+    # 1b. 跨应用的闪动只并时长，不能改写分类。
+    #     实测 TslGame.exe（PUBG）的块被一条 10 秒的 msedge 切片改成了 Work。
+    blocks, _ = N.build_blocks([
+        sl(0, 300, "SomeTool.exe", "whatever"),              # Other/default
+        sl(300, 5, "msedge.exe", "GitHub - Pull Request"),   # Work/rule，5 秒
+    ])
+    assert len(blocks) == 1, f"闪动不该单独成块，得到 {len(blocks)} 块"
+    assert blocks[0].category == "Other", blocks[0].category
 
     # 2. 焦点闪动（1 秒的另一个应用）不构成活动切换
     blocks, _ = N.build_blocks([
@@ -2975,6 +2996,82 @@ check("feishu: 答完一题必须接着发下一题（不能一声不吭）",
       t_answer_advances)
 
 
+def t_ask_word_never_answer():
+    """「?」是「把题给我」，**永远不是答案** —— 尤其不能落进 text 题。
+
+    ⚠️ 真实事故（2026-10-24 收尾）：人际是 text 题，用户回了一个「?」，
+       `canonicalise()` 对 text 什么都收，于是那天的人际答案就是一个问号 ——
+       它会进复盘、进 label_free_text 的证据链，数据表面完全看不出异常，
+       而用户真正想答的那句话没地方放了。
+    """
+    import importlib.util
+    from datetime import datetime as _datetime
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "fb_ask", root / "server" / "feishu-bot" / "feishu_bot.py")
+    fb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fb)
+
+    today = _datetime.now(fb.TZ).date().isoformat()
+    q = {"id": f"{today}-ask1", "day": today, "source": "live",
+         "kind": "summary", "format": "text",
+         "text": "Today, more time alone or more time with people?"}
+
+    calls: dict = {"answer": [], "sent": [], "asked": [], "advance": 0}
+    state: dict = {}
+    real_advance = fb.advance
+
+    fb.load_state = lambda: state
+    fb.save_state = lambda s: state.update(s)
+    fb.relay_pending = lambda: [q]
+    fb.relay_answer = lambda qid, v, n="": (
+        calls["answer"].append((qid, v, n)) or {"inserted": 1})
+    fb.send_question = lambda oid, qq, n, ack="": calls["asked"].append(
+        (qq["id"], n, ack))
+    fb.send_text = lambda oid, t: calls["sent"].append(t)
+    fb.advance = lambda oid, **kw: calls.__setitem__(
+        "advance", calls["advance"] + 1)
+
+    # ① 正在等 text 题：只把题再显示一遍，不写答案，awaiting 不动
+    state.clear()
+    state["awaiting"] = q["id"]
+    fb.handle_text("ou_x", "?")
+    assert calls["answer"] == [], f"「?」被写成了答案：{calls['answer']}"
+    assert calls["asked"] == [(q["id"], 1, "Still waiting on this one.")], calls
+    assert state.get("awaiting") == q["id"], state
+
+    # ② 正在等「为什么」：同样不写，仍然等那一句（或 skip）
+    calls["sent"].clear()
+    state.clear()
+    state["reason_for"] = {"qid": f"{today}-score", "day": today,
+                           "dim": "心情", "value": "2 low"}
+    fb.handle_text("ou_x", "？")
+    assert calls["answer"] == [], f"「?」被写成了理由：{calls['answer']}"
+    assert calls["sent"] and "skip" in calls["sent"][0].lower(), calls
+    assert (state.get("reason_for") or {}).get("qid") == f"{today}-score", state
+
+    # ③ 没挂题的时候，它仍然是「给我下一题」
+    state.clear()
+    calls["advance"] = 0
+    fb.handle_text("ou_x", "?")
+    assert calls["advance"] == 1, calls
+
+    # ④ 等「为什么」时，advance() 不能把下一题插进来
+    calls["asked"].clear()
+    state.clear()
+    state["reason_for"] = {"qid": f"{today}-score", "day": today,
+                           "dim": "心情", "value": "2 low"}
+    fb.pending_filtered = lambda st: [q]
+    real_advance("ou_x")
+    assert calls["asked"] == [], "追问期间插进了下一题"
+    assert state.get("awaiting") is None, state
+
+
+check("feishu: 「?」不会被当成 text 题/理由的答案，追问期间不插下一题",
+      t_ask_word_never_answer)
+
+
 def t_recap_command():
     """/复盘：强制重做一次复盘。
 
@@ -4078,6 +4175,87 @@ def t_vault():
 
 
 check("vault has all 8 folders plus templates", t_vault)
+
+
+# ── 25. collapsedHours：区间并集 ──────────────────────────────────
+print("\n[25] Collapsed hours (union of intervals)")
+
+
+def t_collapsed_hours():
+    """``collapsedHours`` 的区间版必须和「分钟」口径**逐条**一致。
+
+    站点雷达底下的 UNIQUE TIME 用的是各来源区间的**并集**：桌面块、交通、
+    锻炼、手机活跃。手机那部分靠 ``phone_app_intervals`` → ``_active_intervals``
+    提供，而它们各自有一个按分钟算的原版（``summarize_phone`` /
+    ``_active_seconds``）。两套裁剪规则只要差一条，并集就会多算或少算 ——
+    数字看上去完全正常，没有任何人会察觉。这里就是拿两套对着跑。
+    """
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+
+    import normalize as N
+    import publish_life_site as P
+
+    tz = ZoneInfo(CFG["timezone"])
+    t0 = _dt(2026, 10, 13, 20, 0, 0, tzinfo=tz)
+
+    def m(n):
+        return t0 + _td(minutes=n)
+
+    def seconds(ivs):
+        return sum((b - a).total_seconds() for a, b in ivs)
+
+    # ① 没有屏幕数据 → 退回按解锁裁（老数据 / 手机还没加 Display Profile）
+    unlocks = [m(10)]
+    ivs = N._active_intervals(t0, m(30), unlocks, [], None)
+    assert ivs == [(t0, m(10))], ivs
+    assert seconds(ivs) == N._active_seconds(t0, m(30), unlocks, [], None)
+
+    # ② 屏幕数据只覆盖中间一段：前后两截各自按解锁裁，中间按屏幕区间裁。
+    #    这是 ``_active_seconds`` 里踩过一次的坑（中途才加 Display Profile，
+    #    之前那一段被整段裁成 0），区间版必须原样复刻。
+    screen = [(m(12), m(16)), (m(20), m(28))]
+    covered = (m(12), m(28))
+    for lo, hi in [(t0, m(30)), (m(5), m(20)), (m(14), m(26)), (m(16), m(20))]:
+        want = N._active_seconds(lo, hi, unlocks, screen, covered)
+        got = seconds(N._active_intervals(lo, hi, unlocks, screen, covered))
+        assert abs(got - want) < 1e-6, (
+            f"区间版 {got}s ≠ 分钟版 {want}s（{lo:%H:%M}–{hi:%H:%M}）")
+
+    # ③ 并集：重叠只算一次，首尾相接也算一段
+    assert P._interval_minutes([(t0, m(10)), (m(5), m(20))]) == 20.0
+    assert P._interval_minutes([(t0, m(10)), (m(10), m(20))]) == 20.0
+    assert P._interval_minutes([]) == 0.0
+
+    # ④ 跨午夜的块裁进当天 —— 不然「今天」会把第二天早上算进来
+    day_end = m(24 * 60)
+    clip = P._clip_intervals(
+        [(m(-60), m(10)), (day_end - _td(minutes=5), day_end + _td(minutes=60))],
+        t0, day_end)
+    assert clip == [(t0, m(10)), (day_end - _td(minutes=5), day_end)], clip
+
+    # ⑤ topSites 只到域名一级：www. 去掉、同一站点合并、页面标题不许进来
+    sites = P.build_sites([
+        {"metric": "site_usage", "value_text": "WWW.GitHub.com", "value_num": 600.0},
+        {"metric": "site_usage", "value_text": "github.com", "value_num": 600.0},
+        {"metric": "site_usage", "value_text": "chat.deepseek.com", "value_num": 60.0},
+        {"metric": "page", "value_text": "LIVEINPASSION", "value_num": 9999.0},
+    ])
+    assert sites == [["github.com", 20.0], ["chat.deepseek.com", 1.0]], sites
+    assert P.build_sites([]) is None, "没有站点数据时必须是 None，不能是空列表"
+
+    # ⑥ 跨应用的闪动连 URL 也不该带进来（和标题同一个道理）
+    blocks, _ = N.build_blocks([
+        {"ts": t0, "dur": 300, "app": "TslGame.exe", "title": "PUBG: BATTLEGROUNDS"},
+        {"ts": m(5), "dur": 3, "app": "msedge.exe", "title": "GitHub",
+         "url": "https://github.com/acme/pull/1"},
+    ])
+    assert len(blocks) == 1, f"闪动不该单独成块，得到 {len(blocks)} 块"
+    assert not blocks[0].url, f"别的应用的 URL 被贴进来了：{blocks[0].url}"
+    assert blocks[0].titles == ["PUBG: BATTLEGROUNDS"], blocks[0].titles
+
+
+check("collapsedHours: 区间版与分钟版逐条一致 / 并集 / 跨午夜裁剪", t_collapsed_hours)
 
 # ── 汇总 ───────────────────────────────────────────────────────────
 print("\n" + "=" * 64)

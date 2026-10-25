@@ -6,13 +6,14 @@
 
 只发聚合数字：
   · 分类时长、追踪小时数、常用桌面应用（友好名）
+  · 常用浏览站点（**只到域名**，按当天分钟数排序）
   · 步数 / 心率 / 跑步汇总 / VO2max
   · 城市 + 区级停留时长、移动分钟、跨度、轨迹点数（**不含坐标/轨迹**）
   · 手机解锁 / 亮灭屏 / 亮屏分钟 / 应用切换 / 常用应用（显示名）
   · AI 花费（按来源解析，**不含余额**、项目名与请求明细）
 
-绝不发送：lat/lon、track_path、blocks.title/url、窗口标题、原始包名、
-日记正文、账号余额。
+绝不发送：lat/lon、track_path、blocks.title、完整 URL、页面标题、窗口标题、
+原始包名、日记正文、账号余额。
 
 用法：
   python scripts/publish_life_site.py                 # 近 30 天
@@ -43,7 +44,7 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import header, load_config  # noqa: E402
-from normalize import summarize_phone  # noqa: E402
+from normalize import phone_app_intervals, summarize_phone  # noqa: E402
 from translate import Translator, has_cjk  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -116,6 +117,13 @@ PKG_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$")
 SOCIAL_APPS = {
     "WeChat", "QQ", "Telegram", "WhatsApp", "Signal", "Line", "Discord",
     "Weibo", "Xiaohongshu", "Instagram", "Facebook", "Threads", "LinkedIn",
+}
+# 手机上的对话式 AI → Study（2026-10-24 定的口径，和 normalize 的
+# APP_RULES/TITLE_HINTS 一致）。桌面端的同类工具已经在桌面分类里算 Study，
+# 这里补的是只有手机才会出现的那部分时间。
+# ⚠️ 只收对话产品；手机上的 IDE/终端助手不存在，不用考虑。
+PHONE_STUDY_APPS = {
+    "DeepSeek", "ChatGPT", "Claude", "Gemini", "Copilot", "Perplexity",
 }
 CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -203,12 +211,42 @@ def build_desktop(blocks: list[sqlite3.Row], categories_cfg: list[str]) -> tuple
         if name:
             apps[name] = apps.get(name, 0.0) + hours
 
-    top = sorted(apps.items(), key=lambda kv: -kv[1])[:8]
+    # 不截到前 8：单日详情和「今日」板块要能展开完整列表。真实一天通常
+    # 只有十几到几十个应用，单天 payload 远低于 32 KB 上限。
+    top = sorted(apps.items(), key=lambda kv: -kv[1])[:60]
     return (
         {k: round(v, 2) for k, v in sorted(categories.items())},
         round(total, 2),
         [[k, round(v, 2)] for k, v in top],
     )
+
+
+def build_sites(rows: list[sqlite3.Row]) -> list | None:
+    """当天浏览器扩展记录的站点时长（分钟），只到域名一级。
+
+    ActivityWatch 的 aw-watcher-web 按站点、按页面标题各记一套；这里只取
+    site_usage。页面标题和完整 URL 仍然只在原始归档里 —— 聚合接口只发域名，
+    和 topApps 一样是“我在哪花了时间”，不是“我看了什么”。
+    """
+    if not rows:
+        return None
+
+    minutes: dict[str, float] = {}
+    for row in rows:
+        if row["metric"] != "site_usage":
+            continue
+        sec = num(row["value_num"], 1) or 0.0
+        if sec <= 0:
+            continue
+        host = (clean_name(row["value_text"], 64) or "").strip().lower().lstrip(".")
+        if host.startswith("www."):
+            host = host[4:]
+        if not host:
+            continue
+        minutes[host] = minutes.get(host, 0.0) + sec / 60.0
+
+    top = sorted(minutes.items(), key=lambda kv: -kv[1])[:60]
+    return [[k, round(v, 1)] for k, v in top] or None
 
 
 def pick_metric(rows: list[sqlite3.Row], metric: str) -> sqlite3.Row | None:
@@ -286,6 +324,38 @@ def _parse_ts(value: Any) -> datetime | None:
         return None
 
 
+def _clip_intervals(
+    intervals: list[tuple[datetime, datetime]],
+    lo: datetime, hi: datetime,
+) -> list[tuple[datetime, datetime]]:
+    """把区间裁进 [lo, hi) —— 块可能跨过午夜。"""
+    out = []
+    for a, b in intervals:
+        if a is None or b is None:
+            continue
+        start, end = max(a, lo), min(b, hi)
+        if end > start:
+            out.append((start, end))
+    return out
+
+
+def _merge_intervals(
+    intervals: list[tuple[datetime, datetime]],
+) -> list[tuple[datetime, datetime]]:
+    """排序后合并重叠区间 —— collapsedHours 的核心就是「并集」。"""
+    out: list[tuple[datetime, datetime]] = []
+    for a, b in sorted(intervals, key=lambda x: x[0]):
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
+
+
+def _interval_minutes(intervals: list[tuple[datetime, datetime]]) -> float:
+    return sum((b - a).total_seconds() for a, b in _merge_intervals(intervals)) / 60.0
+
+
 def _haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
     lat1, lon1 = a
     lat2, lon2 = b
@@ -296,9 +366,12 @@ def _haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
     return 2 * 6371.0 * math.asin(math.sqrt(min(1.0, h)))
 
 
-def build_location(rows: list[sqlite3.Row]) -> dict | None:
+def build_location(
+    rows: list[sqlite3.Row],
+) -> tuple[dict | None, list[tuple[datetime, datetime]]]:
+    """位置聚合 + 交通的真实区间（后者只给 collapsedHours 用，不发布）。"""
     if not rows:
-        return None
+        return None, []
 
     visits: list[tuple[float, str | None, str | None]] = []
     visit_details: list[dict[str, Any]] = []
@@ -343,7 +416,7 @@ def build_location(rows: list[sqlite3.Row]) -> dict | None:
             span_km = num(span, 1)
 
     if not visits and moving == 0 and points is None:
-        return None
+        return None, []
 
     # 当天主城市：停留分钟最多。跨城出行时不把两个城市的区混在一起。
     city_minutes: dict[str, float] = {}
@@ -370,6 +443,7 @@ def build_location(rows: list[sqlite3.Row]) -> dict | None:
     # 这里用两次停留之间的空档补：间隔 4–180min、两点相距 ≥1km，
     # 扣掉落在空档里的实测 transport 段，剩下的就是没被识别到的通勤时间。
     inferred = 0.0
+    inferred_intervals: list[tuple[datetime, datetime]] = []
     ordered = sorted(
         (v for v in visit_details if v["start"] is not None and v["end"] is not None),
         key=lambda v: v["start"],
@@ -390,7 +464,15 @@ def build_location(rows: list[sqlite3.Row]) -> dict | None:
             hi = min(b["start"], t["end"])
             if hi > lo:
                 covered += (hi - lo).total_seconds() / 60.0
-        inferred += max(0.0, gap - covered)
+        left = max(0.0, gap - covered)
+        inferred += left
+        if left > 0:
+            inferred_intervals.append((a["end"], a["end"] + timedelta(minutes=left)))
+
+    intervals = [
+        (t["start"], t["end"]) for t in transport_details
+        if t["start"] is not None and t["end"] is not None
+    ] + inferred_intervals
 
     return {
         "city": main_city,
@@ -401,7 +483,7 @@ def build_location(rows: list[sqlite3.Row]) -> dict | None:
         "stayMinutes": round(stay, 1),
         "spanKm": span_km,
         "points": points,
-    }
+    }, intervals
 
 
 def build_phone(rows: list[sqlite3.Row]) -> dict | None:
@@ -422,7 +504,7 @@ def build_phone(rows: list[sqlite3.Row]) -> dict | None:
         if PKG_RE.match(name or "") or (name or "").lower() == "unknown":
             continue
         apps.append([name, round(float(minutes), 1)])
-        if len(apps) >= 8:
+        if len(apps) >= 40:
             break
 
     return {
@@ -458,7 +540,7 @@ def build_ai(rows: list[sqlite3.Row]) -> dict | None:
             projects.append([name, cost])
         estimated = (estimated or 0.0) + cost
     projects.sort(key=lambda p: -p[1])
-    projects = projects[:8]
+    projects = projects[:30]
 
     models = []
     for row in model_rows:
@@ -467,7 +549,7 @@ def build_ai(rows: list[sqlite3.Row]) -> dict | None:
         if cost is not None and name:
             models.append([name, cost])
     models.sort(key=lambda p: -p[1])
-    models = models[:8]
+    models = models[:30]
 
     # 一个数字，来源必须说清楚：平台真实支出 > Claude Code 估算 > 本流水线台账
     if spend_cost is not None:
@@ -516,11 +598,15 @@ def build_dimensions(categories: dict | None, health: dict | None,
                      location: dict | None, phone: dict | None) -> dict[str, float]:
     """把桌面分类 + 手表 + GPS + 手机合成神经系统用的七维（单位：小时）。
 
-    - Work / Study / Life / Leisure：桌面 ActivityWatch 分类
+    - Work / Life / Leisure：桌面 ActivityWatch 分类
+    - Study：桌面 Study 分类 + 手机上的对话式 AI（PHONE_STUDY_APPS）
     - Transport：Dawarich 的实测 + 推断通勤分钟
     - Health：手表跑步分钟（当前导出没有睡眠/其他可计时活动）
     - Social：手机社交/通讯应用分钟
     Other 不进入七维（它是“没认出来”，不是维度）。
+
+    ⚠️ 这是**各来源读数之和**，不是时间并集：手机在电脑前用微信时，
+       Social 和桌面分类会同时计时。真实的去重总时长见 ``collapsedHours``。
     """
     cats = categories or {}
 
@@ -530,13 +616,19 @@ def build_dimensions(categories: dict | None, health: dict | None,
     transit_min = max(0.0, float((location or {}).get("transitMinutes") or 0.0))
     health_min = max(0.0, float((health or {}).get("runMinutes") or 0.0))
     social_min = 0.0
+    phone_study_min = 0.0
     for name, minutes in (phone or {}).get("topApps") or []:
+        value = max(0.0, float(minutes or 0.0))
         if str(name) in SOCIAL_APPS:
-            social_min += max(0.0, float(minutes or 0.0))
+            social_min += value
+        elif str(name) in PHONE_STUDY_APPS:
+            # 手机 AI 对话并入 Study：它和桌面 Study 是同一个维度，
+            # 只是第二条数据源。跨源重叠由 collapsedHours 负责去重。
+            phone_study_min += value
 
     return {
         "Work": round(cat("Work"), 2),
-        "Study": round(cat("Study"), 2),
+        "Study": round(cat("Study") + phone_study_min / 60.0, 2),
         "Transport": round(transit_min / 60.0, 2),
         "Leisure": round(cat("Leisure"), 2),
         "Health": round(health_min / 60.0, 2),
@@ -668,11 +760,19 @@ def build_all_time(cfg: dict, tz: ZoneInfo) -> dict | None:
     }
 
 
-def build_day(conn: sqlite3.Connection, day: str, categories_cfg: list[str]) -> dict | None:
+def build_day(
+    conn: sqlite3.Connection, day: str, categories_cfg: list[str], tz: ZoneInfo,
+) -> dict | None:
     blocks = conn.execute(
         """SELECT category, app, SUM(hours) AS hours
            FROM blocks WHERE day_local = ?
            GROUP BY category, app""",
+        (day,),
+    ).fetchall()
+
+    # 时间区间：collapsedHours 要求并集，聚合过的 SUM(hours) 不够用。
+    block_rows = conn.execute(
+        "SELECT start_utc, end_utc, hours FROM blocks WHERE day_local = ?",
         (day,),
     ).fetchall()
 
@@ -689,20 +789,70 @@ def build_day(conn: sqlite3.Connection, day: str, categories_cfg: list[str]) -> 
 
     categories, tracked, top_apps = build_desktop(blocks, categories_cfg)
     health = build_health(by_domain.get("health", []))
-    location = build_location(by_domain.get("location", []))
+    location, transport_intervals = build_location(by_domain.get("location", []))
     phone = build_phone(by_domain.get("phone", []))
+
+    # 手机：只取七维里 Social 那一类应用的前台区间。桌面端的微信/QQ
+    # 走 Leisure 规则，不在这个集合里（和 build_dimensions 的口径一致）。
+    phone_rows = by_domain.get("phone", [])
+    phone_intervals = phone_app_intervals(
+        [
+            {"ts_utc": r["ts_utc"], "metric": r["metric"], "value_text": r["value_text"]}
+            for r in phone_rows
+            if r["metric"] in ("unlock", "app_switch", "screen_on", "screen_off")
+        ],
+        # Social 和 Study 的手机部分都要进并集，否则 collapsed 会漏掉手机 AI，
+        # 把「手机 AI 与桌面重叠」误算成额外时长。
+        SOCIAL_APPS | PHONE_STUDY_APPS,
+    )
+
+    # 锻炼：手表记录的每一段 workout 都是真实的“在活动”。
+    workout_intervals: list[tuple[datetime, datetime]] = []
+    for r in by_domain.get("fitness", []):
+        if r["metric"] != "workout":
+            continue
+        start = _parse_ts(r["ts_utc"])
+        meta = meta_of(r)
+        end = _parse_ts(meta.get("end_utc"))
+        if end is None and start is not None:
+            end = start + timedelta(minutes=num(r["value_num"], 1) or 0.0)
+        if start is not None and end is not None and end > start:
+            workout_intervals.append((start, end))
+
+    # collapsedHours：把四个来源的**区间**并起来，重叠部分只算一次。
+    # 桌面块用首尾跨度（块内部的空档 ≤ MERGE_GAP，量很小）；跨午夜的部分裁掉。
+    day_start = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=tz)
+    day_end = day_start + timedelta(days=1)
+    desktop_intervals = [
+        (_parse_ts(r["start_utc"]), _parse_ts(r["end_utc"]))
+        for r in block_rows
+        if (num(r["hours"], 3) or 0) > 0
+    ]
+    desktop_intervals = [(a, b) for a, b in desktop_intervals if a and b]
+
+    intervals: list[tuple[datetime, datetime]] = []
+    for group in (desktop_intervals, transport_intervals,
+                  workout_intervals, phone_intervals):
+        intervals.extend(_clip_intervals(group, day_start, day_end))
+    collapsed = round(_interval_minutes(intervals) / 60.0, 2) if intervals else None
+
     return {
         "v": 1,
         "day": day,
         "categories": categories,
         "trackedHours": tracked,
         "topApps": top_apps,
+        "topSites": build_sites(by_domain.get("web", [])),
         "health": health,
         "location": location,
         "phone": phone,
         "ai": build_ai(by_domain.get("ai", [])),
         "workouts": build_workouts(by_domain.get("fitness", [])),
         "dimensions": build_dimensions(categories, health, location, phone),
+        # 七个维度是各来源读数的**总和**，同一分钟可能被两个来源各算一次
+        # （最典型：电脑前刷手机 → Social 和桌面分类同时计时）。
+        # 这个字段是同一天所有来源区间的**并集**，所以它 ≤ 七维之和。
+        "collapsedHours": collapsed,
     }
 
 
@@ -711,8 +861,8 @@ def has_content(day_obj: dict) -> bool:
     # 否则空的 30 天会被整批发上去。
     return any(
         day_obj.get(k) is not None
-        for k in ("categories", "trackedHours", "topApps", "health", "location",
-                  "phone", "ai", "workouts")
+        for k in ("categories", "trackedHours", "topApps", "topSites", "health",
+                  "location", "phone", "ai", "workouts")
     )
 
 
@@ -766,6 +916,15 @@ def post_days(url: str, token: str, days: list[dict], chunk_size: int, timeout: 
                 for d in chunk:
                     d.pop("workouts", None)
                 print("  ⚠️  Worker 还不认识 workouts；这批先去掉它再发。")
+                continue
+            # 兼容旧 Worker：它的 DAY_KEYS 还没有 topSites。实时流水线每 2 分钟
+            # 跑一次，不能因为一个新字段整批失败 —— 剥掉它重试一次；部署新
+            # Worker 后再跑 --days 30 就能把历史站点补回来。
+            if (res.status_code == 400 and "topSites" in res.text
+                    and any("topSites" in d for d in chunk)):
+                for d in chunk:
+                    d.pop("topSites", None)
+                print("  ⚠️  Worker 还不认识 topSites；这批先去掉它再发。")
                 continue
             # 兼容旧 Worker：它的 DAY_KEYS 还没有 dimensions。部署新 Worker 之前，
             # 当天 23:00 的流水线不能因为一个新字段整批失败 —— 剥掉 dimensions
@@ -861,7 +1020,7 @@ def main() -> int:
     header(f"publish life · {days[0]} → {days[-1]}")
     for day in days:
         try:
-            obj = build_day(conn, day, categories_cfg)
+            obj = build_day(conn, day, categories_cfg, tz)
             if not has_content(obj):
                 skipped.append(day)
                 continue
