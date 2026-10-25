@@ -125,16 +125,19 @@ def parse_gpx(path: Path) -> dict[str, Any] | None:
 
     # 速度 GPX 不直接给，用相邻点的距离/时间差算；只在整条轨迹都有时间时才算，
     # 否则会在缺时间的点上编出一个 0 速度的坑。
-    series: list[tuple[datetime, float | None, float | None, float | None]] = []
+    series: list[tuple] = []
     if len(timed) == len(points):
         prev = None
+        dist_m = 0.0
         for lat, lon, when, ele in points:
             speed = None
             if prev is not None:
+                step_m = _haversine_km((prev[1], prev[2]), (lat, lon)) * 1000.0
+                dist_m += step_m
                 dt = (when - prev[0]).total_seconds()
                 if dt > 0:
-                    speed = _haversine_km((prev[1], prev[2]), (lat, lon)) * 1000.0 / dt
-            series.append((when, None, speed, ele))
+                    speed = step_m / dt
+            series.append((when, None, speed, ele, dist_m, None))
             prev = (when, lat, lon)
 
     return {

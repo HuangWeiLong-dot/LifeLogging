@@ -64,7 +64,7 @@ def parse_fit(path: Path) -> dict[str, Any] | None:
     points: list[tuple[float, float, datetime | None]] = []
     # 轨迹点之外，FIT 每帧还带心率 / 速度 / 海拔。这些是 Gadgetbridge 数据库里
     # 没有的（DB 只有整次的平均值），丢掉就再也拿不回来了。
-    series: list[tuple[datetime, float | None, float | None, float | None]] = []
+    series: list[tuple] = []
     try:
         with FitReader(str(path)) as fit:
             for frame in fit:
@@ -89,11 +89,17 @@ def parse_fit(path: Path) -> dict[str, Any] | None:
                     hr = _val(frame, "heart_rate")
                     speed = _val(frame, "enhanced_speed", "speed")
                     alt = _val(frame, "enhanced_altitude", "altitude")
+                    # record 里的 distance 是**设备自己累计的**米数，分段配速和坡度
+                    # 都以它为准；拿经纬度累加会在 GPS 抖动上多算一截。
+                    dist = _val(frame, "distance")
+                    temp = _val(frame, "temperature")
                     series.append((
                         when,
                         float(hr) if hr is not None else None,
                         float(speed) if speed is not None else None,
                         float(alt) if alt is not None else None,
+                        float(dist) if dist is not None else None,
+                        float(temp) if temp is not None else None,
                     ))
     except Exception as exc:  # noqa: BLE001
         print(f"  ⚠️  {path.name}: FIT parse failed: {type(exc).__name__}: {exc}", file=sys.stderr)
