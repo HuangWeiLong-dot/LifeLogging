@@ -13,8 +13,12 @@
 # 重采集（Dawarich 位置、Gadgetbridge 手表、AI 平台账单）默认每 15 分钟一次，
 # 避免每 2 分钟都去下整份手表库 / 撞平台接口。
 #
-# 原始归档（raw）默认**不在这里发**：publish_life_raw.py 会调 LLM 翻译，
-# 高频跑既费钱又会把当前坐标实时公开。需要的话用 -RawMinutes 30 显式打开。
+# 原始归档（raw）整体默认**不在这里发**：整份 publish_life_raw.py 会调 LLM 翻译，
+# 高频跑既费钱又会把当前坐标、日记、问答实时公开。需要的话用 -RawMinutes 30 显式打开。
+# 唯一例外是 **blocks**：站点七维详情按天拉 /api/life/raw/blocks/<day>，只有这个脚本
+# 会发；不补的话当天的应用 / 窗口归因要等 23:00 才出现（白天点开就是不可用）。
+# 所以重采集那一档顺带发一份当天的 blocks（--kinds blocks）：只发这一种文档，
+# 翻译命中的是已有缓存，只有新出现的窗口标题会调用模型（通常一天几次）。
 #
 # 用法：
 #   powershell -File scripts\run_live.ps1                    # 正常一轮
@@ -197,6 +201,14 @@ try {
         Invoke-Py "push-health" "scripts\push_health.py" @() | Out-Null
         Invoke-Py "ai-usage" "scripts\collect_ai_usage.py" @("--date", $today) | Out-Null
         Invoke-Py "cost-events" "scripts\cost_guard.py" @("emit-events", "--days", "1") | Out-Null
+        # 当天原始 blocks → 站点七维详情的应用 / 窗口归因。只发 blocks，
+        # 日记 / 事件 / 问答 / 坐标仍旧只由 23:00 那轮发。
+        # 不关翻译：站点是英文界面，中文窗口标题不能原样上去（只翻新增标题）。
+        if (-not $NoPublish) {
+            $blocksArgs = @("--date", $today, "--kinds", "blocks")
+            if ($DryRun) { $blocksArgs += "--dry-run" }
+            Invoke-Py "publish-blocks" "scripts\publish_life_raw.py" $blocksArgs | Out-Null
+        }
         $state.last_heavy = (Get-Date).ToString("s")
         Write-State $state
     }

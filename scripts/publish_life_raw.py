@@ -22,6 +22,8 @@ sk-/ghp_/AKIA 这类 key、Bearer 头和 password=... 会被替换成 [redacted]
   python scripts/publish_life_raw.py --days 30             # 每晚更新近 30 天
   python scripts/publish_life_raw.py --date 2026-10-19
   python scripts/publish_life_raw.py --all --dry-run --dump C:/tmp/life-raw.json
+  python scripts/publish_life_raw.py --date 2026-10-25 --kinds blocks --no-translate
+                                                           # run_live.ps1 的当日归因
 """
 
 from __future__ import annotations
@@ -53,6 +55,10 @@ WEEK_RE = re.compile(r"^\d{4}-W\d{2}$")
 MAX_DOC_BYTES = 4 * 1024 * 1024
 MAX_CHUNK_BYTES = 8 * 1024 * 1024
 MAX_CHUNK_DOCS = 100
+
+# 归档里全部 kind；--kinds 过滤时用（站点七维详情只要求 blocks，
+# 所以 run_live.ps1 每 15 分钟单独发一份当天的 blocks）。
+RAW_KINDS = {"journal", "events", "blocks", "notes", "tasks", "qa", "weekly", "vault"}
 
 
 # ── 凭证遮盖 ──────────────────────────────────────────────────
@@ -497,6 +503,19 @@ def resolve_raw_url(site: dict[str, Any], override: str | None) -> str:
     return base.rstrip("/") + "/api/life/raw/ingest"
 
 
+def parse_kinds(value: str | None) -> set[str] | None:
+    """`--kinds blocks,events` → {"blocks", "events"}；不传就是全部。"""
+    if not value:
+        return None
+    kinds = {part.strip().lower() for part in value.split(",") if part.strip()}
+    if not kinds:
+        return None
+    unknown = kinds - RAW_KINDS
+    if unknown:
+        raise SystemExit(f"✗ --kinds 里有未知类型：{', '.join(sorted(unknown))}")
+    return kinds
+
+
 def resolve_days(args: argparse.Namespace, all_days: list[str], tz: ZoneInfo, default_days: int) -> list[str]:
     if args.date:
         out = []
@@ -525,7 +544,13 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="只聚合不发送")
     parser.add_argument("--dump", default=None, help="把完整 {v,docs} 写到文件（调试/本地测试）")
     parser.add_argument("--no-translate", action="store_true", help="不翻译（调试用；会发布中文）")
+    parser.add_argument(
+        "--kinds",
+        default=None,
+        help="只发布这些 kind，逗号分隔（journal/events/blocks/notes/tasks/qa/weekly/vault）",
+    )
     args = parser.parse_args()
+    kinds = parse_kinds(args.kinds)
 
     cfg = load_config()
     site = cfg.get("life_site") or {}
@@ -547,6 +572,8 @@ def main() -> int:
     days = resolve_days(args, all_days, tz, int(site.get("days") or 30))
 
     header(f"publish life raw · {days[0] if days else '—'} → {days[-1] if days else '—'}")
+    if kinds is not None:
+        print(f"  · 只发 {'/'.join(sorted(kinds))}")
     docs: list[dict[str, Any]] = []
     for day in days:
         try:
@@ -554,6 +581,8 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001 — 单日失败不影响其它天
             print(f"  ⚠️  {day} 聚合失败：{exc}")
             continue
+        if kinds is not None:
+            day_docs = [d for d in day_docs if d["kind"] in kinds]
         if not day_docs:
             continue
         docs.extend(day_docs)
@@ -566,12 +595,12 @@ def main() -> int:
             + "  ".join(f"{k}={v}" for k, v in sorted(counts.items()))
         )
 
-    weekly = build_weekly(state_dir)
+    weekly = build_weekly(state_dir) if kinds is None or "weekly" in kinds else []
     if weekly:
         docs.extend(weekly)
         print(f"  ✓ weekly  {len(weekly)} 份")
 
-    vault_docs = build_vault(vault_dir)
+    vault_docs = build_vault(vault_dir) if kinds is None or "vault" in kinds else []
     if vault_docs:
         docs.extend(vault_docs)
         print(f"  ✓ vault  {len(vault_docs)} 份")

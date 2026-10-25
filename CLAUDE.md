@@ -184,7 +184,7 @@ sudo /opt/lifelogging/repo/server/deploy.sh           # git ff-only + 按改动�
 | `LifeLogging-Refresh` | 每 2 小时 | 只拉今天，不调 AI、不推进水位线（= `-Date today -SkipAI`） |
 | `LifeLogging-Daily` | 23:00 + 每次解锁 / 登录 | 正式处理：补跑漏天、采集、normalize、推日记输入、发布，推进水位线 |
 | `LifeLogging-Desktop` | 每 10 分钟 | `push_desktop.py`，让机器人能在笔记本睡着后回答电脑的事 |
-| `LifeLoggingLive.exe` | 每 2 分钟 | `run_live.ps1`：桌面 / 手机事件 / normalize / 当天聚合 / NOW；每 15 分钟重采集位置、手表、AI 账单 |
+| `LifeLoggingLive.exe` | 每 2 分钟 | `run_live.ps1`：桌面 / 手机事件 / normalize / 当天聚合 / NOW；每 15 分钟重采集位置、手表、AI 账单，并单独发当天 `blocks` 原始归档 |
 
 `LifeLogging-Live` 计划任务已被停用（会闪 PowerShell 窗口），别为了「再注册一次」重跑
 `setup_live_task.ps1` 把会闪窗的任务重新启用。窗口全部隐藏，**想知道跑没跑看
@@ -218,7 +218,8 @@ Tasker 的每个 HTTP action 都要带 Access Service Token 头。
 - 原始 `POST /api/life/raw/ingest`：`{"v":1,"docs":[{kind,id,format,content}]}`。
   kind：`journal / events / blocks / notes / tasks / qa / weekly / vault`，
   外加站点内部的 `watch`（不进归档 tab，只在索引 `watchDays` 里列日期）。
-  **不脱敏**，只清洗凭证。
+  **不脱敏**，只清洗凭证。`blocks` 是例外：`run_live.ps1` 每 15 分钟用 `--kinds blocks`
+  单独发当天的份（站点七维详情按天拉它），其余 kind 仍然只在 23:00 那轮发。
 - 实时 `POST /api/life/now`：`{"v":1,"ts_utc","location","desktop","phone","watch","qa"}`，
   **故意含经纬度**。
 - 鉴权统一 Bearer `LIFE_INGEST_TOKEN`（环境变量，和 Worker secret 相同；watch-publisher 也用
