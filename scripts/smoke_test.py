@@ -1438,9 +1438,10 @@ def t_feishu_freeform_cap():
         counter.write_text(json.dumps({"calls": 2}), encoding="utf-8")
         out = lv.answer_freeform("今天出门几次", day_iso=day,
                                  base="http://127.0.0.1:1", key="k")
-        assert "额度用完" in out, out
-        assert "2 次" in out, out
-        assert "模板" in out, "要说清模板那几类不受影响，别让人以为整个哑了"
+        assert "quota is used up" in out, out
+        assert "2 calls" in out, out
+        assert "template answers" in out, \
+            "要说清模板那几类不受影响，别让人以为整个哑了"
 
         # 计数文件坏了/不存在 → 当成 0，不能因此崩掉（那时它会去调模型，
         # 这里只验「读不出来不抛异常」这一半：给个坏文件，看它是否还走额度分支）
@@ -1448,7 +1449,8 @@ def t_feishu_freeform_cap():
         lv.LLM_DAILY_CAP = 0                      # 逼它在读完之后立刻拦下来
         out = lv.answer_freeform("再问一次", day_iso=day,
                                  base="http://127.0.0.1:1", key="k")
-        assert "额度用完" in out, f"坏掉的计数文件该当成 0，然后被上限拦住：{out}"
+        assert "quota is used up" in out, \
+            f"坏掉的计数文件该当成 0，然后被上限拦住：{out}"
 
 
 check("feishu: 自由问答每日封顶（在调模型之前拦，且不牵连模板那几类）",
@@ -2934,10 +2936,15 @@ def t_answer_advances():
     import feishu_bot as fb
 
     calls: list = []
+    # ⚠️ 日期必须是**今天**。实时题有一条跨夜作废规则（见 handle_text），
+    #    写死一个过去的日子，这个测试到了第二天就会变成「答完不推进」——
+    #    而它验的根本不是那件事。
+    #    （用 now.date()，不是 target_day_iso —— 跨夜判断比的是自然日。）
+    today = fb.datetime.now(fb.TZ).date().isoformat()
     a = {"id": "a", "kind": "routine", "format": "text",
-         "source": "live", "day": "2026-10-24", "text": "Q1"}
+         "source": "live", "day": today, "text": "Q1"}
     b = {"id": "b", "kind": "routine", "format": "text",
-         "source": "live", "day": "2026-10-24", "text": "Q2"}
+         "source": "live", "day": today, "text": "Q2"}
     box = {"n": 0}
 
     def pending():
@@ -3239,6 +3246,19 @@ def t_feishu_canonicalise():
         assert v == "no", f"{said!r} 应该归一成 no，得到 {v!r}"
         assert not answered_done(yesno, v)
 
+    # ── 英文答案：提示写的是 "reply: done / not done"，那就必须真的认 ──
+    # ⚠️ 这条是实测漏掉的：题目早就翻成英文了，但解析只认 yes/no/中文，
+    #    于是照着提示回 "not done" 会被判成「没认出」，再收到一句中文的重问。
+    for said in ("done", "Done!", "yes, two hours"):
+        assert fb.canonicalise(yesno, said)[0] == "yes", said
+    for said in ("not done", "NOT DONE", "nope", "didn't"):
+        assert fb.canonicalise(yesno, said)[0] == "no", said
+    # 多词答案不能被空格拆成「not」+ 备注「done」—— 那会静默存成另一个答案
+    v, note, _ = fb.canonicalise(yesno, "not done, was busy")
+    assert (v, note) == ("no", "was busy"), (v, note)
+    # 整句话仍然不猜（和中文那边同一个原则）
+    assert fb.canonicalise(yesno, "I have not finished that")[0] is None
+
     # ── **可以带自己的话**：答案在前，后半句进备注 ──
     v, note, _ = fb.canonicalise(yesno, "做了，花了两小时")
     assert (v, note) == ("yes", "花了两小时"), (v, note)
@@ -3306,6 +3326,14 @@ def t_feishu_canonicalise():
     # ── 缺 format 的老数据要当二值处理（和 answered_done 的默认一致）──
     v, note, _ = fb.canonicalise({"id": "x"}, "做了")
     assert v == "yes"
+
+    # ── 维度名：数据侧是中文（collect_labels 按它对齐），界面必须是英文 ──
+    # ⚠️ 实测：卡片标题直接印 dim，出现了「睡眠 · why?」这种半中半英。
+    assert fb._dim_label("睡眠") == "Sleep"
+    assert (fb.reason_card({"dim": "睡眠"}, "3 okay")
+            ["header"]["title"]["content"]) == "Sleep · why?"
+    assert "Sleep" in fb._group_label({"kind": "summary", "routine": True,
+                                       "dim": "睡眠"})
 
     # ── 渲染：三种形态都得给出**可回答**的提示 ──
     assert "做了" in fb.render_question(yesno, 3), "二值题要告诉人怎么回"
@@ -3472,13 +3500,13 @@ def t_feishu_live_routing():
 
     # ── 那两句「答不了」必须说清**为什么**，不能是干巴巴的「不支持」──
     assert "Obsidian" in lv.JOURNAL_ANSWER
-    assert "没有推到服务器" in lv.JOURNAL_ANSWER
+    assert "not pushed to the server" in lv.JOURNAL_ANSWER
     # 「没推过」时要把人引到那个能修的地方去，不能只说一句「没有数据」
     assert "push_desktop.py" in lv.DESKTOP_NO_DATA
     # 没推过健康汇总时，也要指到那个能修的地方
     assert "push_health.py" in lv.WATCH_NO_DATA
     # 中继出错时的兜底话不能再说「还没接」—— 那是过期信息
-    assert "拉不到" in lv.HEALTH_ANSWER
+    assert "Cannot fetch" in lv.HEALTH_ANSWER
 
 
 check("feishu: 路由从窄到宽 —— 日记/手表说答不了，电脑/位置/手机各拉各的",

@@ -430,7 +430,7 @@ def rule_hourly(day_iso: str, stays: list[dict], events: list[dict],
     bits: list[str] = []
     if stay:
         where = str(stay.get("place") or "")
-        tag = "坐标 " if stay.get("is_coord") else ""
+        tag = "coords " if stay.get("is_coord") else ""
         # ⚠️ 写**这段停留的时间跨度**，不写累计分钟数。
         #    原来写「停留 3 小时 46 分」，然后把它放在「13:04–14:04 这一段」
         #    的标题下面 —— 读者当然会以为「这一段待了 3 小时 46 分」，

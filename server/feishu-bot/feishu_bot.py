@@ -431,7 +431,10 @@ def relay_note(text: str) -> dict:
 #    （「这个电脑配置怎么样」是问句、又命中「电脑」，但它不是在问今天用了
 #    多久电脑）。前缀是这个猜测的逃生口，同时也是「问了问题却只被记下来」
 #    时的补救。
-NOTE_PREFIXES = ("记：", "记:", "记一笔：", "记一笔:", "笔记：", "笔记:")
+# ⚠️ 英文前缀 `note:` 必须和中文那几个并列 —— 报错文案里教的就是 "note:",
+#    只认中文前缀的话，照着提示写反而不会走「记一笔」这条路。
+NOTE_PREFIXES = ("记：", "记:", "记一笔：", "记一笔:", "笔记：", "笔记:",
+                 "note:", "note：", "Note:", "NOTE:")
 
 
 def split_note_prefix(text: str) -> str | None:
@@ -508,8 +511,22 @@ def pending_filtered(state: dict) -> list[dict]:
 
 # ── 答案规范化 ──────────────────────────────────────────────────────
 # ⚠️ 整个文件里最要命的一段。见模块开头的第 1 条。
-_YES = {"做了", "是", "好", "对", "有", "嗯", "yes", "y", "1", "✓", "√", "true"}
-_NO = {"没做", "没", "否", "没有", "不是", "无", "no", "n", "0", "×", "x", "false"}
+#
+# ⚠️ 英文提示写的是 "reply: done / not done"，所以**这两个词必须真的认**。
+#    以前只认 yes/no，用户照着提示回 "not done" 会被当成「没认出」，
+#    然后收到一句中文的重问 —— 提示和实现各说各话。
+#
+# ⚠️ 顺序有讲究：**长的排前面**（「not done」必须先于「no」命中），
+#    所以下面是一张按长度降序排好的表，不是两个集合。
+_YES_WORDS = ("做了", "yes", "done", "did it", "finished", "true",
+              "是", "好", "对", "有", "嗯", "y", "1", "✓", "√")
+_NO_WORDS = ("not done", "not yet", "did not", "didn't", "没做", "没有",
+             "不是", "nope", "false", "didnot", "didnt", "notdone",
+             "notyet", "没", "否", "无", "no", "n", "0", "×", "x")
+
+_ANSWER_WORDS = sorted(
+    [(w, "yes") for w in _YES_WORDS] + [(w, "no") for w in _NO_WORDS],
+    key=lambda x: -len(x[0].replace(" ", "")))
 
 
 def _norm_word(s: str) -> str:
@@ -587,6 +604,26 @@ def _match_label(text: str, opts: list[str]) -> str | None:
     return None
 
 
+def _match_answer(text: str) -> tuple[str, str] | None:
+    """二值题：答案在**最前面**时返回 (yes/no, 备注)，否则 None。
+
+    ⚠️ 为什么不用 `_split_answer()` 再查表：那个函数把**空格**当分隔符，
+       于是 "not done" 会被拆成「not」+ 备注「done」—— 一个看着合理的
+       静默错答案。英文的多词答案是先整体匹配、再取后半句。
+    """
+    low = text.lower()
+    for word, value in _ANSWER_WORDS:
+        pat = r"\s*".join(re.escape(p) for p in word.lower().split(" "))
+        m = re.match(pat, low)
+        if not m:
+            continue
+        rest = text[m.end():]
+        if rest and rest[0] not in _SEPS:
+            continue        # 「notebook」不是「no」+备注「tebook」
+        return value, rest.strip(_SEPS).strip()
+    return None
+
+
 def canonicalise(q: dict, raw: str) -> tuple[str | None, str, str]:
     """把用户那句话变成 (值, 备注, 给用户的说明)。
 
@@ -603,13 +640,15 @@ def canonicalise(q: dict, raw: str) -> tuple[str | None, str, str]:
     text = raw.strip()
 
     if fmt == "text":
-        return (text, "", "") if text else (None, "", "这题要回内容，不能是空的。")
+        return (text, "", "") if text else (
+            None, "", "This one needs an answer — it cannot be empty.")
 
     if fmt == "choice":
         opts = [str(o.get("label") or "") for o in (q.get("options") or [])
                 if isinstance(o, dict)]
         if not opts:
-            return None, "", "这题标了选择题，但问题文件里没有选项 —— 跳过它。"
+            return None, "", ("This question is marked as a choice but the "
+                              "question file has no options — skipping it.")
 
         # 先试整句：选项原文里**可能**含分隔符（比如「做完了，但很勉强」），
         # 先拆的话会把一条合法选项拆坏。
@@ -622,7 +661,8 @@ def canonicalise(q: dict, raw: str) -> tuple[str | None, str, str]:
             i = int(head) - 1
             if 0 <= i < len(opts):
                 return opts[i], rest, ""
-            return None, "", f"只有 {len(opts)} 个选项，回 1 到 {len(opts)}。"
+            return None, "", (f"There are only {len(opts)} options — "
+                              f"reply 1 to {len(opts)}.")
 
         hit = _match_label(head, opts)
         if hit:
@@ -630,26 +670,17 @@ def canonicalise(q: dict, raw: str) -> tuple[str | None, str, str]:
 
         lines = "\n".join(f"  {i}) {o}" for i, o in enumerate(opts, 1))
         return None, "", (
-            f"没认出这个选项。回数字就行：\n{lines}\n"
-            "想补充就写在答案后面，比如「1 其实只做了一半」。")
+            f"Could not match that to an option. Reply with the number:\n{lines}\n"
+            "Anything after the number becomes a note, e.g. “1 only got halfway”.")
 
     # yes_no
-    n = _norm_word(text)
-    if n in _YES:
-        return "yes", "", ""
-    if n in _NO:
-        return "no", "", ""
-
-    head, rest = _split_answer(text)
-    n = _norm_word(head)
-    if n in _YES:
-        return "yes", rest, ""
-    if n in _NO:
-        return "no", rest, ""
+    hit = _match_answer(text)
+    if hit:
+        return hit[0], hit[1], ""
 
     return None, "", (
-        "回「做了」或「没做」。\n"
-        "想补充就写在后面，比如「做了，花了两小时」—— 后半句会记成备注。")
+        "Reply “done” or “not done”.\n"
+        "Anything after it becomes a note, e.g. “done, took two hours”.")
 
 
 # 发题必须独占：`advance()`（worker 线程）和 `push_next_live()`（轮询线程）
@@ -687,6 +718,25 @@ _GROUP_COLOR = {
 }
 
 
+# 维度名在 `live_questions.py` 里是中文（数据侧一直用它，`collect_labels`
+# 和历史的 `state/labels.jsonl` 都按这几个字面量对齐）—— 但**界面是英文的**，
+# 直接把 `dim` 印出来就会出现「睡眠 · why?」「✓ reason saved for 睡眠」。
+# 所以只在显示这一层翻译，数据一个字不改。
+_DIM_LABEL = {
+    "体力": "Energy",
+    "心情": "Mood",
+    "人际": "People",
+    "睡眠": "Sleep",
+    "吃饭": "Food",
+    "休息": "Rest",
+    "学习": "Learning",
+}
+
+
+def _dim_label(dim: str) -> str:
+    return _DIM_LABEL.get(str(dim or ""), str(dim or ""))
+
+
 def _group_of(q: dict) -> str:
     """这道题属于哪一批。
 
@@ -713,7 +763,7 @@ def _group_label(q: dict) -> str:
     # 收尾里那七道「常规题」标出维度名 —— 一眼知道现在是第几维，
     # 比一个笼统的「常规」有用得多。
     if group == "summary" and q.get("routine") and q.get("dim"):
-        return f"{label} · {q['dim']}"
+        return f"{label} · {_dim_label(q['dim'])}"
     return label
 
 
@@ -769,7 +819,7 @@ def question_card(q: dict, remaining: int, ack: str = "") -> dict:
     day = str(q.get("day") or "")
     today = datetime.now(TZ).date().isoformat()
     if day and day != today:
-        elements.append(_note(f"⚠️ 这是 {day} 的题，不是今天的"))
+        elements.append(_note(f"⚠️ This question is for {day}, not today."))
 
     elements.append({"tag": "div",
                      "text": {"tag": "lark_md",
@@ -810,7 +860,7 @@ def question_card(q: dict, remaining: int, ack: str = "") -> dict:
 
 def recap_card(text: str) -> dict:
     """把 day_recap() 的纯文本复盘排成卡片。解析不出来就整段塞进去。"""
-    title = "今日复盘"
+    title = "Daily recap"
     sections: list[tuple[str, list[str]]] = []
     head: list[str] = []
     cur: tuple[str, list[str]] | None = None
@@ -888,7 +938,7 @@ def report_card(text: str, template: str = "turquoise",
     body = _flatten(text)
     lines = body.splitlines()
     if title is None:
-        title = "数据"
+        title = "Data"
         if lines and len(lines[0]) <= 40:
             title = lines[0]
             lines = lines[1:]
@@ -901,7 +951,7 @@ def report_card(text: str, template: str = "turquoise",
         elements.append({"tag": "div",
                          "text": {"tag": "lark_md", "content": body}})
     else:
-        elements.append(_note("没有数据。"))
+        elements.append(_note("No data."))
 
     return {
         "config": {"wide_screen_mode": True},
@@ -915,7 +965,7 @@ def send_report(open_id: str, text: str, template: str = "turquoise",
                 title: str | None = None) -> None:
     """数据命令的出口：短答案发文本，长答案发卡片。
 
-    ⚠️ 短答案（「没有数据。」「用法：/ask <问题>」）不值得开一张卡 ——
+    ⚠️ 短答案（「No data.」「用法：/ask <question>」）不值得开一张卡 ——
        一张卡里只有一个字的观感比一行文字更差。
     """
     flat = _flatten(text)
@@ -937,7 +987,7 @@ def reason_card(q: dict, score: str) -> dict:
        `4 不错` 只说明程度，`4 不错 · 上午连上四节课，下午还能跑 4×400`
        才说明发生了什么 —— 后者才是能进关联图的东西。
     """
-    dim = str(q.get("dim") or "")
+    dim = _dim_label(str(q.get("dim") or ""))
     return {
         "config": {"wide_screen_mode": True},
         "header": {"template": "violet",
@@ -1079,13 +1129,13 @@ def render_question(q: dict, remaining: int) -> str:
     day = str(q.get("day") or "")
     today = datetime.now(TZ).date().isoformat()
     if day and day != today:
-        lines += ["", f"⚠️ 这是 **{day}** 的题，不是今天的。"]
+        lines += ["", f"⚠️ This question is for **{day}**, not today."]
 
     lines += ["", str(q.get("text") or "").strip()]
 
     evidence = str(q.get("evidence") or "").strip()
     if evidence:
-        lines += ["", f"（依据：{evidence}）"]
+        lines += ["", f"Evidence: {evidence}"]
 
     fmt = str(q.get("format") or "yes_no")
     if fmt == "choice":
@@ -1170,11 +1220,11 @@ def send_text(open_id: str, text: str) -> None:
         # SDK 拿不到 token 时是**抛异常**而不是返回 success=False 的响应，
         # 所以两条路都要接住。
         hint = explain_api_error(e)
-        raise RuntimeError(f"飞书发送失败：{type(e).__name__}: {e}"
+        raise RuntimeError(f"Feishu send failed: {type(e).__name__}: {e}"
                            + (f"\n{hint}" if hint else "")) from None
     if not resp.success():
         raise RuntimeError(
-            f"飞书发送失败 code={resp.code} msg={resp.msg}"
+            f"Feishu send failed code={resp.code} msg={resp.msg}"
             + (f"\n{explain_api_error(RuntimeError(f'{resp.code}: {resp.msg}'))}"
                if resp.code else ""))
 
@@ -1200,10 +1250,10 @@ def send_card(open_id: str, card: dict) -> None:
         resp = feishu_client().im.v1.message.create(req)
     except Exception as e:  # noqa: BLE001
         hint = explain_api_error(e)
-        raise RuntimeError(f"飞书发送卡片失败：{type(e).__name__}: {e}"
+        raise RuntimeError(f"Feishu card send failed: {type(e).__name__}: {e}"
                            + (f"\n{hint}" if hint else "")) from None
     if not resp.success():
-        raise RuntimeError(f"飞书发送卡片失败 code={resp.code} msg={resp.msg}")
+        raise RuntimeError(f"Feishu card send failed code={resp.code} msg={resp.msg}")
 
 
 def send_question(open_id: str, q: dict, remaining: int,
@@ -1340,7 +1390,7 @@ def maybe_write_summary(open_id: str, day_iso: str,
     # ⚠️ **整份复盘存成一条笔记** —— 明天写日记时它会作为「你说过的话」进提示词。
     #    不然它就只是聊天记录里的一段，不属于这套系统的记忆。
     try:
-        relay_note("【今日复盘】" + recap)
+        relay_note("[Daily recap] " + recap)
     except Exception as e:  # noqa: BLE001
         print(f"WARN 复盘存笔记失败：{type(e).__name__}: {e}", file=sys.stderr)
     return True
@@ -1372,8 +1422,9 @@ def advance(open_id: str, ack: str = "") -> None:
     try:
         questions = pending_filtered(state)
     except Exception as e:  # noqa: BLE001
-        send_text(open_id, f"拉不到问题：{e}\n（中继多半没起来，看一下 "
-                           f"systemctl status lifelogging-relay）")
+        send_text(open_id, f"Could not fetch questions: {e}\n"
+                           "(the relay is probably down — check "
+                           "systemctl status lifelogging-relay)")
         return
 
     if not questions:
@@ -1603,14 +1654,14 @@ _DATA_TEMPLATE = {
 }
 
 DATA_COMMANDS = {
-    "/today": "当天总览",
-    "/phone": "手机使用",
-    "/where": "位置 / 停留",
-    "/location": "位置 / 停留",
-    "/desktop": "电脑当前快照",
-    "/watch": "手表汇总",
-    "/qa": "当天问答",
-    "/ask": "自由提问",
+    "/today": "day at a glance",
+    "/phone": "phone usage",
+    "/where": "location and stays",
+    "/location": "location and stays",
+    "/desktop": "current computer snapshot",
+    "/watch": "watch summary",
+    "/qa": "everything you answered",
+    "/ask": "free-form question",
 }
 
 
@@ -1626,8 +1677,8 @@ def handle_data_command(open_id: str, cmd: str, arg: str) -> None:
     try:
         if cmd == "/today":
             snap = live.data_snapshot(day, RELAY_BASE, RELAY_API_KEY)
-            reply = f"今天 · {day}"
-            reply += ("\n" + "\n".join(f"· {x}" for x in snap)) if snap else "\n没有数据。"
+            reply = f"Today · {day}"
+            reply += ("\n" + "\n".join(f"· {x}" for x in snap)) if snap else "\nNo data."
         elif cmd == "/phone":
             reply = live.render_phone(
                 live.relay_events(day, RELAY_BASE, RELAY_API_KEY), day_iso=day)
@@ -1642,7 +1693,7 @@ def handle_data_command(open_id: str, cmd: str, arg: str) -> None:
         elif cmd == "/ask":
             question = arg.strip()
             if not question:
-                reply = "用法：/ask <问题>"
+                reply = "Usage: /ask <question>"
             else:
                 reply = live.answer_query(question, day_iso=day,
                                           base=RELAY_BASE, key=RELAY_API_KEY)
@@ -1652,9 +1703,9 @@ def handle_data_command(open_id: str, cmd: str, arg: str) -> None:
                                                   key=RELAY_API_KEY)
                              or reply)
                 if not reply:
-                    reply = "没有可用答案。"
+                    reply = "No answer available."
         else:
-            reply = "未知命令。看 /help。"
+            reply = "Unknown command. See /help."
     except live.LiveUnavailable as e:
         # 拿不到数据是**一句话**，不是一份报表 —— 不开卡片。
         send_text(open_id, str(e))
@@ -1666,7 +1717,7 @@ def handle_data_command(open_id: str, cmd: str, arg: str) -> None:
 
     # /ask 的回话是散文，没有「第一行当标题」这回事，必须显式给标题。
     send_report(open_id, reply, _DATA_TEMPLATE.get(cmd, "turquoise"),
-                title="自由问答" if cmd == "/ask" else None)
+                title="Free-form answer" if cmd == "/ask" else None)
 
 
 _SKIP_REASON = {"跳过", "skip", "不", "不用", "不想说", "-", "无", "算了"}
@@ -1719,8 +1770,8 @@ def _handle_reason(open_id: str, reason_for: dict, text: str) -> None:
     state = load_state()
     state["reason_for"] = None
     save_state(state)
-    advance(open_id, ack=(f"✓ skipped ({dim} has no reason)"
-                          if skip else f"✓ reason saved for {dim}"))
+    advance(open_id, ack=(f"✓ skipped ({_dim_label(dim)} has no reason)"
+                          if skip else f"✓ reason saved for {_dim_label(dim)}"))
 
 
 def handle_text(open_id: str, text: str) -> None:
@@ -1823,7 +1874,7 @@ def handle_text(open_id: str, text: str) -> None:
             if stripped in _ASK_WORDS:
                 send_text(open_id,
                           f"Still waiting for one line about "
-                          f"{reason_for.get('dim') or 'this score'} — "
+                          f"{_dim_label(reason_for.get('dim')) or 'this score'} — "
                           "reply “skip” to leave it blank.")
                 return
             _handle_reason(open_id, reason_for, stripped)
@@ -1938,7 +1989,8 @@ def handle_text(open_id: str, text: str) -> None:
         except Exception as e:  # noqa: BLE001
             print(f"WARN 追问卡片没发出去，退回纯文本：{type(e).__name__}: {e}",
                   file=sys.stderr)
-            send_text(open_id, f"{stored}\n\n为什么？一句话就行，也可以回「跳过」。")
+            send_text(open_id, f"{stored}\n\nOne line is enough — "
+                               "reply “skip” to leave it blank.")
         return
 
     # 晚上收尾：这是最后一道总结题的话，立刻写总结，不再接着出题。

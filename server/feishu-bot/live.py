@@ -214,7 +214,7 @@ def _hhmm(iso: Any, zone: ZoneInfo) -> str:
 
 # ── 渲染 ────────────────────────────────────────────────────────────
 def _hm(minutes: float) -> str:
-    """分钟 → 「2 小时 14 分」。"""
+    """分钟 → 「2h 14m」。"""
     total = int(round(minutes))
     h, m = divmod(total, 60)
     if h and m:
@@ -471,7 +471,7 @@ def _dedupe_qa(qa: list[dict]) -> list[tuple[dict, str]]:
         key = _answer_key(x)
         first = seen.get(key) if key else None
         if key and first is None:
-            seen[key] = str(x.get("text") or "前一道题")
+            seen[key] = str(x.get("text") or "(the earlier question)")
         out.append((x, first or ""))
     return out
 
@@ -561,13 +561,13 @@ def _ago(v: Any, now: datetime) -> tuple[str, float | None]:
     if mins < -1:
         return "", None         # 时间戳跑到未来去了：多半是两边的钟不一样，别推断
     if mins < 2:
-        return "刚刚", mins
+        return "just now", mins
     if mins < 60:
-        return f"{int(mins)} 分钟前", mins
+        return f"{int(mins)} min ago", mins
     h, m = divmod(int(mins), 60)
     if h < 24:
-        return (f"{h} 小时 {m} 分前" if m else f"{h} 小时前"), mins
-    return f"{h // 24} 天前", mins
+        return (f"{h}h {m}m ago" if m else f"{h}h ago"), mins
+    return f"{h // 24}d ago", mins
 
 
 DESKTOP_NO_DATA = "No desktop snapshot yet. Run scripts/push_desktop.py on the laptop."
@@ -748,12 +748,13 @@ def _hits(text: str, words: tuple[str, ...]) -> bool:
 
 
 JOURNAL_ANSWER = (
-    "日记和 vault 在笔记本的 Obsidian 库里，没有推到服务器。"
+    "The journal and vault live in the Obsidian library on the laptop, "
+    "and are not pushed to the server."
 )
 
-HEALTH_ANSWER = "手表的健康汇总拉不到（中继出错）。"
+HEALTH_ANSWER = "Cannot fetch the watch summary (the relay returned an error)."
 
-UNKNOWN_ANSWER = "没认出这个问题。用 /help 看可用命令。"
+UNKNOWN_ANSWER = "Did not recognise that question. See /help for the commands."
 
 
 def cfg() -> dict:
@@ -767,12 +768,13 @@ def cfg() -> dict:
         try:
             from common import load_config
         except Exception as e:  # noqa: BLE001
-            raise LiveUnavailable(f"加载 common 失败：{type(e).__name__}: {e}") from None
+            raise LiveUnavailable(f"Failed to load common: {type(e).__name__}: {e}") from None
         try:
             _mods["_cfg"] = load_config()
         except SystemExit:            # load_config 找不到文件时是 sys.exit(1)
             raise LiveUnavailable(
-                "服务器上的 config/config.yaml 读不了，自由问答暂时不可用。"
+                "Cannot read config/config.yaml on the server — "
+                "free-form questions are unavailable for now."
             ) from None
     return _mods["_cfg"]
 
@@ -814,7 +816,7 @@ def _digest(day_iso: str, base: str, key: str) -> str:
         try:
             parts.append(fn())
         except Exception as e:  # noqa: BLE001
-            parts.append(f"（这部分拿不到：{type(e).__name__}: {e}）")
+            parts.append(f"(that part is unavailable: {type(e).__name__}: {e})")
     return "\n\n".join(parts)
 
 
@@ -857,8 +859,9 @@ def _run_llm_turn(conf: dict, counter: Path, day_iso: str, *,
 
     used = _llm_used(counter)
     if used >= LLM_DAILY_CAP:
-        return None, (f"今天的 AI 额度用完了（{LLM_DAILY_CAP} 次）。\n"
-                      f"模板那几类（去哪了 / 手机 / 电脑）不受这个限制，照常能问。")
+        return None, (f"Today's AI quota is used up ({LLM_DAILY_CAP} calls).\n"
+                      "The template answers (location / phone / computer) are "
+                      "not affected — those still work.")
 
     ledger = CostLedger(conf["budget"]["ledger_path"])
     llm = LLM(cfg=conf, ledger=ledger)
@@ -866,7 +869,7 @@ def _run_llm_turn(conf: dict, counter: Path, day_iso: str, *,
         out = llm.complete(system=system, user=user, stage=stage,
                            run_id=new_run_id())
     except BudgetExceeded as e:
-        return None, f"今天的 AI 预算用完了。（{e}）"
+        return None, f"Today's AI budget is used up. ({e})"
     except Exception as e:  # noqa: BLE001
         print(f"ERROR LLM 调用失败：{type(e).__name__}: {e}", file=sys.stderr)
         return None, f"{type(e).__name__}: {e}"
@@ -886,7 +889,7 @@ def answer_freeform(text: str, *, day_iso: str, base: str, key: str) -> str | No
     except LiveUnavailable:
         raise
     except Exception as e:  # noqa: BLE001
-        raise LiveUnavailable(f"自由问答不可用：{type(e).__name__}: {e}") from None
+        raise LiveUnavailable(f"Free-form questions unavailable: {type(e).__name__}: {e}") from None
 
     counter = _llm_counter(Path(conf.get("state_dir") or "."), day_iso)
     digest = _digest(day_iso, base, key)
@@ -911,7 +914,7 @@ def answer_freeform(text: str, *, day_iso: str, base: str, key: str) -> str | No
               f"[The user's question]\n{text}"),
         stage="feishu_ask")
     if out is None:
-        return f"问不了：{err}"
+        return f"Cannot answer: {err}"
     return out
 
 
@@ -1012,7 +1015,7 @@ def write_day_summary(day_iso: str, base: str, key: str,
     except LiveUnavailable:
         raise
     except Exception as e:  # noqa: BLE001
-        raise LiveUnavailable(f"总结不可用：{type(e).__name__}: {e}") from None
+        raise LiveUnavailable(f"Summary unavailable: {type(e).__name__}: {e}") from None
 
     digest = _digest(day_iso, base, key)
     q_all = _norm_qa(qa)
@@ -1025,20 +1028,20 @@ def write_day_summary(day_iso: str, base: str, key: str,
                 continue
             chunks.append(f"[{label}]")
             for x, dup in group:
-                qt = _one_line(x.get("text") or "(题号不在问题文件里)", 200)
+                qt = _one_line(x.get("text") or "(question not in the question file)", 200)
                 if dup:
                     # ⚠️ 同一段话答了两道题时只给模型一遍，并明说是同一段。
                     #    贴两遍会让它以为今天有两件同样重要的事。
-                    chunks.append(f"- 问：{qt}\n  答：（同一段回答，见《"
-                                  f"{_one_line(dup, 40)}》）")
+                    chunks.append(f"- Q: {qt}\n  A: (same answer, see “"
+                                  f"{_one_line(dup, 40)}”)")
                     continue
                 at = _one_line(x.get("answer") or "", 300)
                 nt = _one_line(x.get("note") or "", 200)
-                chunks.append(f"- 问：{qt}\n  答：{at}"
-                              + (f"\n  备注：{nt}" if nt else ""))
+                chunks.append(f"- Q: {qt}\n  A: {at}"
+                              + (f"\n  Note: {nt}" if nt else ""))
         answers = "\n".join(chunks)
     else:
-        answers = "（今天没有回答记录）"
+        answers = "(no answers recorded today)"
 
     counter = _llm_counter(Path(conf.get("state_dir") or "."), day_iso)
     out, err = _run_llm_turn(
@@ -1112,7 +1115,7 @@ def answer_query(text: str, *, day_iso: str, base: str, key: str) -> str | None:
             try:
                 parts.append(part())
             except LiveUnavailable as e:
-                parts.append(f"（这部分没拿到：{e}）")
+                parts.append(f"(that part is unavailable: {e})")
         return "\n\n".join(parts)
 
     if wants_location:
