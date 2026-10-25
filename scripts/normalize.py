@@ -742,6 +742,10 @@ PHONE_APPS = {
     "com.miui.securitycore": "Security Core",
     "com.android.deskclock": "Clock",
     "com.mendhak.gpslogger": "GPSLogger",
+    "com.google.android.googlequicksearchbox": "Google",
+    "com.android.photopicker": "Photo Picker",
+    "bin.mt.plus": "MT Manager",
+    "com.wrongchao.v2vpn": "V2VPN",
     # 通用 / 国际
     "com.android.chrome": "Chrome",
     "com.microsoft.emmx": "Edge",
@@ -795,6 +799,89 @@ PHONE_NOT_AN_APP = {
     "com.android.permissioncontroller", "com.miui.packageinstaller",
     "com.android.companiondevicemanager", "com.android.packageinstaller",
 }
+
+# 手机应用 → 七维分类（站点 LIFE 雷达的那七个维度）。
+#
+# 和桌面的 APP_RULES 用同一套名字：Work / Study / Life / Leisure / Social。
+# ⚠️ 和桌面最大的区别：**手机没有 Other 这一档**。每一个前台分钟都必须落进
+#    某一维，否则「电脑前刷手机」这种重叠就永远算不出来（桌面块在并集里、
+#    手机那段不在，两边对不上）。所以不在表里的应用会先按关键词再试一次，
+#    最后兜底 DEFAULT_PHONE_CATEGORY。
+#
+# 口径和桌面刻意保持一致：
+#   · 浏览器不区分看的是资料还是视频 → Study（桌面也是这么定的）
+#   · 新闻 / 论坛 / 阅读 → Study（同上）
+#   · 社交应用 → Social（桌面端微信算 Leisure，手机端单独占一维，这是现行设计）
+#   · 购物 / 外卖 / 地图 / 相机 / 系统工具 → Life
+#   · 游戏 / 视频 / 音乐 / 播客 → Leisure
+#
+# ⚠️ 站点 app/src/components/LifeRadar.vue 里有一份**同样的表**（客户端要按
+#    维度列出手机应用，不能为了这个字段改 Worker 白名单）。两处必须一起改，
+#    否则「总数里有、详情里没有」这种矛盾会静默出现。
+PHONE_APP_CATEGORIES = {
+    # Work
+    "QQ Mail": "Work", "Outlook": "Work", "Gmail": "Work", "WeCom": "Work",
+    "DingTalk": "Work", "Alibaba Cloud": "Work", "GitHub": "Work",
+    # Study
+    "Chrome": "Study", "Edge": "Study", "Firefox": "Study",
+    "Via Browser": "Study", "Quark Browser": "Study", "UC Browser": "Study",
+    "QQ Browser": "Study", "DeepSeek": "Study", "Doubao": "Study",
+    "Chaoxing": "Study", "WeRead": "Study", "Zhihu": "Study",
+    "Tencent News": "Study", "NetEase News": "Study", "Obsidian": "Study",
+    "Google": "Study",
+    # Leisure
+    "Bilibili": "Leisure", "YouTube": "Leisure", "Douyin": "Leisure",
+    "NetEase Music": "Leisure", "Kugou Lite": "Leisure",
+    "Pocket Casts": "Leisure", "Xiaoheihe": "Leisure",
+    "Sanguosha": "Leisure", "Mi Game Center": "Leisure",
+    "Mi Wallpaper Carousel": "Leisure",
+    # Social
+    "WeChat": "Social", "QQ": "Social", "Telegram": "Social",
+    "WhatsApp": "Social", "Discord": "Social", "Weibo": "Social",
+    "Xiaohongshu": "Social", "Messages": "Social", "Phone": "Social",
+    # Life
+    "Alipay": "Life", "Amap": "Life", "Baidu Maps": "Life",
+    "Bluetooth": "Life", "Camera": "Life", "China Mobile": "Life",
+    "Clock": "Life", "Dianping": "Life", "Ele.me": "Life",
+    "F-Droid": "Life", "GPSLogger": "Life", "Gadgetbridge": "Life",
+    "Gallery": "Life", "Hiddify": "Life", "JD": "Life", "Meituan": "Life",
+    "Mi Gallery Editor": "Life", "Mi Shop": "Life", "Mi Store": "Life",
+    "Pinduoduo": "Life", "Play Store": "Life", "Security": "Life",
+    "Security Core": "Life", "Settings": "Life", "Shanghai Metro": "Life",
+    "Tailscale": "Life", "Taobao": "Life", "Tasker": "Life", "Xianyu": "Life",
+    "Google Play services": "Life", "Photo Picker": "Life",
+    "MT Manager": "Life", "V2VPN": "Life",
+}
+
+# 表里没有的应用按名字再猜一次（顺序有意义：先命中先用）。
+# 只放足够明确的词，宁可走兜底也别把系统应用猜成 Work。
+PHONE_CATEGORY_KEYWORDS = (
+    ("browser", "Study"), ("reader", "Study"), ("read", "Study"),
+    ("news", "Study"), ("learn", "Study"), ("dict", "Study"),
+    ("music", "Leisure"), ("video", "Leisure"), ("player", "Leisure"),
+    ("podcast", "Leisure"), ("game", "Leisure"), ("bili", "Leisure"),
+    ("mail", "Work"), ("office", "Work"), ("docs", "Work"), ("git", "Work"),
+    ("chat", "Social"), ("message", "Social"), ("messenger", "Social"),
+    ("map", "Life"), ("camera", "Life"), ("gallery", "Life"),
+    ("photo", "Life"), ("store", "Life"), ("settings", "Life"),
+)
+
+# 兜底：认不出来的应用记到 Life（生活杂项）。宁可记进生活，也不要像桌面
+# 那样留一个 Other —— 手机上的时间没有「不属于任何地方」这一说。
+DEFAULT_PHONE_CATEGORY = "Life"
+
+
+def phone_app_category(raw: str) -> str:
+    """应用（包名或人名）→ 七维之一。手机上的时间一定会有归属。"""
+    name = phone_app_name(raw)
+    category = PHONE_APP_CATEGORIES.get(name)
+    if category:
+        return category
+    lowered = name.lower()
+    for keyword, cat in PHONE_CATEGORY_KEYWORDS:
+        if keyword in lowered:
+            return cat
+    return DEFAULT_PHONE_CATEGORY
 
 # 两条相邻 App 切换之间的间隔上限（兜底，不是主要判据）。
 #
@@ -1064,18 +1151,18 @@ def summarize_phone(events: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def phone_app_intervals(
-    events: list[dict[str, Any]], apps: set[str],
-) -> list[tuple[datetime, datetime]]:
-    """指定应用的前台时间区间 —— ``summarize_phone`` 的区间版本。
+def _phone_context(
+    events: list[dict[str, Any]],
+) -> tuple[
+    list[datetime],
+    list[tuple[datetime, str]],
+    list[tuple[datetime, datetime]],
+    tuple[datetime, datetime] | None,
+]:
+    """手机事件的裁剪上下文：解锁时刻、切换序列、屏幕区间、屏幕覆盖范围。
 
-    为什么要单独要区间：站点要算「一天里被各个数据源覆盖的**并集**」，
-    只知道「微信 184 分钟」是不够的，必须知道这 184 分钟落在哪些时刻，
-    才能和桌面块求交、把重复的部分扣掉。
-
-    归属口径（屏幕裁剪、跨应用切换的一阶差分、最后一个应用到熄屏为止、
-    超过 60 分钟的空档不算）和 ``summarize_phone`` 保持一致；
-    那边改规则时这里要一起改。
+    和 ``summarize_phone`` / ``phone_app_intervals`` 共用一个入口 ——
+    两套规则只要差一条，并集就会多算或少算，而数字看上去完全正常。
     """
     unlocks: list[datetime] = []
     switches: list[tuple[datetime, str]] = []
@@ -1100,28 +1187,80 @@ def phone_app_intervals(
         (min(t for t, _ in screen_events), max(t for t, _ in screen_events))
         if screen_events else None
     )
+    return unlocks, switches, screen_iv, covered
 
-    out: list[tuple[datetime, datetime]] = []
 
-    def add(raw_app: str, lo: datetime, hi: datetime) -> None:
-        span = (hi - lo).total_seconds()
-        if not (0 <= span <= MAX_FOREGROUND_GAP.total_seconds()):
-            return
-        if raw_app in PHONE_NOT_AN_APP or raw_app.startswith("%"):
-            return
-        if phone_app_name(raw_app) not in apps:
-            return
-        out.extend(_active_intervals(lo, hi, unlocks, screen_iv, covered))
+def _phone_spans(
+    switches: list[tuple[datetime, str]],
+    screen_iv: list[tuple[datetime, datetime]],
+):
+    """每段可能的「某应用在前台」：(raw_app, 起点, 终点)。
 
+    一阶差分 + 最后一段到熄屏为止。过滤交给调用方。
+    """
     for (t0, raw_app), (t1, _) in zip(switches, switches[1:]):
-        add(raw_app, t0, t1)
+        yield raw_app, t0, t1
 
     if switches:
         t_last, raw_last = switches[-1]
         end = _end_of_screen_window(t_last, screen_iv)
         if end is not None:
-            add(raw_last, t_last, end)
+            yield raw_last, t_last, end
 
+
+def phone_app_intervals(
+    events: list[dict[str, Any]], apps: set[str] | None = None,
+) -> list[tuple[datetime, datetime]]:
+    """手机前台时间区间 —— ``summarize_phone`` 的区间版本。
+
+    为什么要单独要区间：站点要算「一天里被各个数据源覆盖的**并集**」，
+    只知道「微信 184 分钟」是不够的，必须知道这 184 分钟落在哪些时刻，
+    才能和桌面块求交、把重复的部分扣掉。
+
+    ``apps=None`` 表示**所有非系统应用** —— 七维里手机的每一分钟都有归属，
+    并集也必须覆盖同样的范围，否则两边的口径就对不上了。
+
+    归属口径（屏幕裁剪、跨应用切换的一阶差分、最后一个应用到熄屏为止、
+    超过 60 分钟的空档不算）和 ``summarize_phone`` 保持一致；
+    那边改规则时这里要一起改。
+    """
+    unlocks, switches, screen_iv, covered = _phone_context(events)
+
+    out: list[tuple[datetime, datetime]] = []
+    for raw_app, lo, hi in _phone_spans(switches, screen_iv):
+        span = (hi - lo).total_seconds()
+        if not (0 <= span <= MAX_FOREGROUND_GAP.total_seconds()):
+            continue
+        if raw_app in PHONE_NOT_AN_APP or raw_app.startswith("%"):
+            continue
+        if apps is not None and phone_app_name(raw_app) not in apps:
+            continue
+        out.extend(_active_intervals(lo, hi, unlocks, screen_iv, covered))
+    return out
+
+
+def phone_category_intervals(
+    events: list[dict[str, Any]],
+) -> dict[str, list[tuple[datetime, datetime]]]:
+    """按七维分类的手机前台区间 —— 手机上的每一分钟都会落进某一维。
+
+    返回 ``{"Work"|"Study"|"Life"|"Leisure"|"Social": [(lo, hi), ...]}``。
+    站点用它同时算两样东西：七维里手机贡献的小时数，以及 collapsedHours
+    的并集（两者必须同源，否则 OVERLAP 会算出一个不存在的重叠）。
+    """
+    unlocks, switches, screen_iv, covered = _phone_context(events)
+
+    out: dict[str, list[tuple[datetime, datetime]]] = {}
+    for raw_app, lo, hi in _phone_spans(switches, screen_iv):
+        span = (hi - lo).total_seconds()
+        if not (0 <= span <= MAX_FOREGROUND_GAP.total_seconds()):
+            continue
+        if raw_app in PHONE_NOT_AN_APP or raw_app.startswith("%"):
+            continue
+        category = phone_app_category(raw_app)
+        out.setdefault(category, []).extend(
+            _active_intervals(lo, hi, unlocks, screen_iv, covered)
+        )
     return out
 
 

@@ -4254,6 +4254,41 @@ def t_collapsed_hours():
     assert not blocks[0].url, f"别的应用的 URL 被贴进来了：{blocks[0].url}"
     assert blocks[0].titles == ["PUBG: BATTLEGROUNDS"], blocks[0].titles
 
+    # ⑦ 手机按七维分类：区间版和分钟版必须同源，且**每个应用都有归属**
+    #    （手机没有 Other 这一档，否则「电脑前刷手机」的重叠永远算不出来）
+    ev = [
+        {"ts_utc": t0.isoformat(), "metric": "screen_on", "value_text": ""},
+        {"ts_utc": m(1).isoformat(), "metric": "unlock", "value_text": ""},
+        {"ts_utc": m(2).isoformat(), "metric": "app_switch", "value_text": "com.deepseek.chat"},
+        {"ts_utc": m(22).isoformat(), "metric": "app_switch", "value_text": "tv.danmaku.bili"},
+        {"ts_utc": m(42).isoformat(), "metric": "app_switch", "value_text": "com.unknown.app"},
+        {"ts_utc": m(47).isoformat(), "metric": "screen_off", "value_text": ""},
+    ]
+    by_cat = N.phone_category_intervals(ev)
+    got = {
+        cat: sum((b - a).total_seconds() for a, b in ivs) / 60.0
+        for cat, ivs in by_cat.items()
+    }
+    assert set(got) == {"Study", "Leisure", "Life"}, got
+    assert abs(got["Study"] - 20) < 1e-6, got
+    assert abs(got["Leisure"] - 20) < 1e-6, got
+    assert abs(got["Life"] - 5) < 1e-6, got
+
+    # 分钟版（summarize_phone）按同一张分类表汇总，必须和区间版对得上
+    from_top: dict[str, float] = {}
+    for name, minutes in N.summarize_phone(ev)["top_apps"]:
+        cat = N.phone_app_category(name)
+        assert cat in {"Work", "Study", "Life", "Leisure", "Social"}, (name, cat)
+        from_top[cat] = from_top.get(cat, 0.0) + minutes
+    for cat, minutes in got.items():
+        assert abs(from_top.get(cat, 0.0) - minutes) < 0.11, (cat, from_top, got)
+
+    # 表里没有的应用：靠关键词猜，最后兜底 Life —— 不允许出现空分类
+    assert N.phone_app_category("com.foo.musicplayer") == "Leisure"
+    assert N.phone_app_category("com.unknown.app") == "Life"
+    # 桌面 / 系统界面不是应用，时间记在前一个应用头上
+    assert N.phone_app_category("com.miui.home") == "Life"
+
 
 check("collapsedHours: 区间版与分钟版逐条一致 / 并集 / 跨午夜裁剪", t_collapsed_hours)
 

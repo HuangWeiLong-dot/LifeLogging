@@ -231,14 +231,18 @@ Tasker 的每个 HTTP action 都要带 Access Service Token 头。
 ### 七维与 collapsedHours
 
 `publish_life_site.py` 的 `build_dimensions` 产出 `Work / Study / Life / Transport /
-Leisure / Health / Social`（小时）：Work/Study/Life/Leisure 来自桌面分类，Transport 来自
-GPS 通勤，Health 来自手表跑步，Social 来自手机社交应用；手机上的对话式 AI 并入 Study；
-**`Other` 不进七维**。七维是**各来源读数之和，不是时间并集**（电脑前刷手机算两次）。
+Leisure / Health / Social`（小时）：Work/Study/Life/Leisure = 桌面分类 **+ 手机上归到
+同一维的应用**；Transport 来自 GPS 通勤；Health 来自手表跑步；Social 来自手机社交/通讯
+应用（桌面端的微信/QQ 走 Leisure 规则）。**桌面的 `Other` 不进七维**；**手机没有 Other
+这一档** —— `normalize.PHONE_APP_CATEGORIES` 规定每个手机应用属于哪一维，表里没有的按
+关键词猜、最后兜底 `Life`，否则「电脑前刷手机」的重叠永远算不出来。七维是**各来源读数
+之和，不是时间并集**（电脑前刷手机算两次）。
 
-`collapsedHours` 才是真实去重时长：把桌面 blocks、交通、锻炼、手机活跃区间做**区间并集**，
-再裁到本地日。站点雷达底部 `UNIQUE TIME` 用它，`OVERLAP = 七维之和 − 并集`，而且只是下限
-（桌面 `Other` 在并集里、不在七维里）。改任何一个口径，都要同步站点
-`LifeRadar.vue` 的显示与 `tools/verify-life.mjs`。
+`collapsedHours` 才是真实去重时长：把桌面 blocks、交通、锻炼、**全部手机前台区间**做
+**区间并集**，再裁到本地日。站点雷达底部 `UNIQUE TIME` 用它，`OVERLAP = 七维之和 − 并集`，
+而且只是下限（桌面 `Other` 在并集里、不在七维里）。手机的分维小时数和并集必须来自同一个
+`phone_category_intervals()`，否则 OVERLAP 会算出一个不存在的重叠。改任何一个口径，都要
+同步站点 `LifeRadar.vue` 的显示、它的那份手机分类表副本，以及 `tools/verify-life.mjs`。
 
 ### GPX / FIT
 
@@ -323,6 +327,9 @@ GPS 通勤，Health 来自手表跑步，Social 来自手机社交应用；手�
   各有硬编码分类表。**分类名至少六处要同步**：`config.yaml` 的 `categories`、
   `normalize.py`、`generate_journal.py` 的 `SYSTEM_PROMPT`、`vault/99-Templates/Panel-*.md`
   的 `CATEGORIES`、`learn_apps.py`、`structure_text.py`。
+- **手机应用分类**另有一张表：`normalize.py` 的 `PHONE_APP_CATEGORIES`（→ 七维）和站点
+  `LifeRadar.vue` 里的同名副本。Worker 白名单不接受新字段，所以客户端只能拿
+  `phone.topApps` 自己再分一次；两处必须一起改。
 - 浏览器按 `title` 分类，不按 app 名。2026-10-24 起，没命中强信号 → `("Study","rule")`
   （看资料）；GitHub/Notion → Work，视频/社交 → Leisure，购物/账单 → Life。
   代价是「随便逛新闻/论坛」也算 Study，这是有意接受的。

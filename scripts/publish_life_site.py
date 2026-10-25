@@ -44,7 +44,7 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import header, load_config  # noqa: E402
-from normalize import phone_app_intervals, summarize_phone  # noqa: E402
+from normalize import phone_category_intervals, summarize_phone  # noqa: E402
 from translate import Translator, has_cjk  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -112,19 +112,9 @@ CITY_NAMES = {
 # 残留的 Android 包名（summarize_phone 对未知包名会原样保留）
 PKG_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$")
 
-# 七维向量里的 Social：手机上的社交/通讯应用。桌面端的 WeChat/QQ 会先被
-# Leisure 规则命中，所以这里从 phone.topApps 取，避免 Social 永远为 0。
-SOCIAL_APPS = {
-    "WeChat", "QQ", "Telegram", "WhatsApp", "Signal", "Line", "Discord",
-    "Weibo", "Xiaohongshu", "Instagram", "Facebook", "Threads", "LinkedIn",
-}
-# 手机上的对话式 AI → Study（2026-10-24 定的口径，和 normalize 的
-# APP_RULES/TITLE_HINTS 一致）。桌面端的同类工具已经在桌面分类里算 Study，
-# 这里补的是只有手机才会出现的那部分时间。
-# ⚠️ 只收对话产品；手机上的 IDE/终端助手不存在，不用考虑。
-PHONE_STUDY_APPS = {
-    "DeepSeek", "ChatGPT", "Claude", "Gemini", "Copilot", "Perplexity",
-}
+# 手机应用怎么分到七维，统一在 normalize.PHONE_APP_CATEGORIES 里定义
+# （那边同时是手机应用名表和「没有 Other，每一分钟都有归属」的口径）。
+# 这里不再维护自己的 Social / AI 名单，避免两套表漂移。
 CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -595,45 +585,43 @@ def build_ai(rows: list[sqlite3.Row]) -> dict | None:
 
 
 def build_dimensions(categories: dict | None, health: dict | None,
-                     location: dict | None, phone: dict | None) -> dict[str, float]:
+                     location: dict | None,
+                     phone_dims: dict[str, float] | None) -> dict[str, float]:
     """把桌面分类 + 手表 + GPS + 手机合成神经系统用的七维（单位：小时）。
 
-    - Work / Life / Leisure：桌面 ActivityWatch 分类
-    - Study：桌面 Study 分类 + 手机上的对话式 AI（PHONE_STUDY_APPS）
+    - Work / Study / Life / Leisure：桌面分类 **+ 手机上归到同一维的应用**
+    - Social：手机社交/通讯应用（桌面端的微信/QQ 走 Leisure 规则）
     - Transport：Dawarich 的实测 + 推断通勤分钟
     - Health：手表跑步分钟（当前导出没有睡眠/其他可计时活动）
-    - Social：手机社交/通讯应用分钟
-    Other 不进入七维（它是“没认出来”，不是维度）。
 
-    ⚠️ 这是**各来源读数之和**，不是时间并集：手机在电脑前用微信时，
-       Social 和桌面分类会同时计时。真实的去重总时长见 ``collapsedHours``。
+    桌面的 ``Other`` 不进七维（它是“没认出来”，不是维度）；手机没有这一档，
+    ``normalize.PHONE_APP_CATEGORIES`` 保证手机时间一定有归属。
+
+    ``phone_dims`` 是手机各维的小时数，由 ``phone_category_intervals`` 按**区间**
+    算出来（不是 topApps 的分钟和）—— 和 collapsedHours 的并集同一个来源，
+    这样 OVERLAP 才不会把「同一个应用的两段时间」算成两份。
+
+    ⚠️ 这是**各来源读数之和**，不是时间并集：手机在电脑前刷 B 站时，
+       Leisure 会把桌面和手机各算一次。真实的去重总时长见 ``collapsedHours``。
     """
     cats = categories or {}
+    phone = phone_dims or {}
 
-    def cat(name: str) -> float:
-        return max(0.0, float(cats.get(name) or 0.0))
-
+    dims = {
+        name: max(0.0, float(cats.get(name) or 0.0)) + max(0.0, float(phone.get(name) or 0.0))
+        for name in ("Work", "Study", "Life", "Leisure")
+    }
     transit_min = max(0.0, float((location or {}).get("transitMinutes") or 0.0))
     health_min = max(0.0, float((health or {}).get("runMinutes") or 0.0))
-    social_min = 0.0
-    phone_study_min = 0.0
-    for name, minutes in (phone or {}).get("topApps") or []:
-        value = max(0.0, float(minutes or 0.0))
-        if str(name) in SOCIAL_APPS:
-            social_min += value
-        elif str(name) in PHONE_STUDY_APPS:
-            # 手机 AI 对话并入 Study：它和桌面 Study 是同一个维度，
-            # 只是第二条数据源。跨源重叠由 collapsedHours 负责去重。
-            phone_study_min += value
 
     return {
-        "Work": round(cat("Work"), 2),
-        "Study": round(cat("Study") + phone_study_min / 60.0, 2),
+        "Work": round(dims["Work"], 2),
+        "Study": round(dims["Study"], 2),
         "Transport": round(transit_min / 60.0, 2),
-        "Leisure": round(cat("Leisure"), 2),
+        "Leisure": round(dims["Leisure"], 2),
         "Health": round(health_min / 60.0, 2),
-        "Life": round(cat("Life"), 2),
-        "Social": round(social_min / 60.0, 2),
+        "Life": round(dims["Life"], 2),
+        "Social": round(max(0.0, float(phone.get("Social") or 0.0)), 2),
     }
 
 
@@ -792,19 +780,21 @@ def build_day(
     location, transport_intervals = build_location(by_domain.get("location", []))
     phone = build_phone(by_domain.get("phone", []))
 
-    # 手机：只取七维里 Social 那一类应用的前台区间。桌面端的微信/QQ
-    # 走 Leisure 规则，不在这个集合里（和 build_dimensions 的口径一致）。
+    # 手机：**所有**非系统应用都按七维分类（没有 Other 这一档）。
+    # 分类结果同时用于两处，必须同源，否则 OVERLAP 会算出不存在的重叠：
+    #   · dimensions 里手机贡献的小时数
+    #   · collapsedHours 的并集
     phone_rows = by_domain.get("phone", [])
-    phone_intervals = phone_app_intervals(
-        [
-            {"ts_utc": r["ts_utc"], "metric": r["metric"], "value_text": r["value_text"]}
-            for r in phone_rows
-            if r["metric"] in ("unlock", "app_switch", "screen_on", "screen_off")
-        ],
-        # Social 和 Study 的手机部分都要进并集，否则 collapsed 会漏掉手机 AI，
-        # 把「手机 AI 与桌面重叠」误算成额外时长。
-        SOCIAL_APPS | PHONE_STUDY_APPS,
-    )
+    phone_category_ivs = phone_category_intervals([
+        {"ts_utc": r["ts_utc"], "metric": r["metric"], "value_text": r["value_text"]}
+        for r in phone_rows
+        if r["metric"] in ("unlock", "app_switch", "screen_on", "screen_off")
+    ])
+    phone_dims = {
+        category: round(_interval_minutes(ivs) / 60.0, 2)
+        for category, ivs in phone_category_ivs.items()
+    }
+    phone_intervals = [iv for ivs in phone_category_ivs.values() for iv in ivs]
 
     # 锻炼：手表记录的每一段 workout 都是真实的“在活动”。
     workout_intervals: list[tuple[datetime, datetime]] = []
@@ -848,7 +838,7 @@ def build_day(
         "phone": phone,
         "ai": build_ai(by_domain.get("ai", [])),
         "workouts": build_workouts(by_domain.get("fitness", [])),
-        "dimensions": build_dimensions(categories, health, location, phone),
+        "dimensions": build_dimensions(categories, health, location, phone_dims),
         # 七个维度是各来源读数的**总和**，同一分钟可能被两个来源各算一次
         # （最典型：电脑前刷手机 → Social 和桌面分类同时计时）。
         # 这个字段是同一天所有来源区间的**并集**，所以它 ≤ 七维之和。
