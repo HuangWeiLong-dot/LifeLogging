@@ -143,8 +143,8 @@ def snapshot_state(snap: dict | None, day_iso: str, now: datetime,
 SUMMARY_AT = os.environ.get("LIVE_SUMMARY_AT", "23:00")
 
 # 白天的**任务检查**时段。到这些小时，如果任务表里还有没问过的任务，
-# 就用一条「到现在做到了吗？」替换掉普通的小时题（不是额外加一条）。
-# 一天最多 4 条，避免刷屏；空字符串 = 关闭。
+# 就额外问一条「到现在做到了吗？」—— **这一小时的小时题照发**，两题并列。
+# 一天最多 4 条问责，避免刷屏；空字符串 = 关闭。
 COMMITMENT_HOURS: tuple[int, ...] = tuple(
     int(x) for x in os.environ.get("LIVE_COMMITMENT_HOURS", "10,14,18,21").split(",")
     if x.strip().isdigit() and 0 <= int(x) <= 23
@@ -590,8 +590,10 @@ def commitment_question(day_iso: str, tasks: list[str],
                         asked_elsewhere: set[str] | None = None) -> dict | None:
     """到了检查时段，挑一条没问过的任务生成问责题。
 
-    ⚠️ 它**替换**普通小时题，不是追加 —— 一天 4 条已经够多了，再加会让人
-       把整条通道静音，连带收尾题一起收不到。
+    ⚠️ 它和普通小时题**并列**（见 build() 里那段注释）：检查时段那一个小时
+       照样要问「你在干嘛」。原来做成「替换」，结果 10、14、18、21 点过去的
+       那个小时一条题都没有，13:04–14:04 就是这么空掉的。一天因此最多
+       4 条问责 + 每个小时一条，不是把后者吞掉。
 
     ⚠️ **一个检查时段只发一条。** 原来 `_key` 里带着任务 hash，于是
        `COMMITMENT_HOURS` 里的 10 点这一轮、每 30 分钟拉一次 timer 就跑一次，
@@ -951,12 +953,28 @@ def build(day: Day, base: str, key: str) -> list[dict]:
     if _summary_soon(now):
         return known
 
-    # 这一小时刚刚发过问责题？那就不再发小时题。问责题是**替换**，不是加塞。
-    if any(k.startswith(f"task-{day.iso}T{now:%H}") for k in fired):
-        return known
+    new: list[dict] = []
 
-    # ── 固定时段的任务检查（替换这一小时的普通题）──
-    if now.hour in COMMITMENT_HOURS:
+    # ── 每小时一题：固定节拍，**任何一小时都不能空着** ──
+    #
+    # ⚠️ 这一条必须放在任务检查**前面**，而且不能被任务检查挤掉。
+    #    原来问责题是「替换」这一小时的小时题，于是 10、14、18、21 这四个
+    #    检查时段本该覆盖的那个小时**从来没被问过** —— 实测 13:04–14:04 整段
+    #    没有任何一题。「这一小时你在干嘛」和「那条任务做了没有」是两个问题，
+    #    后者回答不了前者。现在两条都发；多出来的只是一天四条。
+    hour_key = f"hour-{day.iso}T{now:%H}"
+    if hour_key not in fired:
+        try:
+            q = rule_hourly(day.iso, stays, events, snap, now)
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠️  生成失败：{type(e).__name__}: {e}")
+            q = None
+        if q and q["_key"] not in fired:
+            new.append(q)
+
+    # ── 固定时段的任务检查（和上面那条并列，不是替换）──
+    if now.hour in COMMITMENT_HOURS and not any(
+            k.startswith(f"task-{day.iso}T{now:%H}") for k in fired):
         try:
             cq = commitment_question(day.iso, load_commitment_tasks(day.iso),
                                      now, known,
@@ -965,18 +983,9 @@ def build(day: Day, base: str, key: str) -> list[dict]:
             print(f"  ⚠️  任务检查生成失败：{type(e).__name__}: {e}")
             cq = None
         if cq and cq["_key"] not in fired:
-            return known + [cq]
+            new.append(cq)
 
-    # ── 每小时一题 ──
-    try:
-        q = rule_hourly(day.iso, stays, events, snap, now)
-    except Exception as e:  # noqa: BLE001
-        print(f"  ⚠️  生成失败：{type(e).__name__}: {e}")
-        q = None
-
-    if q and q["_key"] not in fired:
-        return known + [q]
-    return known
+    return known + new if new else known
 
 
 def push(day_iso: str, base: str, key: str,

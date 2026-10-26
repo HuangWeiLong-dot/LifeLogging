@@ -229,14 +229,23 @@ def _fmt_health(key: str, value) -> str:
 
 
 def _qa_bullets(qa: list | None, max_items: int = 40,
-                q_chars: int = 160, a_chars: int = 300) -> list[str]:
-    """把问答压成 prompt 里的几行。兼容 `/qa` 字典和旧的 `(问, 答)`。"""
+                q_chars: int = 160, a_chars: int = 300,
+                day_iso: str = "") -> list[str]:
+    """把问答压成 prompt 里的几行。兼容 `/qa` 字典和旧的 `(问, 答)`。
+
+    ⚠️ `/qa` 的语义是**作答日**：昨天生成、今天才答的题也在这里面。所以
+       题号前缀和 `day_iso` 对不上时要把**提问日**写进 prompt —— 否则模型
+       会把「昨天那条任务怎么样了」当成今天发生的事写进日记。实测 10-26
+       晚上补跑时，10-25 的 7 条答案全都落进了 10-26 的输入。
+    """
     out: list[str] = []
     for x in (qa or [])[:max_items]:
+        qday = ""
         if isinstance(x, dict):
             q = str(x.get("text") or "")
             a = str(x.get("answer") or x.get("value") or "")
             n = str(x.get("note") or "")
+            qday = str(x.get("question_day") or "")
         elif isinstance(x, (tuple, list)) and len(x) >= 2:
             q, a = str(x[0] or ""), str(x[1] or "")
             n = str(x[2]) if len(x) > 2 and x[2] else ""
@@ -247,7 +256,8 @@ def _qa_bullets(qa: list | None, max_items: int = 40,
         n = " ".join(n.split())[:a_chars]
         if not (q or a):
             continue
-        out.append(f"- Q: {q or '(question text unavailable)'}")
+        tag = f" [asked about {qday}]" if qday and day_iso and qday != day_iso else ""
+        out.append(f"- Q{tag}: {q or '(question text unavailable)'}")
         out.append(f"  A: {a}" + (f"  ({n})" if n else ""))
     return out
 
@@ -319,7 +329,8 @@ def build_user_prompt(tl: dict, day: Day, carryover: list[str],
         lines.append("time**. Do not create Time Log blocks from them, and do not add")
         lines.append("their durations to the recorded total.")
         lines.append("")
-        lines.extend(_qa_bullets(qa, max_items=40, q_chars=160, a_chars=300))
+        lines.extend(_qa_bullets(qa, max_items=40, q_chars=160, a_chars=300,
+                                 day_iso=day.iso))
         lines.append("")
 
     health = tl.get("health") or {}
@@ -412,7 +423,8 @@ def build_user_prompt(tl: dict, day: Day, carryover: list[str],
             lines.append("### Yesterday's questions and answers")
             lines.append("")
             lines.extend(_qa_bullets(previous_day_qa, max_items=30,
-                                     q_chars=120, a_chars=240))
+                                     q_chars=120, a_chars=240,
+                                     day_iso=(day.d - timedelta(days=1)).isoformat()))
             lines.append("")
 
     # ── 相关历史（长期记忆 · 检索层）──

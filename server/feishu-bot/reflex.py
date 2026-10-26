@@ -237,9 +237,14 @@ def evaluate(now: datetime, day_iso: str, *, events: list[dict],
                 gap = now - last
                 if gap < timedelta(hours=SENSOR_STALE_HOURS):
                     return None
+                # ⚠️ 必须换到 `now` 的时区再格式化。`last` 是从 `ts_utc` 解析
+                #    出来的 **UTC**，直接 `{last:%H:%M}` 会写出小 8 小时的时间：
+                #    实测北京 18:25 那次印成了「last one 10:25」，和同一句里的
+                #    「19h 44m」自相矛盾，看着像数据坏了。
+                last_local = last.astimezone(now.tzinfo or last.tzinfo)
                 return _alert("sensor_silent", "Sensors", [
                     f"No phone events for {_hm(gap.total_seconds() / 60)}"
-                    f" (last one {last:%H:%M}).",
+                    f" (last one {last_local:%H:%M}).",
                     "Either the phone is dead or Tasker was killed — go check.",
                 ])
             take("sensor_silent", _sensor_alert)

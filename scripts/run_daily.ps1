@@ -519,8 +519,18 @@ $qDay = $qDayDate.ToString("yyyy-MM-dd")
 # 没有 targets 时只在**上午**补生成：下午/晚上生成会把「昨天的题」推到明天
 # 早上，题号仍是昨天的，读起来就是过期题。23:00 那次有 targets（今天），不受影响。
 $shouldGenerate = ($targets.Count -gt 0 -or (Get-Date).Hour -lt 12)
+# ⚠️ 这一行是上面那句的补充，缺了它护栏是漏的：补跑**已经过完的那一天**时
+#    `$targets` 非空，照样生成、照样推中继，题号却是旧日期。实测 10-26 20:11
+#    补跑 10-25，20:14 推上去 7 条，机器人 20:28 原样问出来（每条还带「这是
+#    2026-10-25 的题」），而实时链路今天 10/14/18 点已经就同一批任务问过，
+#    同一个任务一天两问、答案互相矛盾。上午补跑（8 点补昨天的问责批）是正常
+#    用途，所以只挡 12 点之后：那时推上去只会变成今天的噪音。
+$qNoPush = ($qDay -ne $today.ToString("yyyy-MM-dd") -and (Get-Date).Hour -ge 12)
+if ($qNoPush) { Write-Log "   · 补跑 $qDay：只写本地，不推中继（已过 12 点）" }
 if ($shouldGenerate -and -not $SkipAI -and -not $DryRun) {
-    Invoke-Step "questions" "scripts\generate_questions.py" @("--date", $qDay) | Out-Null
+    $qArgs = @("--date", $qDay)
+    if ($qNoPush) { $qArgs += "--no-push" }
+    Invoke-Step "questions" "scripts\generate_questions.py" $qArgs | Out-Null
 }
 
 # 答案今早才答回来：自动模式下永远回收「昨天」的问题。
