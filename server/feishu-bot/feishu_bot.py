@@ -1150,7 +1150,7 @@ def help_card() -> dict:
         ("Flow", [
             ("/pending", "send the next question"),
             ("/pending 2026-10-31", "finish another day's unanswered ones"),
-            ("/redo [2026-10-31]", "rewrite an answer you already sent"),
+            ("/redo [2026-10-31]", "rewrite an answer (date = question day)"),
             ("/skip", "skip the current one"),
             ("/end", "start the wrap-up now"),
             ("/recap", "regenerate today's recap"),
@@ -1785,7 +1785,7 @@ def handle_pending_day(open_id: str, day: str) -> None:
     state["reason_for"] = None
     save_state(state)
     print(f"[jump] 切到 {d} 的队列")
-    advance(open_id, ack=f"Jumped to {d}.")
+    advance(open_id, ack=f"Jumped to {d} — already-answered ones are skipped.")
 
 
 def _hhmm_of(ts: str) -> str:
@@ -1809,7 +1809,7 @@ def amend_card(label: str, items: list[dict], total: int = 0) -> dict:
         note = _brief(x.get("note"), 40)
         rows.append(f"　→ **{ans}**" + (f" · {note}" if note else ""))
     elements: list[dict] = [
-        _note(f"Answers from {label}"),
+        _note(label),
         {"tag": "div",
          "text": {"tag": "lark_md", "content": "\n".join(rows)}},
         {"tag": "hr"},
@@ -1836,11 +1836,17 @@ def handle_redo(open_id: str, day_arg: str) -> None:
        那条。所以这里做的事和第一次回答完全一样，只是题目要从 `/qa` 里取 ——
        它已经不在「待答」列表里了。
 
-    ⚠️ 日期是**作答日**（`/qa` 的语义），不是提问日：凌晨收尾答的题记在
-       第二天，和 `apply_answers` 一致。
+    ⚠️ 日期参数是**提问日**，和 `/pending <日期>` 一致 —— 不是作答日。
+       中继的 `/qa?day=` 按「哪天写的答案」取（凌晨收尾答的题记在第二天），
+       拿它当提问日用会得到反直觉的结果：`/redo 2026-10-31` 只列出**10-31
+       当天写的**答案，而 10-31 的题今早才答的那些全都不在里面（2026-11-01
+       实测就是这么困惑的）。所以这里从提问日扫到今天的答案文件，再按题号
+       前缀 `D-` 筛出属于那天的题。答案超过 14 天才补的情况不覆盖 —— 现实中
+       不存在（中继自己只回看 7 天）。
     """
     now = datetime.now(TZ)
     days: list[str]
+    prefix = ""
     if str(day_arg or "").strip():
         d = _valid_day(day_arg)
         if d is None:
@@ -1849,7 +1855,13 @@ def handle_redo(open_id: str, day_arg: str) -> None:
         if d > now.date().isoformat():
             send_text(open_id, f"{d} hasn't happened yet.")
             return
-        days = [d]
+        prefix = d + "-"
+        days = []
+        cur = date.fromisoformat(d)
+        end = now.date()
+        while cur <= end and len(days) < 14:
+            days.append(cur.isoformat())
+            cur += timedelta(days=1)
     else:
         # 不带日期 =「我刚发出去的那些」。00:00–05:00 之间，刚发的答案可能
         # 落在今天（00:20）也可能落在昨天（23:50），两天都取、按题号合并 ——
@@ -1859,25 +1871,32 @@ def handle_redo(open_id: str, day_arg: str) -> None:
     merged: dict[str, dict] = {}
     for dd in days:
         for x in (live.relay_qa(dd, RELAY_BASE, RELAY_API_KEY) or []):
-            if not isinstance(x, dict) or not str(x.get("id") or ""):
+            qid = str(x.get("id") or "") if isinstance(x, dict) else ""
+            if not qid or (prefix and not qid.startswith(prefix)):
                 continue
-            old = merged.get(str(x["id"]))
+            old = merged.get(qid)
             if old is None or (str(x.get("ts_utc") or "")
                                >= str(old.get("ts_utc") or "")):
-                merged[str(x["id"])] = x
+                merged[qid] = x
 
     items = sorted(merged.values(), key=lambda x: str(x.get("ts_utc") or ""))
     total = len(items)
     # 只列最近的 N 条：一天答十几二十题很正常，卡片撑不下，人也选不过来。
     items = items[-AMEND_MAX:]
-    label = days[0] if len(days) == 1 else " → ".join((days[0], days[-1]))
+    if prefix:
+        label = f"Answers to questions from {d}"
+        empty = f"No answers to {d} questions."
+    else:
+        span = days[0] if len(days) == 1 else " → ".join((days[0], days[-1]))
+        label = f"Answers recorded {span}"
+        empty = f"No answers recorded on {span}."
     state = load_state()
     state["amend"] = None
     if not items:
         save_state(state)
-        send_text(open_id, f"No answers recorded on {label}.")
+        send_text(open_id, empty)
         return
-    state["amend"] = {"days": days, "items": items,
+    state["amend"] = {"days": days, "items": items, "prefix": prefix,
                       "at": now.isoformat(timespec="seconds")}
     save_state(state)
     try:
@@ -1885,7 +1904,7 @@ def handle_redo(open_id: str, day_arg: str) -> None:
     except Exception as e:  # noqa: BLE001
         print(f"WARN 改答案列表没发出去，退回纯文本：{type(e).__name__}: {e}",
               file=sys.stderr)
-        send_text(open_id, f"Answers on {label}:\n" + "\n".join(
+        send_text(open_id, f"{label}:\n" + "\n".join(
             f"{i}) {_brief(x.get('text'), 30)} → {_brief(x.get('answer'), 30)}"
             for i, x in enumerate(items, 1)))
 
@@ -2276,7 +2295,28 @@ def handle_text(open_id: str, text: str) -> None:
         state["awaiting"] = None
         save_state(state)
         print(f"[expire] 昨天的实时题没答，清掉 awaiting：{awaiting}")
-        # 这条消息不是答案 —— 按普通消息重新走一遍（现在 awaiting 已经空了）。
+        # ⚠️ **不能静默地把它当一条笔记。** 2026-11-01 早上就是这么丢的：
+        #    那道 08:01–09:01 的题挂了一夜，用户回「睡觉」→ 走这条路 → 存成
+        #    manual/note、回一句 "Noted."。他以为答了，数据里只有笔记；第二天
+        #    /pending 又把同一题问了一遍，看起来像「没过滤已答的题」。
+        #    斜杠命令照旧递归（命令要生效）；纯文本则存成笔记，但把话说清楚。
+        if (stripped and not cmd.startswith("/")
+                and split_note_prefix(stripped) is None):
+            try:
+                relay_note(stripped)
+            except Exception as e:  # noqa: BLE001
+                print(f"ERROR 过期题的这句话没存成：{type(e).__name__}: {e}",
+                      file=sys.stderr)
+                send_text(open_id, f"Not saved: {e}")
+                return
+            print(f"[expire-note] {stripped[:60]!r}")
+            send_text(open_id,
+                      f"⚠️ That question was for {q.get('day')} and is no "
+                      f"longer being asked — your text was saved as a note, "
+                      f"not as an answer.\n"
+                      f"Use /pending {q.get('day')} to answer it properly.")
+            return
+        # 命令之类 —— 按普通消息重新走一遍（现在 awaiting 已经空了）。
         handle_text(open_id, stripped)
         return
 

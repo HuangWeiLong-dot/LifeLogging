@@ -1934,6 +1934,7 @@ def t_feishu_jump_and_redo():
         box["answers"].append((qid, value, note)) or {"ok": True})
     fb.relay_note = lambda text: {"ok": True}
     # 把「今天」钉死，否则凌晨跑时 target_day_iso 会把昨天当成「当天」。
+    # （下面的断言都按这个 today 写。）
     fb.target_day_iso = lambda now: today
     fb.day_is_closed = lambda d: False
 
@@ -1996,6 +1997,22 @@ def t_feishu_jump_and_redo():
         fb.handle_text("ou_x", "note: 随手记一句")
         assert box["state"]["amend"] is None, box["state"]
         assert ("text", "Noted.") in box["sent"], box["sent"]
+
+        # ⚠️ 日期参数是**提问日**，不是作答日：10-31 的题今早（11-01）才答，
+        #    `/redo 2026-10-31` 必须能列出来 —— 实测 2026-11-01 用户就是
+        #    `/redo 2026-10-31` 之后看着一堆 10-31 当天写的答案发懵。
+        box["state"] = {}
+        fb.handle_redo("ou_x", old)
+        assert [x["id"] for x in box["state"]["amend"]["items"]] == [
+            f"{old}-hour2"], box["state"]
+
+        # 别的提问日不会串进来（前缀筛掉 → 走「没有答案」那条路）。
+        box["state"] = {}
+        box["sent"] = []
+        fb.handle_redo("ou_x", today)
+        assert box["state"].get("amend") is None, box["state"]
+        assert any(kind == "text" and "No answers" in t
+                   for kind, t in box["sent"]), box["sent"]
     finally:
         fb.live.relay_qa = orig_qa
 
