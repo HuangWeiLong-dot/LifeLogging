@@ -1098,10 +1098,15 @@ def done_card(day_iso: str, ack: str = "") -> dict:
 
     ⚠️ 统计读的是中继的 `/qa`。读不到就退化成一句纯文案 —— 这张卡不能因为
        一个网络请求就没得发。
+
+    ⚠️ 数的是**属于 `day_iso` 那些题**的答案（按题号前缀），不是「`day_iso`
+       那天写了多少条答案」。补答昨天时后者会把答案算到今天头上：2026-11-01
+       用 `/pending 2026-10-31` 答完 39 道，卡片写的是「39 answers recorded
+       for 2026-11-01」，完全对不上。
     """
     buckets: dict[str, int] = {}
     try:
-        qa = live.relay_qa(day_iso, RELAY_BASE, RELAY_API_KEY)
+        qa = _qa_for_question_day(day_iso)
     except Exception as e:  # noqa: BLE001
         print(f"WARN 收尾卡读不到问答：{type(e).__name__}: {e}", file=sys.stderr)
         qa = []
@@ -1382,6 +1387,41 @@ def _answers_today(day_iso: str) -> dict[str, tuple[str, str]]:
     return out
 
 
+def _qa_for_question_day(day_iso: str, max_days: int = 14) -> list[dict]:
+    """属于 `day_iso` **那一天的题**的答案（不管答案是哪天写的）。
+
+    ⚠️ 中继 `/qa?day=` 的语义是**作答日**：补答昨天时，那几十条答案全写在
+       今天的文件里。直接拿作答日去数，收尾卡就会写成
+       「39 answers recorded for 2026-11-01」—— 而它们答的是 10-31 的题
+       （2026-11-01 实测，用户当场指出）。题号前缀 `D-` 才是「这道题属于哪天」
+       的唯一判据，`apply_answers` 也是靠它筛的。
+
+    ⚠️ 答案可能比提问日**晚几天**（凌晨收尾、第二天早上补问责题），所以从
+       提问日扫到今天。14 天足够 —— 再久的补答现实里不存在（中继自己只回看
+       7 天）。同题重答取 `ts` 最大的那条。
+    """
+    out: dict[str, dict] = {}
+    try:
+        cur = date.fromisoformat(day_iso)
+    except (TypeError, ValueError):
+        return []
+    end = datetime.now(TZ).date()
+    prefix = day_iso + "-"
+    n = 0
+    while cur <= end and n < max_days:
+        for x in (live.relay_qa(cur.isoformat(), RELAY_BASE, RELAY_API_KEY) or []):
+            qid = str(x.get("id") or "") if isinstance(x, dict) else ""
+            if not qid.startswith(prefix):
+                continue
+            old = out.get(qid)
+            if old is None or (str(x.get("ts_utc") or "")
+                               >= str(old.get("ts_utc") or "")):
+                out[qid] = x
+        cur += timedelta(days=1)
+        n += 1
+    return sorted(out.values(), key=lambda x: str(x.get("ts_utc") or ""))
+
+
 def maybe_write_summary(open_id: str, day_iso: str,
                         force: bool = False) -> bool:
     """收尾三题**全答完**了吗？答完就写一段当天总结。返回是否处理了。
@@ -1416,19 +1456,13 @@ def maybe_write_summary(open_id: str, day_iso: str,
         if any(str(x.get("kind") or "") == "summary" for x in pending):
             return False                # 这一天的收尾题还有没答的
 
-    # 优先从 /qa 取**当天全部**回答（早晨批 + 实时批 + 收尾批），
-    # 不再只挑 kind=summary。旧版中继没有 /qa 时退回原来的 summary-only。
-    # ⚠️ 答案落在**作答那天**，而复盘看的是**被回顾那天**。凌晨收尾时两者
-    #    不是同一天（10-23 的复盘在 10-24 00:30 答）。不知道答案具体落在哪边，
-    #    所以两天都取，按 qid 合并、新的覆盖旧的 —— 比猜哪一天稳。
-    merged: dict[str, dict] = {}
-    for d in {qa_day, day_iso}:
-        for x in (live.relay_qa(d, RELAY_BASE, RELAY_API_KEY) or []):
-            qid = str(x.get("id") or "")
-            old_row = merged.get(qid)
-            if old_row is None or str(x.get("ts_utc") or "") >= str(old_row.get("ts_utc") or ""):
-                merged[qid] = x
-    qa = list(merged.values())
+    # 取**属于这一天的问题**的全部回答（早晨批 + 实时批 + 收尾批），不再只挑
+    # kind=summary。旧版中继没有 /qa 时退回原来的 summary-only。
+    # ⚠️ 必须按**题号前缀**筛，不能把「作答日」那几天直接全拿进来：补答昨天时，
+    #    今天的答案文件里还混着今天自己的问答，它们会跑进昨天的复盘里
+    #    （2026-11-01 实测）。凌晨收尾那种「答案落在昨天/今天」的情况由
+    #    `_qa_for_question_day()` 从提问日扫到今天来解决。
+    qa = _qa_for_question_day(day_iso)
     if not qa:
         state = load_state()
         asked = state.get("asked") if isinstance(state.get("asked"), dict) else {}
@@ -1518,9 +1552,10 @@ def advance(open_id: str, ack: str = "") -> None:
             state["queue_day"] = None
             ack = f"✓ Nothing left for {queue_day}." + (f"\n{ack}" if ack else "")
         save_state(state)
-        # ⚠️ 统计用**今天**：卡片里的「N answers recorded for <day>」读的是
-        #    作答日的事件流，补昨天的题是今天写的。
-        day_iso = target_day_iso(datetime.now(TZ))
+        # ⚠️ 统计算在**被补的那一天**头上：补完 10-31 就该说
+        #    「N answers recorded for 2026-10-31」，哪怕这些答案是今天写的。
+        #    `done_card()` 现在按题号前缀数，不再按作答日数。
+        day_iso = queue_day or target_day_iso(datetime.now(TZ))
         try:
             send_card(open_id, done_card(day_iso, ack=ack))
         except Exception as e:  # noqa: BLE001

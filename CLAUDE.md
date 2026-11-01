@@ -47,7 +47,7 @@ pip install -r requirements.txt
 cp config/config.example.yaml config/config.yaml    # 然后填 vault 路径 / API key / 服务器地址
 
 # ── 验证（不碰任何采集源，改完代码先跑这个）────────────────
-python scripts/smoke_test.py                         # 70 项，全绿才算过；无参数、不能只跑一项
+python scripts/smoke_test.py                         # 71 项，全绿才算过；无参数、不能只跑一项
 powershell -NoProfile -File scripts\check_ps1.ps1    # 只做语法解析，不检查 BOM —— BOM 要自己确认
 
 # ── 常驻服务 ────────────────────────────────────────────
@@ -104,9 +104,9 @@ sudo /opt/lifelogging/repo/server/deploy.sh           # git ff-only + 按改动�
 `pip install -r ...`；动了 unit 要手动复制并 `systemctl daemon-reload`。
 更新后别只看 `/health`（新旧版本长得一样），打一个新路由（如 `/ask/pending`）确认。
 
-**没有单元测试框架**。`scripts/smoke_test.py` 就是测试套件（当前 70 项）；改了
+**没有单元测试框架**。`scripts/smoke_test.py` 就是测试套件（当前 71 项）；改了
 `normalize.py` / `common.py` / `events_api.py` / 发布逻辑后，正确验证方式就是跑它。
-本机没装 `recall`、`lark_oapi` 时只会 warn，不影响 70 项全绿 —— 那不是失败。
+本机没装 `recall`、`lark_oapi` 时只会 warn，不影响 71 项全绿 —— 那不是失败。
 
 ---
 
@@ -424,4 +424,4 @@ Leisure / Health / Social`（小时）：Work/Study/Life/Leisure = 桌面分类 
 - `docs/lls-dataflow.mmd` + `render_dataflow.py` —— 数据流图源文件
 - `server/*/README.md`、`docker/grafana/README.md`、`windows/live-daemon/README.md`
 - `README.md` —— 总览与「已验证到什么程度」；注意里面 smoke 数字（8/8）已过时，
-  以本文件 70 项为准。`docs/实现文档.md`（20/20）同理。
+  以本文件 71 项为准。`docs/实现文档.md`（20/20）同理。

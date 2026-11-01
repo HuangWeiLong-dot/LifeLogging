@@ -2073,6 +2073,61 @@ check("feishu: 收尾复盘等**那一天**的收尾题全部答完（不按最�
       t_summary_waits_for_same_day)
 
 
+def t_answer_day_attribution():
+    """补答昨天的题，统计要算在**昨天**头上，不是今天。
+
+    ⚠️ 2026-11-01 实测：用 `/pending 2026-10-31` 答完 39 道，收尾卡写的是
+       「39 answers recorded for 2026-11-01」—— 因为 `/qa?day=` 的 day 是
+       **作答日**。同一个坑也让昨天的复盘混进了今天自己的回答。
+       题号前缀 `D-` 才是「这道题属于哪天」的唯一判据。
+    """
+    import importlib.util
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "fb_attr", root / "server" / "feishu-bot" / "feishu_bot.py")
+    fb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fb)
+
+    today = datetime.now(fb.TZ).date().isoformat()
+    old = (datetime.now(fb.TZ).date() - timedelta(days=1)).isoformat()
+
+    # ① 助手：按题号前缀挑，跨天重答取最新，别的日子的题不串进来。
+    per_day = {
+        old: [{"id": f"{old}-a", "ts_utc": old + "T23:00:00Z", "answer": "x"}],
+        today: [{"id": f"{old}-a", "ts_utc": today + "T01:00:00Z", "answer": "y"},
+                {"id": f"{today}-b", "ts_utc": today + "T09:00:00Z",
+                 "answer": "z"}],
+    }
+    orig_qa = fb.live.relay_qa
+    fb.live.relay_qa = lambda d, base, key: list(per_day.get(d, []))
+    try:
+        got = fb._qa_for_question_day(old)
+        assert [x["id"] for x in got] == [f"{old}-a"], got
+        assert got[0]["answer"] == "y", "跨天重答要取最新"
+    finally:
+        fb.live.relay_qa = orig_qa
+
+    # ② 队列补完：收尾卡说的必须是**被补的那一天**。
+    box: dict = {"state": {"queue_day": old}, "cards": []}
+    fb.load_state = lambda: box["state"]
+    fb.save_state = lambda s: box.__setitem__("state", s)
+    fb.pending_filtered = lambda st, day=None: []
+    fb.send_card = lambda oid, card: box["cards"].append(card)
+    fb.send_text = lambda oid, text: None
+    fb._qa_for_question_day = lambda d: [
+        {"id": f"{d}-a", "kind": "summary", "answer": "y"}]
+    fb.advance("ou_x")
+    assert box["state"]["queue_day"] is None, box["state"]
+    text = json.dumps(box["cards"][0], ensure_ascii=False)
+    assert old in text, text
+    assert today not in text, text
+
+
+check("feishu: 补答昨天的题，收尾卡与复盘都算在昨天（按题号前缀）",
+      t_answer_day_attribution)
+
+
 def t_quiet_hours():
     """夜里不能发消息 —— 而且**生成器和推送层都要拦**。
 
