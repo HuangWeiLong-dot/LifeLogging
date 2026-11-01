@@ -492,6 +492,14 @@ def t_rules():
     got, conf = classify("SomeRandomThing", "whatever")
     assert got == "Other" and conf == "default"
 
+    # 网盘按**打开的文件**判，不按应用名（2026-11-01 实测窗口标题就是文件名）
+    assert classify(
+        "quark_cloud_drive.exe",
+        "Slow.Horses.S06E02.Daddy.Issues.2160p.10bit.ATVP.WEB-DL.DDP5.1.HEVC-Vyndros.mkv",
+    )[0] == "Leisure"
+    assert classify("quark_cloud_drive.exe", "线性代数讲义.pdf")[0] == "Study"
+    assert classify("quark_cloud_drive.exe", "首页 - 夸克网盘")[0] == "Life"
+
     # 浏览器不该污染 unmatched 列表
     from normalize import BROWSERS
     for b in BROWSERS:
@@ -500,6 +508,20 @@ def t_rules():
 
 
 check("rule matching / browser title logic / ambiguity flag / fallback", t_rules)
+
+
+def t_translate_url_only():
+    from translate import cjk_only_in_urls
+    # 纯 URL 里的中文不需要翻译；带中文正文的必须照常翻
+    assert cjk_only_in_urls("https://吹雪云.com/#/landing")
+    assert cjk_only_in_urls("Sign In - 吹雪云"), "专名可以保留原样"
+    assert not cjk_only_in_urls("首页 - 夸克网盘")
+    assert not cjk_only_in_urls("吹雪云 首页"), "专名之外还有中文就必须翻"
+    assert not cjk_only_in_urls("https://example.com 上的教程")
+
+
+check("translate: 纯 URL 里的中文不触发翻译（否则整轮发布会被中止）",
+      t_translate_url_only)
 
 
 # ── 7b. 时间块合并与折叠 ──────────────────────────────────────────
@@ -4886,6 +4908,73 @@ def t_publish_nutrition():
 check("publish: sleep 字段（缺失是 null 不是 0）", t_publish_sleep)
 check("publish: weather 字段", t_publish_weather)
 check("publish: nutrition 字段（空 confidence 必须变 null）", t_publish_nutrition)
+
+
+def t_life_slots():
+    import life_slots as L
+    from zoneinfo import ZoneInfo
+
+    assert L.minutes_from_label("None") == 0
+    assert L.minutes_from_label("30 min") == 30
+    assert L.minutes_from_label("60+ min") == 60
+    assert L.minutes_from_label("40分钟") == 40
+    assert L.minutes_from_label("a while") is None, "认不出的答案不能猜一个数"
+
+    lunch = L.SLOT_BY_KEY["lunch"]
+    tz = ZoneInfo("Asia/Shanghai")
+    start, end = L.interval("2026-11-01", lunch, 30, tz)
+    assert (start.strftime("%H:%M"), end.strftime("%H:%M")) == ("13:00", "13:30")
+    # 超过窗口长度 → 裁到窗口起点，不能倒着长到 10 点
+    start, end = L.interval("2026-11-01", lunch, 300, tz)
+    assert start.strftime("%H:%M") == "11:30"
+    assert L.interval("2026-11-01", lunch, 0, tz) is None
+
+    ev = L.evidence_text(lunch, "2026-11-01")
+    parsed = L.parse_evidence(ev)
+    assert parsed and parsed[0]["key"] == "lunch", parsed
+    assert L.parse_evidence("some other evidence") is None
+
+
+check("life slots: 选项→分钟 / 窗口裁剪 / evidence 往返", t_life_slots)
+
+
+def t_publish_activity_life():
+    """吃饭时长必须同时进 Life 和 collapsedHours 并集。"""
+    import sqlite3
+    from datetime import datetime, timedelta, timezone
+    from zoneinfo import ZoneInfo
+    import publish_life_site as PL
+
+    tz = ZoneInfo("Asia/Shanghai")
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE blocks (day_local TEXT, start_utc TEXT, end_utc TEXT,"
+                 " hours REAL, category TEXT, app TEXT)")
+    conn.execute("CREATE TABLE events (day_local TEXT, domain TEXT, metric TEXT,"
+                 " ts_utc TEXT, value_num REAL, value_text TEXT, meta_json TEXT)")
+
+    def utc(hhmm: str) -> str:
+        d = datetime.strptime(f"2026-11-01 {hhmm}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
+        return d.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # 桌面：12:00–13:00 的一段 Study
+    conn.execute("INSERT INTO blocks VALUES (?,?,?,?,?,?)",
+                 ("2026-11-01", utc("12:00"), utc("13:00"), 1.0, "Study", "Code.exe"))
+    # 午饭：13:00–13:30（30 分钟，紧接着上面那段，不重叠）
+    conn.execute("INSERT INTO events VALUES (?,?,?,?,?,?,?)",
+                 ("2026-11-01", "manual", "activity", utc("13:00"), 30.0,
+                  "lunch", '{"kind":"meal","label":"lunch","minutes":30,'
+                            f'"start_utc":"{utc("13:00")}","end_utc":"{utc("13:30")}"}}'))
+
+    day = PL.build_day(conn, "2026-11-01",
+                       ["Work", "Study", "Life", "Leisure", "Other"], tz)
+    assert day["dimensions"]["Life"] == 0.5, day["dimensions"]
+    # 并集 = 1h 桌面 + 0.5h 午饭（没有重叠）
+    assert day["collapsedHours"] == 1.5, day["collapsedHours"]
+
+
+check("publish: 生活活动进 Life 维度，同时进 collapsedHours 并集",
+      t_publish_activity_life)
 
 
 print("\n[30] Normalize: new domains land on the timeline")

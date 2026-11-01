@@ -46,7 +46,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import header, load_config  # noqa: E402
 from publish_life_site import open_db  # noqa: E402
-from translate import Translator, has_cjk  # noqa: E402
+from translate import Translator, cjk_only_in_urls, has_cjk  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -630,10 +630,13 @@ def main() -> int:
             print(f"✗ 翻译失败：{exc}")
             return 1
         translation_failed = translator.failed
+        # 只把「还有该翻没翻的中文」算失败。URL 里的中文和专名（见
+        # translate.KEEP_CJK_NAMES）是**允许保留**的 —— 把它们算进来，
+        # 一份本来已经全英文的文档会被永久判成失败，一轮轮重试也发不出去。
         remaining = [
             f"{doc['kind']}/{doc['id']}"
             for doc in docs
-            if has_cjk(doc["content"])
+            if has_cjk(doc["content"]) and not cjk_only_in_urls(doc["content"])
         ]
         if remaining:
             translation_failed += len(remaining)

@@ -893,6 +893,26 @@ def build_day(
     }
     phone_intervals = [iv for ivs in phone_category_ivs.values() for iv in ivs]
 
+    # 生活活动（吃饭 / 洗澡 / 家务）：飞书定时题里的人自己选的时长。
+    # 它不是屏幕时间，但确实是**在生活**：加到 Life 维度上，并且把区间
+    # 放进 collapsedHours 的并集。只加一边的话 OVERLAP = 七维之和 − 并集
+    # 会凭空多出「并不存在的重叠」。
+    activity_minutes = 0.0
+    activity_intervals: list[tuple[datetime, datetime]] = []
+    for r in by_domain.get("manual", []):
+        if r["metric"] != "activity":
+            continue
+        minutes = num(r["value_num"], 1) or 0.0
+        start = _parse_ts(r["ts_utc"])
+        meta = meta_of(r)
+        end = _parse_ts(meta.get("end_utc"))
+        if end is None and start is not None:
+            end = start + timedelta(minutes=minutes)
+        if minutes <= 0 or start is None or end is None or end <= start:
+            continue
+        activity_minutes += minutes
+        activity_intervals.append((start, end))
+
     # 锻炼：手表记录的每一段 workout 都是真实的“在活动”。
     workout_intervals: list[tuple[datetime, datetime]] = []
     for r in by_domain.get("fitness", []):
@@ -919,9 +939,14 @@ def build_day(
 
     intervals: list[tuple[datetime, datetime]] = []
     for group in (desktop_intervals, transport_intervals,
-                  workout_intervals, phone_intervals):
+                  workout_intervals, phone_intervals, activity_intervals):
         intervals.extend(_clip_intervals(group, day_start, day_end))
     collapsed = round(_interval_minutes(intervals) / 60.0, 2) if intervals else None
+
+    # 吃饭 / 洗澡 / 家务的时间归到 Life（见上面 activity_intervals 的说明）。
+    dims = build_dimensions(categories, health, location, phone_dims)
+    if activity_minutes:
+        dims["Life"] = round(dims["Life"] + activity_minutes / 60.0, 2)
 
     return {
         "v": 1,
@@ -938,7 +963,7 @@ def build_day(
         "sleep": build_sleep(by_domain.get("health", [])),
         "weather": build_weather(by_domain.get("weather", [])),
         "nutrition": build_nutrition(by_domain.get("nutrition", [])),
-        "dimensions": build_dimensions(categories, health, location, phone_dims),
+        "dimensions": dims,
         # 七个维度是各来源读数的**总和**，同一分钟可能被两个来源各算一次
         # （最典型：电脑前刷手机 → Social 和桌面分类同时计时）。
         # 这个字段是同一天所有来源区间的**并集**，所以它 ≤ 七维之和。

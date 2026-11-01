@@ -85,6 +85,34 @@ def has_cjk(text: Any) -> bool:
     return isinstance(text, str) and bool(CJK_RE.search(text))
 
 
+# 允许**原样保留**的中文专名（站点名 / 品牌名）。
+#
+# 翻成英文没有意义，而且「译文仍含中文」这条校验会把它判成失败 ——
+# 实测 `Sign In - 吹雪云` 让一整轮 raw 发布中止。要加新名字就写在这里，
+# 不要为了绕过去放宽校验（那会让没翻译的正文也混进去）。
+KEEP_CJK_NAMES = ("吹雪云",)
+
+
+def _needs_more_translation(text: str) -> bool:
+    """还有「不是 URL、也不是专名」的中文吗？"""
+    return has_cjk(text) and not cjk_only_in_urls(text)
+
+
+def cjk_only_in_urls(text: str) -> bool:
+    """中文**只**出现在 URL / 包名里 —— 这种串没有可翻译的内容。
+
+    实测 `https://吹雪云.com/#/landing`：模型只能原样返回，而「译文仍含中文」
+    这条校验会把它判成失败，于是一次无关紧要的链接把**整轮发布**中止。
+    保护用同一个 PROTECT_RE，口径不会跑偏。
+    """
+    if not has_cjk(text):
+        return False
+    plain = text
+    for name in KEEP_CJK_NAMES:
+        plain = plain.replace(name, " ")
+    return not has_cjk(PROTECT_RE.sub(" ", plain))
+
+
 class Translator:
     def __init__(
         self,
@@ -255,7 +283,7 @@ class Translator:
         for source, english in zip(chunk, translated):
             # 模型偶尔会把某一条原样回中文。先记下来，等这一份文档 batch
             # 走完再统一用更强的提示重试，避免每条都单独打一次 API。
-            if not english.strip() or has_cjk(english):
+            if not english.strip() or _needs_more_translation(english):
                 self.retry.add(source)
                 continue
             self.cache[self._key(source)] = english
@@ -290,7 +318,7 @@ class Translator:
             return
 
         for source, english in zip(chunk, translated):
-            if not english.strip() or has_cjk(english):
+            if not english.strip() or _needs_more_translation(english):
                 self._retry_single(source)
                 continue
             self.cache[self._key(source)] = english
@@ -304,7 +332,7 @@ class Translator:
             print(f"  ⚠️  translate retry failed: {exc}")
             self.failed += 1
             return
-        if not translated or not translated[0].strip() or has_cjk(translated[0]):
+        if not translated or not translated[0].strip() or _needs_more_translation(translated[0]):
             print(f"  ⚠️  still not English: {source[:60]!r}")
             self.failed += 1
             return
@@ -350,7 +378,7 @@ class Translator:
         missing: list[str] = []
         seen: set[str] = set()
         for text in texts:
-            if not has_cjk(text) or text in seen:
+            if not has_cjk(text) or cjk_only_in_urls(text) or text in seen:
                 continue
             seen.add(text)
             if self._key(text) not in self.cache:
@@ -365,7 +393,7 @@ class Translator:
 
         out = []
         for text in texts:
-            if not has_cjk(text):
+            if not has_cjk(text) or cjk_only_in_urls(text):
                 out.append(text)
             else:
                 out.append(self.cache.get(self._key(text), text))

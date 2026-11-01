@@ -137,6 +137,15 @@ def main() -> None:
             print(f"  OK  Q&A cached for {qd}: "
                   f"{len(payload.get('qa') or [])} answer(s)")
 
+    # 生活活动的时长题答案也在 /qa 里（见 life_slots.py）。这里已经是唯一
+    # 拉 qa 的地方，顺手落成 manual/activity；另起一个 timer 只会多一处
+    # 「谁先跑」的先后问题。失败不影响手机事件入库。
+    try:
+        import parse_life_activity
+        parse_life_activity.sync_recent(day)
+    except Exception as e:  # noqa: BLE001
+        print(f"  ⚠️  life activity sync failed: {type(e).__name__}: {e}")
+
     if not raw:
         print("  . Relay reached, but it has no events for this day.")
         print("    Normal before Tasker is set up on the phone.")

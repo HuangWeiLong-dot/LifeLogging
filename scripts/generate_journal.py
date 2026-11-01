@@ -395,6 +395,23 @@ def build_user_prompt(tl: dict, day: Day, carryover: list[str],
                          " a measured intake, and do not do arithmetic on it.")
             lines.append("")
 
+    activities = tl.get("activities") or []
+    if activities:
+        lines.append("## Life activities (self-reported durations)")
+        lines.append("")
+        for a in activities[:12]:
+            start = str(a.get("start") or "")
+            try:
+                hhmm = datetime.fromisoformat(start).astimezone(day.tz).strftime("%H:%M")
+            except (TypeError, ValueError):
+                hhmm = start[11:16]
+            lines.append(f"- [{hhmm}] {a.get('label') or a.get('kind') or 'activity'}: "
+                         f"{a.get('minutes')} min")
+        lines.append("- Chosen by the user from fixed options when the system asked. It is")
+        lines.append("  **first-hand** but it is NOT measured screen time: do not turn these")
+        lines.append("  into Time Log blocks and do not add them to the recorded total.")
+        lines.append("")
+
     health = tl.get("health") or {}
     # 睡眠那一组已经在上面 ## Sleep 里说过了。这里再列一遍只会让模型
     # 多看五行数字（其中 sleep_onset_min=689 对它是纯粹的噪音）。

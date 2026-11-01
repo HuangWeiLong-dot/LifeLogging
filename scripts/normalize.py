@@ -107,6 +107,25 @@ APP_RULES: list[tuple[str, list[str]]] = [
     ]),
 ]
 
+# ── 网盘类桌面端：按**打开的文件**判，不按应用名 ──────────────────
+#
+# 夸克网盘一个窗口里既能放剧也能看资料。2026-11-01 实测它的窗口标题就是
+# 文件名（`Slow.Horses.S06E02...2160p...mkv`、`首页 - 夸克网盘`），所以
+# 判据很干净：媒体扩展名 → Leisure，文档扩展名 → Study，
+# 认不出来（首页 / 传输列表 / 选择文件）→ Life（在网盘里翻文件）。
+#
+# ⚠️ 不要把 "quark_cloud_drive" 整个塞进 APP_RULES 的某一类 ——
+#    那样「看剧」和「翻文档」会被强行归成同一维。
+CLOUD_DRIVE_APPS = ("quark_cloud_drive", "夸克网盘", "baidunetdisk", "aliyundrive")
+MEDIA_EXTS = (
+    ".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".rmvb", ".webm", ".m4v",
+    ".mp3", ".flac", ".m4a", ".wav", ".aac", ".ogg",
+)
+DOC_EXTS = (
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".epub", ".txt", ".md", ".csv",
+)
+
 # 系统/无意义的窗口，直接丢弃
 NOISE = [
     "lockapp", "logonui", "screensaver", "widgets.exe", "searchapp",
@@ -132,10 +151,11 @@ TITLE_HINTS: list[tuple[str, list[str]]] = [
         "admin console", "控制台", "后台管理", "gmail", "outlook",
         "docs.google", "飞书", "钉钉", "slack", "企业微信",
         "stack overflow", "stackoverflow",
-        # 这里**不能**再收 "localhost"：同一个项目在浏览器里开着，
-        # 带 localhost 的标签页判 Work、不带的走浏览器兜底判 Study，
-        # 同一件事一天里会被拆成两类。按「浏览器里的项目内容一律算学习」，
-        # 本地 dev server 也归 Study。
+        # localhost：2026-11-01 改判 Work。原先是刻意不收的（本地 dev server
+        # 跟别的标签页一样走兜底 Study），但那不符合实际 —— 开 localhost 的
+        # 时间基本都是在跑自己的项目。代价是「同一个项目带不带 localhost
+        # 会被拆成 Work / Study 两类」，接受。
+        "localhost",
     ]),
     ("Study", [
         "教程", "课程", "讲义", "课件", "论文", "文献", "复习",
@@ -149,6 +169,7 @@ TITLE_HINTS: list[tuple[str, list[str]]] = [
         "bilibili", "哔哩", "youtube", "netflix", "爱奇艺", "腾讯视频",
         "优酷", "芒果", "抖音", "微博", "知乎", "小红书", "贴吧",
         "reddit", "twitter", "x.com", "instagram", "twitch", "steam",
+        "4kvm",  # 4kvm.site / www.4kvms.com|org，子串同时覆盖这几种写法
         "小说", "漫画", "直播", "游戏", "视频",
     ]),
     ("Life", [
@@ -215,6 +236,10 @@ class Timeline:
     weather: dict[str, Any] = field(default_factory=dict)
     # 饮食：飞书那句话经 LLM 解析出来的估算值，带 confidence。
     nutrition: dict[str, Any] = field(default_factory=dict)
+    # 生活活动（吃饭 / 洗澡 / 家务）的时长，来自飞书的定时选择题。
+    # 它是**第一手答案**（人自己说的），但不是屏幕时间：不进 total_hours，
+    # 只进 Life 维度与日记。见 life_slots.py / parse_life_activity.py。
+    activities: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ── 规则匹配 ────────────────────────────────────────────────────────
@@ -250,6 +275,16 @@ def classify(app: str, title: str) -> tuple[str, str]:
         # 代价是「随便逛逛新闻/论坛」也会被算成 Study —— 接受这个偏差，
         # 比让一大片时间落进 Other 更接近「浏览器时间大多是在查东西」。
         return ("Study", "rule")
+
+    # 网盘：看标题里的文件名（见 CLOUD_DRIVE_APPS 上的说明）。
+    # 放在 APP_RULES 之前，否则「夸克网盘」这种应用名会先被别的关键词吃掉。
+    if any(k in app_l for k in CLOUD_DRIVE_APPS):
+        title_l = title.lower()
+        if any(ext in title_l for ext in MEDIA_EXTS):
+            return ("Leisure", "rule")
+        if any(ext in title_l for ext in DOC_EXTS):
+            return ("Study", "rule")
+        return ("Life", "rule")
 
     for cat, keys in APP_RULES:
         for k in keys:
@@ -1362,6 +1397,21 @@ def attach_other_domains(tl: Timeline, day: Day) -> None:
                 "site": e.get("value_text") or "",
                 "minutes": round((e.get("value_num") or 0) / 60.0, 1),
             })
+        elif dom == "manual" and met == "activity":
+            # 生活活动的时长（饭点实时题，见 parse_life_activity.py）。
+            # ⚠️ 它**不是**屏幕时间：不参与 total_hours / by_category ——
+            #    那两个数管的是桌面 blocks，日记里也按这个口径校验。
+            minutes = e.get("value_num") or 0
+            start = e.get("ts_utc")
+            if start and float(minutes) > 0:
+                meta = e.get("meta") or {}
+                tl.activities.append({
+                    "start": start,
+                    "end": meta.get("end_utc") or "",
+                    "minutes": round(float(minutes), 1),
+                    "kind": meta.get("kind") or "",
+                    "label": meta.get("label") or str(e.get("value_text") or ""),
+                })
         elif dom == "manual":
             # 用户在飞书里随手记的一笔。**原样**带下去，不做任何改写 ——
             # 这是全系统里唯一一条「用户直接说的话」，价值最高。
@@ -1376,6 +1426,7 @@ def attach_other_domains(tl: Timeline, day: Day) -> None:
     tl.location.sort(key=lambda x: x["minutes"], reverse=True)
     tl.web.sort(key=lambda x: x["minutes"], reverse=True)
     tl.notes.sort(key=lambda x: str(x.get("ts") or ""))
+    tl.activities.sort(key=lambda x: str(x.get("start") or ""))
 
     # 手机事件要整体看才能推前台时长（见 summarize_phone），所以收集完再算，
     # 不在循环里逐条计数 —— 逐条只能得到「切换了多少次」，得不到「用在哪」。
@@ -1395,6 +1446,14 @@ def render_markdown(tl: Timeline) -> str:
         lines.append("## Notes（飞书里记的）")
         for n in tl.notes:
             lines.append(f"- {n.get('text', '')}")
+        lines.append("")
+
+    # 生活活动：人自己在飞书里选的时长，第一手但不是屏幕时间。
+    if tl.activities:
+        lines.append("## Life activities (timed by the user, not screen time)")
+        for a in tl.activities:
+            lines.append(f"- {a.get('start', '')} · {a.get('label') or a.get('kind')}: "
+                         f"{a.get('minutes')} min")
         lines.append("")
 
     if tl.sleep:
@@ -1654,6 +1713,7 @@ def main() -> None:
         "sleep": tl.sleep,
         "weather": tl.weather,
         "nutrition": tl.nutrition,
+        "activities": tl.activities,
         "unmatched_apps": tl.unmatched_apps,
         "blocks": [
             {

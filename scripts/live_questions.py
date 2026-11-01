@@ -64,6 +64,7 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import life_slots  # noqa: E402
 from common import Day, header, load_config  # noqa: E402
 
 CFG = load_config()
@@ -955,6 +956,23 @@ def build(day: Day, base: str, key: str) -> list[dict]:
 
     new: list[dict] = []
 
+    # ── 生活活动：饭点 / 晚间各一题（见 life_slots.py）──
+    #
+    # ⚠️ 它**占掉**那个整点的小时题，不是并列。理由：饭点问「这一小时你在
+    #    干嘛」得到的是又一句自由文本，而这里要的是**时长**（Life 维度目前
+    #    完全看不见吃饭洗澡的时间）。同一小时问两条只是增加打扰。
+    #    一个整点只问一次是硬约定 —— 第二次 tick 靠 fired 里的 key 挡住。
+    slot = life_slots.slot_for_hour(now.hour)
+    if slot:
+        slot_key = f"life-{day.iso}-{slot['key']}"
+        if slot_key not in fired:
+            new.append(make(
+                day.iso,
+                life_slots.question_text(slot),
+                life_slots.evidence_text(slot, day.iso),
+                slot_key, kind="routine", fmt="choice",
+                options=list(life_slots.OPTIONS), id_salt=slot_key,
+            ))
     # ── 每小时一题：固定节拍，**任何一小时都不能空着** ──
     #
     # ⚠️ 这一条必须放在任务检查**前面**，而且不能被任务检查挤掉。
@@ -963,7 +981,7 @@ def build(day: Day, base: str, key: str) -> list[dict]:
     #    没有任何一题。「这一小时你在干嘛」和「那条任务做了没有」是两个问题，
     #    后者回答不了前者。现在两条都发；多出来的只是一天四条。
     hour_key = f"hour-{day.iso}T{now:%H}"
-    if hour_key not in fired:
+    if not slot and hour_key not in fired:
         try:
             q = rule_hourly(day.iso, stays, events, snap, now)
         except Exception as e:  # noqa: BLE001
