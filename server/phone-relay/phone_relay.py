@@ -838,6 +838,82 @@ def pending_questions(include_live: bool = False) -> tuple[dict | None, list[dic
     return primary, items
 
 
+def answered_ids_since(day: str) -> set[str]:
+    """从 `day` 到**今天**（含）之间写下的答案题号。
+
+    ⚠️ 不能用 `answered_ids(days=7)`：那个窗口是**从今天往回数**的，回看更早
+       的一天时会把它自己那几天漏掉，于是「昨天已经答过、今天想改」的题也会
+       被当成待答。答案永远落在提问日**当天或之后**，所以从提问日扫到今天
+       正好覆盖「这道题答没答过」需要的全部范围。
+
+    ⚠️ 上限 60 天：手动写一个 1970 的日期不该让中继扫几十年的空文件。
+       答案通常就在提问后一两天里。
+    """
+    try:
+        start = datetime.strptime(day, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return set()
+    today = datetime.now(TZ).date()
+    out: set[str] = set()
+    for _ in range(60):
+        if start > today:
+            break
+        for e in read_events(start.isoformat()):
+            if e.get("domain") == "question" and e.get("metric") == "answer":
+                parts = str(e.get("value_text") or "").split("|", 2)
+                if parts and parts[0]:
+                    out.add(parts[0])
+        start += timedelta(days=1)
+    return out
+
+
+def questions_for_day(day: str) -> tuple[dict | None, list[dict]]:
+    """**某一天**的两份问题文件（笔记本批 + 实时批）里还没答的题。
+
+    ⚠️ 和 `pending_questions()` 的差别是「看哪一份文件」：那条路永远取
+       **最新**那份（「昨晚生成、今早来取」是它的正常用法），回看某一天时
+       必须按**那一天**的文件来 —— 否则 `?day=2026-10-31` 会拿到今天的题，
+       用户以为在补昨天、实际答的是今天，而且两端都不报错。
+
+    ⚠️ 「哪天答过算答过」这里放宽成 `answered_ids_since(day)`：一道题可能
+       提问日是 D、作答日是 D+1（凌晨收尾、第二天早上答问责题都是如此）。
+    """
+    laptop = live = None
+    p = questions_path(day)
+    if p is not None:
+        try:
+            laptop = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            laptop = None
+    p = live_questions_path(day)
+    if p is not None:
+        try:
+            live = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            live = None
+
+    primary = laptop or live
+    if not primary:
+        return None, []
+
+    done = answered_ids_since(day)
+    seen: set[str] = set()
+    items: list[dict] = []
+    for payload, src in ((laptop, "laptop"), (live, "live")):
+        for x in ((payload or {}).get("questions") or []):
+            if not isinstance(x, dict):
+                continue
+            qid = str(x.get("id") or "")
+            if not qid or qid in done or qid in seen:
+                continue
+            seen.add(qid)
+            item = dict(x)
+            item["day"] = day
+            item["source"] = src
+            items.append(item)
+    return primary, items
+
+
 # 问答页模板。用占位符 + str.replace 而不是 f-string —— 里面全是 CSS/JS 的
 # 大括号，f-string 会把它们当成插值，改一次错一次。
 _ASK_PAGE = """<!doctype html>
@@ -1190,6 +1266,22 @@ class Handler(BaseHTTPRequestHandler):
             #    两份会漂移，而且漂移了**两边都不报错** —— 机器人问出一道中继
             #    认为已经答过的题，谁也不知道。
             if not self._authed():
+                return
+            # ?day=YYYY-MM-DD：回看**那一天**还没答的题（飞书的 `/pending <日期>`）。
+            # 不传就是老语义：取最新那份，给「昨晚生成、今早来取」用。
+            qday = (parse_qs(u.query).get("day") or [""])[0]
+            if qday:
+                if not _DAY_RE.match(qday):
+                    self._send(400, {"error": "?day= should be YYYY-MM-DD"})
+                    return
+                q, left = questions_for_day(qday)
+                if not q:
+                    self._send(200, {"day": qday, "generated_at": None,
+                                     "questions": []})
+                    return
+                self._send(200, {"day": qday,
+                                 "generated_at": q.get("generated_at"),
+                                 "questions": left})
                 return
             # include_live=True：飞书机器人**两批都要**（笔记本问责批 + 服务器
             # 实时批）。手机那两条路由不传这个参数，所以它们的语义没变。

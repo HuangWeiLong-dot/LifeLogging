@@ -1696,7 +1696,9 @@ def t_feishu_live_push():
     #    晚上跑就永远推不出去，白天跑就正常。
     fb.in_quiet_hours = lambda now: False
 
-    day = fb.datetime.now(fb.TZ).date().isoformat()
+    # ⚠️ 用 `target_day_iso` 而不是日历日期：05:00 之前「当天」还是前一天。
+    #    用日历日期的话，这条测试在凌晨跑就会把「当天的题」判成隔夜题。
+    day = fb.target_day_iso(fb.datetime.now(fb.TZ))
     laptop = {"id": f"{day}-lap", "day": day, "source": "laptop",
               "format": "yes_no", "text": "问责批的题"}
     live = {"id": f"{day}-liv", "day": day, "source": "live",
@@ -1751,7 +1753,7 @@ def t_feishu_live_push():
 
     # ⚠️ 隔了夜的实时题也不推：早上收到「昨天 21:00–22:00 这一段…」只会困惑。
     from datetime import timedelta as _td
-    yesterday = (datetime.now(fb.TZ).date() - _td(days=1)).isoformat()
+    yesterday = (date.fromisoformat(day) - _td(days=1)).isoformat()
     old = {"id": f"{yesterday}-old", "day": yesterday, "source": "live",
            "format": "text", "text": "昨天那道实时题"}
     box["state"] = {}
@@ -1763,6 +1765,243 @@ def t_feishu_live_push():
 
 check("feishu: 实时题尽快单独推（不插队 / 不重复 / 不夹带问责批）",
       t_feishu_live_push)
+
+
+def t_feishu_pending_filter():
+    """整批推进（`advance` / 08:30 推送）也只发**当天**的实时题。
+
+    ⚠️ 实测 2026-11-01 早上：中继在新一天的第一份实时题写出来之前
+       （生成器 08:00 才开工），`/questions/pending` 返回的还是 10-31 那批。
+       原来 `pending_filtered()` 只按「今天封盘没有」过滤，于是答完一题，
+       `advance()` 立刻把昨天那条「08:01–09:01 你在干嘛」翻出来问，卡片上
+       还挂着「This question is for 2026-10-31, not today」。
+
+       用户照着答，`handle_text()` 又按跨夜判断把它当成「昨天的题」，清掉
+       awaiting 后把那句话当**笔记**存掉（回 “Noted.”）—— 问也白问、答也白答。
+
+       这个测试钉四件事：
+         · 昨天的实时题（含 checkin / summary）不出现
+         · 昨天的**问责批**照常出现（它就是问昨天、今早答）
+         · 05:00 之前，「当天」还是前一天，那批还得能答
+         · 封盘判断查的是这一天，不是日历上的今天
+    """
+    import importlib.util
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "fb_pf", root / "server" / "feishu-bot" / "feishu_bot.py")
+    fb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fb)
+
+    box: dict = {"qs": []}
+    fb.relay_pending = lambda: box["qs"]
+    fb.target_day_iso = lambda now: "2026-11-01"
+    fb.day_is_closed = lambda d: False
+
+    laptop = {"id": "2026-10-31-lap", "day": "2026-10-31", "source": "laptop",
+              "format": "yes_no", "text": "问责批：昨天的任务做了吗"}
+    stale_hour = {"id": "2026-10-31-hour", "day": "2026-10-31",
+                  "source": "live", "format": "text",
+                  "text": "08:01–09:01 这一段在干嘛"}
+    stale_ck = {"id": "2026-10-31-ck", "day": "2026-10-31", "source": "live",
+                "kind": "checkin", "format": "choice", "text": "打个分"}
+    fresh_hour = {"id": "2026-11-01-hour", "day": "2026-11-01",
+                  "source": "live", "format": "text", "text": "这一段在干嘛"}
+
+    box["qs"] = [laptop, stale_hour, stale_ck, fresh_hour]
+    got = {q["id"] for q in fb.pending_filtered({})}
+    assert got == {"2026-10-31-lap", "2026-11-01-hour"}, got
+
+    # 05:00 之前收尾，问的本来就是前一天 —— 那批必须还能答。
+    fb.target_day_iso = lambda now: "2026-10-31"
+    got = {q["id"] for q in fb.pending_filtered({})}
+    assert got == {"2026-10-31-lap", "2026-10-31-hour", "2026-10-31-ck"}, got
+
+    # 封盘后：小时题不再问，收尾题照旧；而且查的必须是 `live_day`。
+    fb.target_day_iso = lambda now: "2026-11-01"
+    closed: dict = {}
+
+    def fake_closed(d: str) -> bool:
+        closed["day"] = d
+        return True
+
+    fb.day_is_closed = fake_closed
+    summary = {"id": "2026-11-01-sum", "day": "2026-11-01",
+               "source": "live", "kind": "summary",
+               "format": "text", "text": "收尾"}
+    box["qs"] = [laptop, fresh_hour, summary]
+    got = {q["id"] for q in fb.pending_filtered({})}
+    assert closed.get("day") == "2026-11-01", closed
+    assert got == {"2026-10-31-lap", "2026-11-01-sum"}, got
+
+
+check("feishu: 整批推进也不问过期的实时题（问责批不受影响）",
+      t_feishu_pending_filter)
+
+
+def t_relay_questions_for_day():
+    """`/questions/pending?day=` —— 回看某一天，按**那一天**的文件取。
+
+    ⚠️ 中继原来只有「取最新那份」：新一天的第一份实时题写出来之前（08:00），
+       机器人拿到的是昨天的；写出来之后，昨天那些没答的题又**永远看不到了**
+       —— 中继上还挂着，但没有任何入口再把它们问出来。
+       `/pending <日期>` 补的就是这个洞，所以这里的取舍单独钉住。
+    """
+    import importlib.util
+    import json as _json
+    import tempfile
+
+    path = (Path(__file__).resolve().parent.parent
+            / "server" / "phone-relay" / "phone_relay.py")
+    spec = importlib.util.spec_from_file_location("phone_relay_qd", path)
+    pr = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pr)
+
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    d0 = (today - timedelta(days=2)).isoformat()
+    d1 = (today - timedelta(days=1)).isoformat()
+
+    with tempfile.TemporaryDirectory() as td:
+        pr.DATA_DIR = Path(td)
+        (Path(td) / f"questions-{d0}.json").write_text(_json.dumps({
+            "day": d0, "generated_at": d0 + "T23:00:00Z",
+            "questions": [
+                {"id": f"{d0}-lap1", "format": "yes_no", "text": "任务 A 做了吗"},
+                {"id": f"{d0}-lap2", "format": "yes_no", "text": "任务 B 做了吗"},
+            ]}, ensure_ascii=False), encoding="utf-8")
+        (Path(td) / f"questions-live-{d0}.json").write_text(_json.dumps({
+            "day": d0, "questions": [
+                {"id": f"{d0}-hour", "format": "text",
+                 "text": "08:01–09:01 在干嘛"},
+            ]}, ensure_ascii=False), encoding="utf-8")
+        # 新一天的文件 —— 回看旧日期时**不能**串进来
+        (Path(td) / f"questions-live-{d1}.json").write_text(_json.dumps({
+            "day": d1, "questions": [
+                {"id": f"{d1}-hour", "format": "text", "text": "今天这一段"},
+            ]}, ensure_ascii=False), encoding="utf-8")
+        # 一条**次日**才写的答案：早上补答问责题是正常用法，不能算没答。
+        (Path(td) / f"phone-{d1}.jsonl").write_text(_json.dumps({
+            "ts_utc": d1 + "T00:30:00Z", "domain": "question",
+            "metric": "answer", "value_text": f"{d0}-lap1|yes|",
+        }, ensure_ascii=False) + "\n", encoding="utf-8")
+
+        primary, items = pr.questions_for_day(d0)
+        ids = {x["id"] for x in items}
+        assert ids == {f"{d0}-lap2", f"{d0}-hour"}, ids
+        assert all(x["day"] == d0 for x in items), items
+        assert {x["source"] for x in items} == {"laptop", "live"}, items
+        assert primary and primary.get("day") == d0
+
+        # 那天没有题文件 → 空列表，**不是**退回「最新那份」。
+        assert pr.questions_for_day(
+            (today - timedelta(days=9)).isoformat())[1] == []
+
+
+check("relay: ?day= 按那一天取题，答在次日的也算答过", t_relay_questions_for_day)
+
+
+def t_feishu_jump_and_redo():
+    """`/pending <日期>` 补答旧题、`/redo` 改一条已经发出去的答案。
+
+    ⚠️ 这是两个原来做不到、而数据层一直支持的事：
+       · 队列只发当天的题（为了不把昨天的翻出来问），代价是**没答完的旧题永远
+         补不上** —— 中继上还挂着，机器人再也不提。
+       · 答案发出去就定了。`apply_answers` / `day_qa` / `collect_labels` 都是
+         「同一题号取 ts 最大的那条」，重答一直是合法的，只是没有入口。
+    """
+    import importlib.util
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "fb_jr", root / "server" / "feishu-bot" / "feishu_bot.py")
+    fb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fb)
+
+    today = datetime.now(fb.TZ).date().isoformat()
+    old = (datetime.now(fb.TZ).date() - timedelta(days=1)).isoformat()
+
+    box: dict = {"state": {}, "sent": [], "answers": [], "pending": [], "qa": []}
+    fb.load_state = lambda: box["state"]
+    fb.save_state = lambda s: box.__setitem__("state", s)
+    fb.send_text = lambda oid, text: box["sent"].append(("text", text))
+    fb.send_card = lambda oid, card: box["sent"].append(("card", card))
+    # 中继：答过的题不再出现在待答里（真实行为）
+    fb.relay_pending = lambda day=None: [
+        dict(q) for q in box["pending"]
+        if (not day or q.get("day") == day)
+        and q.get("id") not in {a[0] for a in box["answers"]}]
+    fb.relay_answer = lambda qid, value, note="": (
+        box["answers"].append((qid, value, note)) or {"ok": True})
+    fb.relay_note = lambda text: {"ok": True}
+    # 把「今天」钉死，否则凌晨跑时 target_day_iso 会把昨天当成「当天」。
+    fb.target_day_iso = lambda now: today
+    fb.day_is_closed = lambda d: False
+
+    orig_qa = fb.live.relay_qa
+    fb.live.relay_qa = lambda day, base, key: [
+        dict(x) for x in box["qa"] if x.get("_day") == day]
+    try:
+        # ── 1) 跳到昨天：默认队列看不到它，跳过去就能答 ──
+        box["pending"] = [{"id": f"{old}-hour", "day": old, "source": "live",
+                           "format": "text", "text": "08:01–09:01 在干嘛"}]
+        box["state"] = {}
+        assert fb.pending_filtered({}) == [], "默认队列不该翻出昨天的实时题"
+
+        fb.handle_pending_day("ou_x", old)
+        assert box["state"]["queue_day"] == old, box["state"]
+        assert box["state"]["awaiting"] == f"{old}-hour", box["state"]
+
+        # 答案要真的写下去，而不是被当成「跨夜的题」变成一条笔记。
+        fb.handle_text("ou_x", "在打篮球，然后去吃了东西")
+        assert box["answers"] == [
+            (f"{old}-hour", "在打篮球，然后去吃了东西", "")], box["answers"]
+        assert not box["state"].get("queue_day"), "补完了要切回今天的队列"
+
+        # `/2026-10-31` 是 `/pending 2026-10-31` 的简写
+        box["pending"] = [{"id": f"{old}-hour2", "day": old, "source": "live",
+                           "format": "text", "text": "另一个小时"}]
+        box["answers"] = []
+        box["state"] = {}
+        fb.handle_text("ou_x", f"/{old}")
+        assert box["state"]["queue_day"] == old, box["state"]
+        assert box["state"]["awaiting"] == f"{old}-hour2", box["state"]
+
+        # ── 2) `/redo`：列出来 → 回编号 → 按同一题号重写 ──
+        item = {"id": f"{old}-hour2", "_day": today, "question_day": old,
+                "source": "live", "kind": "hourly", "format": "text",
+                "text": "另一个小时", "answer": "在打篮球", "note": "",
+                "ts_utc": today + "T09:00:00Z"}
+        box["qa"] = [item]
+        box["sent"] = []
+        box["state"] = {}
+        fb.handle_redo("ou_x", "")          # 不带日期 = 刚发出去的那些
+        assert today in box["state"]["amend"]["days"], box["state"]
+        assert box["state"]["amend"]["items"], box["state"]
+        assert any(kind == "card" for kind, _ in box["sent"]), box["sent"]
+
+        box["state"]["awaiting"] = None
+        fb.handle_text("ou_x", "1")          # 选第 1 条
+        assert box["state"]["awaiting"] == f"{old}-hour2", box["state"]
+        assert box["state"]["reopen"]["qid"] == f"{old}-hour2", box["state"]
+        assert box["state"]["amend"] is None, "选完之后列表要收起来"
+
+        box["answers"] = []
+        fb.handle_text("ou_x", "在打球，顺便吃了饭")
+        assert box["answers"] == [(f"{old}-hour2", "在打球，顺便吃了饭", "")], box
+        assert box["state"]["reopen"] is None, "改完要清掉 reopen"
+
+        # 回一个不是编号的东西 = 不改了，列表放下（不吞这条消息）。
+        box["state"] = {"amend": {"day": today, "items": [item]}}
+        box["sent"] = []
+        fb.handle_text("ou_x", "note: 随手记一句")
+        assert box["state"]["amend"] is None, box["state"]
+        assert ("text", "Noted.") in box["sent"], box["sent"]
+    finally:
+        fb.live.relay_qa = orig_qa
+
+
+check("feishu: /pending <日期> 补旧题、/redo 改已经发出去的答案",
+      t_feishu_jump_and_redo)
 
 
 def t_quiet_hours():
