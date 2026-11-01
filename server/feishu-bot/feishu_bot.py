@@ -1395,13 +1395,26 @@ def maybe_write_summary(open_id: str, day_iso: str,
        所以取答案用 `qa_day`，写复盘用 `day_iso`。
     """
     qa_day = datetime.now(TZ).date().isoformat()
-    try:
-        pending = relay_pending()
-    except Exception as e:  # noqa: BLE001
-        print(f"WARN 收尾：拉不到待答：{type(e).__name__}: {e}", file=sys.stderr)
-        return False
-    if not force and any(str(x.get("kind") or "") == "summary" for x in pending):
-        return False                    # 还有没收尾的题
+    if not force:
+        try:
+            # ⚠️ **必须按 `day_iso` 查，不能查「最新那一批」。**
+            #
+            #    2026-11-01 实测：用户用 `/pending 2026-10-31` 补完昨天的
+            #    小时题，接着答昨天那批收尾题的第一题 —— 机器人**立刻**把
+            #    一整天的复盘发了出来，剩下的收尾题还没问。原因就是这里查的
+            #    是最新一批（11-01 的），里面当然没有 10-31 的 summary，于是
+            #    「一道都没剩」被误判成「全部答完了」。
+            #
+            #    `?day=` 是新版中继才有的（旧版会回最新一批并被 `relay_pending`
+            #    拒绝），中继没更新时这里会抛错、返回 False —— 收尾写不出来，
+            #    但不会答一题就发复盘。和「不谎报成功」的方向一致。
+            pending = relay_pending(day_iso)
+        except Exception as e:  # noqa: BLE001
+            print(f"WARN 收尾：拉不到待答：{type(e).__name__}: {e}",
+                  file=sys.stderr)
+            return False
+        if any(str(x.get("kind") or "") == "summary" for x in pending):
+            return False                # 这一天的收尾题还有没答的
 
     # 优先从 /qa 取**当天全部**回答（早晨批 + 实时批 + 收尾批），
     # 不再只挑 kind=summary。旧版中继没有 /qa 时退回原来的 summary-only。

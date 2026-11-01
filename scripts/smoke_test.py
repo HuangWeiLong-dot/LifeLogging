@@ -2021,6 +2021,58 @@ check("feishu: /pending <日期> 补旧题、/redo 改已经发出去的答案",
       t_feishu_jump_and_redo)
 
 
+def t_summary_waits_for_same_day():
+    """收尾复盘只在**那一天**的收尾题全部答完时才写。
+
+    ⚠️ 2026-11-01 实测：用 `/pending 2026-10-31` 补答昨天的收尾题，答完第一题
+       机器人就把整天的复盘发了出来，剩下的收尾题还没问。原因：判断「还有没有
+       没收尾的题」查的是**最新那一批**（11-01 的），里面当然没有 10-31 的
+       summary —— 「一道都没剩」被误判成「全部答完了」。
+    """
+    import importlib.util
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "fb_sum", root / "server" / "feishu-bot" / "feishu_bot.py")
+    fb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fb)
+
+    today = datetime.now(fb.TZ).date().isoformat()
+    old = (datetime.now(fb.TZ).date() - timedelta(days=1)).isoformat()
+
+    qs_by_day: dict = {
+        old: [{"id": f"{old}-sum2", "day": old, "kind": "summary"}],
+        today: [],
+    }
+    calls: dict = {"pending_days": [], "written": []}
+    fb.relay_pending = lambda day=None: (
+        calls["pending_days"].append(day)
+        or [dict(x) for x in qs_by_day.get(day or today, [])])
+    fb.load_state = lambda: {}
+    fb._answers_today = lambda d: {}
+    fb.send_card = lambda oid, card: None
+    fb.send_text = lambda oid, text: None
+    fb.relay_note = lambda text: {"ok": True}
+    fb.live.relay_qa = lambda *a, **k: []
+    fb.live.write_day_summary = lambda *a, **k: (
+        calls["written"].append(a[0]) or ("mock summary", None))
+    fb.live.day_recap = lambda *a, **k: "recap"
+
+    # 昨天还剩一题没收尾 → 不许写复盘（哪怕今天那批里没有 summary）。
+    assert fb.maybe_write_summary("ou_x", old) is False
+    assert calls["written"] == [], calls
+    assert old in calls["pending_days"], calls["pending_days"]
+
+    # 那天全部答完 → 写，并且复盘写的是**被回顾的那一天**。
+    qs_by_day[old] = []
+    assert fb.maybe_write_summary("ou_x", old) is True
+    assert calls["written"] == [old], calls
+
+
+check("feishu: 收尾复盘等**那一天**的收尾题全部答完（不按最新一批判断）",
+      t_summary_waits_for_same_day)
+
+
 def t_quiet_hours():
     """夜里不能发消息 —— 而且**生成器和推送层都要拦**。
 
