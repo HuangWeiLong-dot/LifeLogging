@@ -59,6 +59,9 @@ python scripts/collect_phone.py   --date today
 python scripts/collect_phone_events.py --date today
 python scripts/collect_watch.py   --date today
 python -m middleware.ingest_gadgetbridge --date today [--db PATH] [--dry-run]
+python scripts/infer_sleep.py     --date today       # 手机+电脑静默 → 睡眠窗口（手表没有睡眠功能）
+python scripts/collect_weather.py --date today       # 默认关闭；开了才会外发粗化坐标
+python scripts/parse_nutrition.py --date today       # 飞书的「吃：」→ 营养素，会调 LLM（有缓存）
 python scripts/normalize.py       --date today       # → state/timeline-<day>.{json,md} + blocks 表
 
 # ── 日记（正文在服务器上生成）────────────────────────────
@@ -142,7 +145,7 @@ sudo /opt/lifelogging/repo/server/deploy.sh           # git ff-only + 按改动�
 |---|---|---|
 | `screen` | `collect_desktop.py` | ActivityWatch 窗口 / AFK / 浏览器（`app_usage` 等） |
 | `location` | `collect_phone.py` | Dawarich 停留点 / 轨迹 / 通勤 |
-| `health` | `ingest_gadgetbridge.py` | 手环步数 / 睡眠 / 心率 |
+| `health` | `ingest_gadgetbridge.py` / `infer_sleep.py` | 手环步数 / 心率；**睡眠来自推断**（见下） |
 | `fitness` | `import_gpx.py` / `import_fit.py` | 锻炼轨迹，固定 `metric=watch_track` |
 | `phone` | `collect_phone_events.py` | 中继的解锁 / 切应用事件 |
 | `web` | 浏览器扩展 | 页面标题 / URL |
@@ -150,17 +153,28 @@ sudo /opt/lifelogging/repo/server/deploy.sh           # git ff-only + 按改动�
 | `ai` | `collect_ai_usage.py` | 每日花费 / 余额 / token |
 | `audio` | screenpipe（**默认关闭**） | 音频转录 / 会议 |
 | `question` | 问答链路 | `metric=answer`，问答与打卡 |
+| `weather` | `collect_weather.py` | 当日温度 / 降水 / 日照 / 风速（**外发坐标，默认关闭**） |
+| `nutrition` | `parse_nutrition.py` | 飞书那句话经 LLM 解析出的估算营养素 |
 
 > 例外：`push_desktop.py` / `push_health.py` 只把已算好的汇总推到中继给机器人，
 > `server/watch-publisher/` 直接发布原始 `watch` 文档 —— 这两条都**不写** `events.db`。
+
+> **睡眠不来自手表。** 当前设备是 Garmin Forerunner 235，**本身没有睡眠功能**
+> （`GARMIN_ACTIVITY_SAMPLE` 只有 STEPS / HEART_RATE；`GARMIN_SLEEP_*` 全是空表）。
+> `infer_sleep.py` 从「手机 + 电脑同时静默」推断睡眠窗口，写 `health/sleep_window`
+> 等指标，`source="sleep"`。**它默认每天跑，不要把它当成测量值** ——
+> 页面上、日记提示词里都必须标明是推断。飞书发 `睡：23:40-08:10` 可以覆盖。
 
 ### 脚本地图
 
 - **采集 / 输入**：`collect_desktop` `collect_phone` `collect_phone_events`
   `collect_watch`（从中继拉 Gadgetbridge DB）`collect_media`（拉 GPX/FIT 到
   `state/gpx|fit/<sha1>`）`collect_labels`（飞书自评 → `state/labels.jsonl`）
-  `collect_ai_usage`；`push_desktop` / `push_health` 把已算好的汇总推到中继给飞书机器人。
-- **理解 / 分析**：`normalize.py`（确定性规则，核心）；`label_free_text`（自由文本 → 1–5 分 +
+  `collect_ai_usage` `collect_weather`（Open-Meteo，**默认关闭**，会外发粗化后的坐标）；
+  `push_desktop` / `push_health` 把已算好的汇总推到中继给飞书机器人。
+- **理解 / 分析**：`infer_sleep`（手机 + 电脑静默 → 睡眠窗口）、
+  `parse_nutrition`（飞书饮食记录 → 热量 / 三大营养素，**调 LLM**）、
+  `normalize.py`（确定性规则，核心）；`label_free_text`（自由文本 → 1–5 分 +
   证据）、`structure_text`（自由文本 → 结构化事件）、`learn_apps` / `app_map`（未知应用映射）、
   `features`（日状态向量，带 `FEATURE_VERSION`）、`link_graph`、`routine`（课表 vs 实际 →
   偏离）、`baseline`（中位数 + MAD）、`memory`（FTS5 长期记忆）、`dataset`（离线训练集，
@@ -388,6 +402,12 @@ Leisure / Health / Social`（小时）：Work/Study/Life/Leisure = 桌面分类 
 - 凌晨收尾按 `FEISHU_DAY_ROLL_HOUR=5` 归到前一天；打卡题 id 必须和收尾题不同。
 - 它挂了是**静默的**：进程活着、状态 active，只是长连接死了。查
   `journalctl -u lifelogging-feishu-bot`。
+- **三种前缀**，都走 `/ingest/phone` 落成 `manual/<metric>`，都由笔记本侧接手：
+  `记：` → `manual/note`（自由笔记，原样进日记）；
+  `睡：23:40-08:10` → `manual/sleep`（`infer_sleep.py` 用它覆盖当天推断值，
+  **手动永远优先**）；`吃：午饭 鸡胸肉200g` → `manual/nutrition`
+  （`parse_nutrition.py` 每晚调一次模型算营养素）。
+  不带前缀的普通消息**不会**被猜成这两类 —— 猜错就是数据进错域。
 
 ---
 

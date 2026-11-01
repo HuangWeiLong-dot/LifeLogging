@@ -436,13 +436,18 @@ def relay_answer(qid: str, value: str, note: str = "") -> dict:
     return r.json()
 
 
-def relay_note(text: str) -> dict:
-    """把一句话存成**笔记**，走和中继上其他手机事件同一条管道。
+def relay_manual(metric: str, text: str) -> dict:
+    """把一句话存成 `manual/<metric>`，走中继上其他手机事件同一条管道。
 
     ⚠️ 用 `/ingest/phone` 而不是新开一个端点：那条路已经是「收下就追加到
        当天 JSONL」的，而且笔记本那边的 collect_phone_events.py 会原样透传
-       任意 domain —— 于是 manual/note 会自动进事件表、进日记提示词。
+       任意 domain —— 于是 manual/* 会自动进事件表、进日记提示词。
        新开端点就得再改一遍笔记本侧，多一处会漂移的约定。
+
+    `metric` 目前只有三种：
+      note       自由笔记，原样进日记
+      sleep      `睡：23:40-08:10` —— infer_sleep.py 拿它覆盖当天的推断值
+      nutrition  `吃：午饭 鸡胸肉200g` —— parse_nutrition.py 拿它算营养素
 
     `ts` 用 Unix 秒（和 Tasker 一样），中继会统一转成 ISO。
     """
@@ -450,12 +455,16 @@ def relay_note(text: str) -> dict:
                    headers={"X-API-Key": RELAY_API_KEY},
                    json={"ts": int(datetime.now(timezone.utc).timestamp()),
                          "domain": "manual",
-                         "metric": "note",
+                         "metric": metric,
                          "value_text": text[:2000],
                          "source": "feishu"},
                    timeout=10.0)
     r.raise_for_status()
     return r.json()
+
+
+def relay_note(text: str) -> dict:
+    return relay_manual("note", text)
 
 
 # 「这句话我是要记下来，不是要问你」——带上前缀就完全不进查数据那条路。
@@ -481,6 +490,51 @@ def split_note_prefix(text: str) -> str | None:
         if text.startswith(p):
             return text[len(p):].strip()
     return None
+
+
+# 「这句话是要记成一类**结构化**数据」的前缀。
+#
+# 和 NOTE_PREFIXES 分开：那些存成自由笔记（manual/note），原样进日记；
+# 这两个各有自己的 metric，笔记本那边有专门的解析器接手：
+#   睡：23:40-08:10   → manual/sleep     → infer_sleep.py 覆盖当天推断值
+#   吃：午饭 鸡胸肉200g → manual/nutrition → parse_nutrition.py 算营养素
+#
+# ⚠️ 不带前缀的普通消息**不会**被猜成这两类。和「笔记 vs 问题」同一条理由：
+#    是记笔记还是记一顿饭，只有写的人知道，猜错的代价是数据进错域。
+STRUCTURED_PREFIXES = (
+    (("睡：", "睡:", "sleep:", "Sleep:", "SLEEP:"), "sleep",
+     "Sleep when? Send it as “sleep: 23:40-08:10”."),
+    (("吃：", "吃:", "meal:", "Meal:", "MEAL:", "food:", "Food:"), "nutrition",
+     "What did you eat? Send it as “meal: lunch, chicken breast 200g, rice”."),
+)
+
+
+def split_structured_prefix(text: str) -> tuple[str, str] | None:
+    """认「睡：」/「吃：」这类前缀。返回 (metric, 正文)，没带返回 None。
+
+    正文为空时返回 (metric, "") —— 和 split_note_prefix 一样，
+    不能用 None，否则「带了前缀但没写内容」和「没带前缀」分不开。
+    """
+    for prefixes, metric, _hint in STRUCTURED_PREFIXES:
+        for p in prefixes:
+            if text.startswith(p):
+                return metric, text[len(p):].strip()
+    return None
+
+
+def save_structured(open_id: str, metric: str, text: str) -> None:
+    hint = next((h for _p, m, h in STRUCTURED_PREFIXES if m == metric), "")
+    try:
+        relay_manual(metric, text)
+    except Exception as e:  # noqa: BLE001
+        print(f"ERROR 存 {metric} 失败：{type(e).__name__}: {e}", file=sys.stderr)
+        send_text(open_id, f"Could not save: {e}")
+        return
+    print(f"[{metric}] {text[:80]!r}")
+    if metric == "sleep":
+        send_text(open_id, f"Noted: {text}. It overrides the inferred window.")
+    else:
+        send_text(open_id, "Noted. It gets parsed into macros tonight.")
 
 
 def save_note(open_id: str, text: str) -> None:
@@ -2241,6 +2295,19 @@ def handle_text(open_id: str, text: str) -> None:
     # ⚠️ 这里**不**清 awaiting：如果是昨天的实时题，下一条消息会走下面
     #    那段 expire 逻辑把它清掉。在这里清就得先拉一次 relay_pending，
     #    而那会让「没挂题时发一条笔记」也去碰网络 —— 不值。
+    # ── 明确要记一类结构化数据（睡 / 吃）──
+    # 排在记笔记之前：「吃：」不能被「记：」的条件放过去，
+    # 否则每顿饭都会变成一条自由笔记，营养素永远算不出来。
+    structured = split_structured_prefix(stripped)
+    if structured is not None:
+        metric, body = structured
+        if not body:
+            send_text(open_id, next(
+                (h for _p, m, h in STRUCTURED_PREFIXES if m == metric), "?"))
+            return
+        save_structured(open_id, metric, body)
+        return
+
     forced_note = split_note_prefix(stripped)
     if forced_note is not None:
         if not forced_note:
@@ -2349,7 +2416,10 @@ def handle_text(open_id: str, text: str) -> None:
         #    /pending 又把同一题问了一遍，看起来像「没过滤已答的题」。
         #    斜杠命令照旧递归（命令要生效）；纯文本则存成笔记，但把话说清楚。
         if (stripped and not cmd.startswith("/")
-                and split_note_prefix(stripped) is None):
+                and split_note_prefix(stripped) is None
+                # 「睡：」「吃：」是有归属的结构化数据，不能被过期题
+                # 顺手存成 note —— 那样睡眠窗口和营养素都会丢。
+                and split_structured_prefix(stripped) is None):
             try:
                 relay_note(stripped)
             except Exception as e:  # noqa: BLE001

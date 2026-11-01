@@ -333,12 +333,77 @@ def build_user_prompt(tl: dict, day: Day, carryover: list[str],
                                  day_iso=day.iso))
         lines.append("")
 
+    # 睡眠窗口。**不是**手表测的 —— Forerunner 235 没有睡眠功能，这一条是
+    # 从手机 / 电脑的静默推断出来的，或者用户在飞书里手动记的。
+    # ⚠️ 必须把来源和「这是估算」一起写进 prompt。只丢一个「sleep 8.5h」过去，
+    #    模型会把它和步数并列，写成「昨晚睡了 8.5 小时」这种确定语气。
+    sleep = tl.get("sleep") or {}
+    if sleep.get("onset") and sleep.get("wake"):
+        basis = str(sleep.get("basis") or "")
+        how = ("recorded by the user by hand"
+               if basis == "manual"
+               else "inferred from phone / desktop silence")
+        lines.append("## Sleep")
+        lines.append("")
+        lines.append(f"- Fell asleep {sleep['onset']}, woke {sleep['wake']} "
+                     f"({sleep.get('hours')} h; {how}; confidence "
+                     f"{sleep.get('confidence') or '-'})")
+        lines.append("- This is an ESTIMATE, not a measurement: the watch has no sleep")
+        lines.append("  sensor. Do not state it as a measured fact, and do not build")
+        lines.append("  causal claims on it.")
+        lines.append("")
+
+    weather = tl.get("weather") or {}
+    if weather:
+        bits = []
+        if weather.get("condition_label"):
+            bits.append(str(weather["condition_label"]))
+        if weather.get("temp_min") is not None and weather.get("temp_max") is not None:
+            bits.append(f"{weather['temp_min']}–{weather['temp_max']} °C")
+        for key, label in (("precip_mm", "mm rain"), ("sunshine_min", "min sunshine"),
+                           ("wind_max_kmh", "km/h wind")):
+            if weather.get(key) is not None:
+                bits.append(f"{weather[key]} {label}")
+        if bits:
+            lines.append("## Weather")
+            lines.append("")
+            lines.append("- " + ", ".join(bits))
+            lines.append("- Background, not an event. Use it only if it explains"
+                         " something that actually happened.")
+            lines.append("")
+
+    nutrition = tl.get("nutrition") or {}
+    if nutrition:
+        bits = []
+        for key, label in (("calories", "kcal"), ("protein_g", "g protein"),
+                           ("carbs_g", "g carbs"), ("fat_g", "g fat")):
+            if nutrition.get(key) is not None:
+                v = nutrition[key]
+                try:
+                    # 2100.0 写成 2100 —— 带小数点会让模型以为那是精确到小数的测量
+                    shown = int(v) if float(v).is_integer() else v
+                except (TypeError, ValueError):
+                    shown = v
+                bits.append(f"{shown} {label}")
+        if bits:
+            lines.append("## Nutrition")
+            lines.append("")
+            lines.append("- " + ", ".join(bits)
+                         + f" (confidence {nutrition.get('confidence') or '-'})")
+            lines.append("- Estimated by a model from a one-line food log the user typed.")
+            lines.append("  Portions were guessed. Treat it as a rough average, never as"
+                         " a measured intake, and do not do arithmetic on it.")
+            lines.append("")
+
     health = tl.get("health") or {}
-    if health:
+    # 睡眠那一组已经在上面 ## Sleep 里说过了。这里再列一遍只会让模型
+    # 多看五行数字（其中 sleep_onset_min=689 对它是纯粹的噪音）。
+    health_lines = [_fmt_health(k, v) for k, v in health.items()
+                    if not (sleep and k.startswith("sleep_"))]
+    if health_lines:
         lines.append("## Health data")
         lines.append("")
-        for k, v in health.items():
-            lines.append(f"- {_fmt_health(k, v)}")
+        lines.extend(f"- {x}" for x in health_lines)
         lines.append("")
 
     loc = tl.get("location") or []

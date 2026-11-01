@@ -286,6 +286,86 @@ def build_health(rows: list[sqlite3.Row]) -> dict | None:
     return calls
 
 
+def build_sleep(rows: list[sqlite3.Row]) -> dict | None:
+    """一天的睡眠窗口。
+
+    ⚠️ 来源是 infer_sleep.py 的**推断**（手机/电脑静默），不是手环测量。
+       站点上要能看出来这一点，所以 basis 和 confidence 必须一起发过去 ——
+       否则「8.5 小时」在页面上和步数长得一样，读者会以为是测出来的。
+    """
+    row = pick_metric(rows, "sleep_window")
+    if row is None:
+        return None
+    meta = meta_of(row)
+    onset = str(meta.get("onset_local") or "")[:5]
+    wake = str(meta.get("wake_local") or "")[:5]
+    hours = num(row["value_num"], 2)
+    if hours is None or not onset or not wake:
+        return None
+    return {
+        "onset": onset,                    # "23:40"
+        "wake": wake,                      # "08:10"
+        "hours": round(float(hours), 2),
+        "basis": str(meta.get("basis") or "unknown")[:20],
+        "confidence": str(meta.get("confidence") or "low")[:10],
+    }
+
+
+def build_weather(rows: list[sqlite3.Row]) -> dict | None:
+    if not rows:
+        return None
+
+    def value(metric: str) -> float | None:
+        row = pick_metric(rows, metric)
+        return None if row is None else num(row["value_num"], 1)
+
+    cond_row = pick_metric(rows, "condition")
+    out = {
+        "tempMax": value("temp_max"),
+        "tempMin": value("temp_min"),
+        "precipMm": value("precip_mm"),
+        "sunshineMin": value("sunshine_min"),
+        "windMax": value("wind_max_kmh"),
+        "condition": (str(cond_row["value_text"])[:30] if cond_row is not None
+                      and cond_row["value_text"] else None),
+    }
+    if all(v is None for v in out.values()):
+        return None
+    return out
+
+
+def build_nutrition(rows: list[sqlite3.Row]) -> dict | None:
+    """全天摄入估算。
+
+    只发合计和顿数，**不发**每顿的原文 —— 那句「午饭 鸡胸肉200g」是
+    用户自己写的话，和在飞书里记的笔记同级，属于 /life/archive 的边界。
+    """
+    if not rows:
+        return None
+
+    def value(metric: str) -> float | None:
+        row = pick_metric(rows, metric)
+        return None if row is None else num(row["value_num"], 1)
+
+    meals = sum(1 for r in rows if r["metric"] == "meal")
+    out = {
+        "calories": None if value("calories") is None else int(round(value("calories"))),
+        "proteinG": value("protein_g"),
+        "carbsG": value("carbs_g"),
+        "fatG": value("fat_g"),
+        "meals": meals,
+        "confidence": "",
+    }
+    # ⚠️ 空串必须变成 None。Worker 的 isName() 要求长度 ≥ 1，
+    #    发一个 "" 过去会让整个请求 400 —— 一天的聚合全被拒掉。
+    conf = next((str(meta_of(r).get("confidence") or "") for r in rows
+                 if str(meta_of(r).get("confidence") or "")), "")
+    out["confidence"] = conf[:10] or None
+    if all(out[k] is None for k in ("calories", "proteinG", "carbsG", "fatG")):
+        return None
+    return out
+
+
 def split_place(text: str | None) -> tuple[str | None, str | None]:
     """'Yingpu, Qingpu, Shanghai, CN' → ('Shanghai', 'Qingpu')。"""
     if not text:
@@ -463,6 +543,23 @@ def build_location(
         (t["start"], t["end"]) for t in transport_details
         if t["start"] is not None and t["end"] is not None
     ] + inferred_intervals
+
+    # 一天不可能有超过 1440 分钟。超过就是上游数据有问题（实测 2026-10-27
+    # 算出了 7454 分钟 = 124 小时，是 collect_phone 写进了重复/跨天的
+    # transport 行），Worker 的校验会直接 400 掉**整批** —— 一行坏数据
+    # 拖垮 30 天的发布。
+    #
+    # 这里封顶而不是直接丢弃：这一天的位置信息还有价值，而且**要出声**，
+    # 不能悄悄改数。看到这行告警就该去查 collect_phone 那天的 trip 数据。
+    capped = ""
+    if moving > 1440:
+        capped = f"moving {moving:.0f} -> 1440"
+        moving = 1440.0
+    inferred = min(inferred, 1440.0)
+    if moving + inferred > 1440:
+        inferred = max(0.0, 1440.0 - moving)
+    if capped:
+        print(f"  ⚠️  location: {capped}（一天不可能超过 24 小时；上游 transport 行有问题）")
 
     return {
         "city": main_city,
@@ -838,6 +935,9 @@ def build_day(
         "phone": phone,
         "ai": build_ai(by_domain.get("ai", [])),
         "workouts": build_workouts(by_domain.get("fitness", [])),
+        "sleep": build_sleep(by_domain.get("health", [])),
+        "weather": build_weather(by_domain.get("weather", [])),
+        "nutrition": build_nutrition(by_domain.get("nutrition", [])),
         "dimensions": build_dimensions(categories, health, location, phone_dims),
         # 七个维度是各来源读数的**总和**，同一分钟可能被两个来源各算一次
         # （最典型：电脑前刷手机 → Social 和桌面分类同时计时）。
@@ -893,7 +993,11 @@ def post_days(url: str, token: str, days: list[dict], chunk_size: int, timeout: 
 
             last_error = RuntimeError(f"HTTP {res.status_code}: {res.text[:200]}")
             # 兼容旧 Worker：它的 DAY_KEYS 还没有 allTime。
-            if (res.status_code == 400
+            # ⚠️ 必须同时看 res.text：只判「payload 里有这个键」的话，
+            #    任何别的 400（实测是 location.movingMinutes 越界）都会被
+            #    误判成「Worker 不认识这个字段」，于是它一路剥字段，
+            #    报出三条假告警，真正的错误反而被埋掉。
+            if (res.status_code == 400 and "allTime" in res.text
                     and any("allTime" in d for d in chunk)):
                 for d in chunk:
                     d.pop("allTime", None)
@@ -901,7 +1005,7 @@ def post_days(url: str, token: str, days: list[dict], chunk_size: int, timeout: 
                 continue
             # 兼容旧 Worker：它的 DAY_KEYS 还没有 workouts。部署新 Worker 之前，
             # 当天 23:00 的流水线不能因为一个新字段整批失败。
-            if (res.status_code == 400
+            if (res.status_code == 400 and "workouts" in res.text
                     and any("workouts" in d for d in chunk)):
                 for d in chunk:
                     d.pop("workouts", None)
@@ -919,7 +1023,7 @@ def post_days(url: str, token: str, days: list[dict], chunk_size: int, timeout: 
             # 兼容旧 Worker：它的 DAY_KEYS 还没有 dimensions。部署新 Worker 之前，
             # 当天 23:00 的流水线不能因为一个新字段整批失败 —— 剥掉 dimensions
             # 重试一次；部署后再跑 --days 30 就能把历史补回来。
-            if (res.status_code == 400
+            if (res.status_code == 400 and "dimensions" in res.text
                     and any("dimensions" in d for d in chunk)):
                 for d in chunk:
                     d.pop("dimensions", None)

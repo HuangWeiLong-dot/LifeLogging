@@ -172,11 +172,20 @@ function Invoke-OneDay($d) {
         # 自由文本 → 结构化事件（小时回答 + 问责备注 + 记笔记 → state/events.jsonl）。
         # 一天一次调用；日记正文不在这里处理（那是模型写的，再提一遍是循环论证）。
         Invoke-Step "structure" "scripts\structure_text.py" @() | Out-Null
+        # 饮食：manual/nutrition（飞书里发的「吃：……」）→ 热量/蛋白/碳水/脂肪。
+        # 必须排在 normalize 之前 —— 归一化时要把合计读进 timeline。
+        # 一天一次调用；原文没变就复用 state/nutrition.jsonl，不重复花钱。
+        Invoke-Step "nutrition" "scripts\parse_nutrition.py" @("--date", $ds) | Out-Null
     }
     # 手表：先把 Gadgetbridge 导出的 SQLite 从中继取回来，再读它。
     # 两步必须按这个顺序 —— ingest_gadgetbridge 读的是本地那份文件。
     Invoke-Step "collect-watch"   "scripts\collect_watch.py"   @("--date", $ds) | Out-Null
     Invoke-Step "gadgetbridge"    "middleware\ingest_gadgetbridge.py" @("--date", $ds) | Out-Null
+    # 睡眠窗口：从手机静默 + 电脑活动推断（FR235 没有睡眠功能，手表给不出）。
+    # 飞书里发过「睡：23:40-08:10」的话，这一步直接采用那条，不做推断。
+    Invoke-Step "infer-sleep"     "scripts\infer_sleep.py"        @("--date", $ds) | Out-Null
+    # 天气：默认关闭（要把坐标发给 Open-Meteo）。没开就是一行提示，不算失败。
+    Invoke-Step "weather"         "scripts\collect_weather.py"    @("--date", $ds) | Out-Null
     # 把健康日汇总推给服务器 —— 机器人跑在服务器上，看不到这台笔记本。
     # ⚠️ 必须在 ingest 之后：它读的就是刚写进 events.db 的那几行。
     Invoke-Step "push-health"     "scripts\push_health.py" | Out-Null

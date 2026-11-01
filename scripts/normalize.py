@@ -207,6 +207,14 @@ class Timeline:
     # ⚠️ 这是**第一手事实** —— 比任何推断出来的都可靠，日记提示词里要单独说清。
     notes: list[dict[str, Any]] = field(default_factory=list)
     total_hours: float = 0.0
+    # 睡眠窗口。**不是**手表给的 —— FR235 没有睡眠功能，这是 infer_sleep.py
+    # 从手机静默里推的（或你在飞书里手动校对的那一条）。所以它带 basis，
+    # 日记提示词里要按「推断」写，不能当成观测事实。
+    sleep: dict[str, Any] = field(default_factory=dict)
+    # 当天气象。外发坐标才拿得到，默认关闭。
+    weather: dict[str, Any] = field(default_factory=dict)
+    # 饮食：飞书那句话经 LLM 解析出来的估算值，带 confidence。
+    nutrition: dict[str, Any] = field(default_factory=dict)
 
 
 # ── 规则匹配 ────────────────────────────────────────────────────────
@@ -1302,6 +1310,39 @@ def attach_other_domains(tl: Timeline, day: Day) -> None:
                 "first_utc": meta.get("first_point_utc"),
                 "last_utc": meta.get("last_point_utc"),
             }
+        elif dom == "health" and met == "sleep_window":
+            # 睡眠窗口**先于**下面的通用分支，因为它要单独保留 meta 里的
+            # 入睡 / 起床时刻。同时仍然写进 tl.health —— 日记和发布层
+            # 都按指标名取数，多留一份不冲突。
+            meta = e.get("meta") or {}
+            tl.sleep = {
+                "onset": meta.get("onset_local"),
+                "wake": meta.get("wake_local"),
+                "hours": e.get("value_num"),
+                "basis": meta.get("basis") or "",
+                "confidence": meta.get("confidence") or "",
+            }
+            tl.health[met] = e.get("value_num")
+        elif dom == "weather":
+            # 天气是一组标量，按指标名收进字典。
+            tl.weather[met] = e.get("value_num")
+            if e.get("value_text"):
+                tl.weather[f"{met}_label"] = e.get("value_text")
+        elif dom == "nutrition":
+            # meal 是逐顿的，其余是全天合计。分开存，日记只写合计，
+            # 明细留给需要解释「为什么是 2100 卡」的时候。
+            if met == "meal":
+                tl.nutrition.setdefault("meals", []).append({
+                    "kind": e.get("value_text") or "",
+                    "calories": e.get("value_num"),
+                    "protein_g": (e.get("meta") or {}).get("protein_g"),
+                    "text": (e.get("meta") or {}).get("text") or "",
+                })
+            else:
+                tl.nutrition[met] = e.get("value_num")
+            conf = (e.get("meta") or {}).get("confidence")
+            if conf:
+                tl.nutrition["confidence"] = conf
         elif dom == "health":
             # 同一指标取最后一次（当天汇总值）。
             #
@@ -1356,9 +1397,61 @@ def render_markdown(tl: Timeline) -> str:
             lines.append(f"- {n.get('text', '')}")
         lines.append("")
 
+    if tl.sleep:
+        s = tl.sleep
+        how = {
+            "manual": "recorded by hand in Feishu",
+            "phone_silence": "inferred from phone silence — no wearable sleep data exists",
+        }.get(str(s.get("basis") or ""), str(s.get("basis") or "unknown source"))
+        lines.append("## Sleep")
+        lines.append(f"- Fell asleep {s.get('onset')}, woke {s.get('wake')} — "
+                     f"{s.get('hours')} h ({how}; confidence {s.get('confidence') or '-'})")
+        # 这一行是写给日记提示词看的：睡眠是**推断**，不是观测，
+        # 别在正文里写成「昨晚睡了 7.4 小时」这种确定语气。
+        lines.append("- This window is an estimate, not a measurement. Do not state it as a fact.")
+        lines.append("")
+
+    if tl.weather:
+        w = tl.weather
+        bits = []
+        if w.get("condition_label"):
+            bits.append(str(w["condition_label"]))
+        if w.get("temp_min") is not None and w.get("temp_max") is not None:
+            bits.append(f"{w['temp_min']}–{w['temp_max']} °C")
+        elif w.get("temp_mean") is not None:
+            bits.append(f"{w['temp_mean']} °C")
+        for key, label in (("precip_mm", "mm rain"), ("sunshine_min", "min sunshine"),
+                           ("wind_max_kmh", "km/h wind")):
+            if w.get(key) is not None:
+                bits.append(f"{w[key]} {label}")
+        if bits:
+            lines.append("## Weather")
+            lines.append("- " + ", ".join(bits))
+            lines.append("")
+
+    if tl.nutrition:
+        n = tl.nutrition
+        bits = []
+        for key, label in (("calories", "kcal"), ("protein_g", "g protein"),
+                           ("carbs_g", "g carbs"), ("fat_g", "g fat")):
+            if n.get(key) is not None:
+                bits.append(f"{n[key]} {label}")
+        if bits:
+            lines.append("## Nutrition (estimated from a one-line food log, not measured)")
+            lines.append("- " + ", ".join(bits)
+                         + f" (confidence {n.get('confidence') or '-'})")
+            for m in (n.get("meals") or []):
+                lines.append(f"  - {m.get('kind')}: {m.get('text') or ''}"
+                             f" ({m.get('calories')} kcal)")
+            lines.append("")
+
     if tl.health:
         lines.append("## Health")
         for k, v in tl.health.items():
+            # 睡眠那一组已经在上面 ## Sleep 里说清楚了。这里再列一遍
+            # 只是给模型多看五行数字，容易让它把估算值当成测量值复述。
+            if tl.sleep and k.startswith("sleep_"):
+                continue
             lines.append(f"- {k}: {v}")
         lines.append("")
 
@@ -1558,6 +1651,9 @@ def main() -> None:
         "phone": tl.phone,
         "web": tl.web,
         "track": tl.track,
+        "sleep": tl.sleep,
+        "weather": tl.weather,
+        "nutrition": tl.nutrition,
         "unmatched_apps": tl.unmatched_apps,
         "blocks": [
             {

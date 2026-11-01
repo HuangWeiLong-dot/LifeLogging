@@ -4655,6 +4655,296 @@ def t_collapsed_hours():
 
 check("collapsedHours: 区间版与分钟版逐条一致 / 并集 / 跨午夜裁剪", t_collapsed_hours)
 
+# ── 睡眠 / 天气 / 饮食 ─────────────────────────────────────────────
+print("\n[26] Sleep window: parsing, gap detection, event shape")
+
+_TZ_S = ZoneInfo("Asia/Shanghai")
+
+
+def t_sleep_manual_parse():
+    import infer_sleep as S
+    from common import Day
+
+    d = Day.parse("2026-10-20", _TZ_S)
+    on, wk = S.parse_manual("23:40-08:10", d)
+    # 一夜归属于它**醒来**的那天：睡前算前一天，起床算当天
+    assert on.strftime("%m-%d %H:%M") == "10-19 23:40", on
+    assert wk.strftime("%m-%d %H:%M") == "10-20 08:10", wk
+
+    # 凌晨才睡：两头都在当天
+    on2, wk2 = S.parse_manual("02:00-09:30", d)
+    assert on2.date() == d.d and wk2.date() == d.d
+
+    # 中文冒号 / 波浪号都认
+    assert S.parse_manual("23：40~8:10", d) is not None
+    # 写反了（15.5 小时）、纯文字，都要拒掉，不能写进数据
+    assert S.parse_manual("08:10-23:40", d) is None
+    assert S.parse_manual("随便写的", d) is None
+
+
+def t_sleep_gaps():
+    import infer_sleep as S
+    from common import Day
+
+    d = Day.parse("2026-10-20", _TZ_S)
+
+    def A(h, m=0):
+        return datetime(2026, 10, 19, h, m, tzinfo=_TZ_S)
+
+    def B(h, m=0):
+        return datetime(2026, 10, 20, h, m, tzinfo=_TZ_S)
+
+    def picked(act):
+        return S.pick_night(S.night_gaps(act, d), d)
+
+    # 正常一夜
+    p = picked([A(18), A(20), A(23, 40), B(8, 10), B(9), B(11)])
+    assert p is not None
+    assert p[0].strftime("%m-%d %H:%M") == "10-19 23:40", p
+    assert p[1].strftime("%H:%M") == "08:10", p
+
+    # 半夜起来刷十分钟手机 → 合并成同一夜，而不是从 03:10 算起
+    p = picked([A(18), A(23, 40), B(3), B(3, 10), B(8, 10), B(10)])
+    assert p[0].strftime("%H:%M") == "23:40", p
+
+    # 白天只有三小时没碰手机 → 不是睡眠
+    assert picked([B(9), B(12), B(13), B(15)]) is None
+
+    # 手机 17 小时没动静（没电）→ 宁可缺一天
+    assert picked([A(14), B(7)]) is None
+
+    # 08:00 醒了又赖到 14:00：只能算到 08:00，不能并成 15 小时
+    p = picked([A(23), B(8), B(14), B(15, 30), B(17)])
+    assert p[1].strftime("%H:%M") == "08:00", p
+
+
+def t_sleep_events():
+    import infer_sleep as S
+    from common import Day
+
+    d = Day.parse("2026-10-20", _TZ_S)
+    on = datetime(2026, 10, 19, 23, 40, tzinfo=_TZ_S)
+    wk = datetime(2026, 10, 20, 8, 10, tzinfo=_TZ_S)
+    evs = S.build_events(on, wk, "phone_silence", "high", d)
+    m = {e.metric: e for e in evs}
+    assert m["sleep_hours"].value_num == 8.5, m["sleep_hours"].value_num
+    # 入睡时刻从**前一天中午**起算，23:40 → 700 分钟。
+    # 用「距午夜」的口径会得到 -20，和 00:10 的 10 分差距 30 分钟，
+    # 算睡眠规律性时会得出一个不存在的波动。
+    assert m["sleep_onset_min"].value_num == 700.0, m["sleep_onset_min"].value_num
+    assert m["sleep_wake_min"].value_num == 490.0, m["sleep_wake_min"].value_num
+    assert m["sleep_window"].value_text == "23:40→08:10"
+    assert all(e.domain == "health" and e.source == "sleep" for e in evs)
+
+
+check("sleep: manual 前缀解析（含跨午夜与非法输入）", t_sleep_manual_parse)
+check("sleep: 静默段检测（起夜合并 / 白天不误判 / 没电不编）", t_sleep_gaps)
+check("sleep: 事件形状与入睡分钟数口径", t_sleep_events)
+
+
+print("\n[27] Weather collector (pure conversion, no network)")
+
+
+def t_weather_events():
+    import collect_weather as W
+    from common import Day
+
+    d = Day.parse("2026-10-20", _TZ_S)
+    daily = {
+        "weather_code": 3,
+        "temperature_2m_max": 21.4, "temperature_2m_min": 9.1,
+        "temperature_2m_mean": 15.0, "precipitation_sum": 0.0,
+        "sunshine_duration": 32400.0, "wind_speed_10m_max": 18.2,
+    }
+    evs = W.to_events(daily, d, "location", 39.91, 116.4)
+    m = {e.metric: e for e in evs}
+    assert all(e.domain == "weather" for e in evs)
+    assert m["condition"].value_text == "overcast", m["condition"].value_text
+    # sunshine_duration 是秒，项目里其它时长都是分钟
+    assert m["sunshine_min"].value_num == 540.0, m["sunshine_min"].value_num
+    assert m["temp_max"].value_num == 21.4
+
+    # 全空的一天不能造出事件
+    empty = W.to_events({}, d, "config", 0.0, 0.0)
+    assert empty == []
+
+
+check("weather: 秒→分钟、WMO 标签、空数据不出事件", t_weather_events)
+
+
+print("\n[28] Nutrition parsing (LLM output → events)")
+
+
+def t_nutrition_extract():
+    import parse_nutrition as P
+
+    # 模型经常包一层 ```json 围栏，或者前面多说一句
+    obj = P.extract_json(
+        'Here you go:\n```json\n{"meals": [], "totals": null, '
+        '"confidence": "low", "assumptions": []}\n```')
+    assert obj is not None and obj["confidence"] == "low"
+    assert P.extract_json("这不是 JSON") is None
+    assert P.extract_json("") is None
+
+
+def t_nutrition_events():
+    import parse_nutrition as P
+    from common import Day
+
+    d = Day.parse("2026-10-20", _TZ_S)
+    obj = {
+        "meals": [{"kind": "lunch", "text": "鸡胸肉 200g", "calories": 330,
+                   "protein_g": 46, "carbs_g": 0, "fat_g": 7}],
+        "totals": {"calories": 330, "protein_g": 46, "carbs_g": 0, "fat_g": 7},
+        "confidence": "medium",
+        "assumptions": ["chicken breast is skinless"],
+    }
+    evs = P.build_events(obj, d, "午饭 鸡胸肉200g")
+    m = {e.metric: e for e in evs}
+    assert all(e.domain == "nutrition" for e in evs)
+    assert m["calories"].value_num == 330
+    assert m["meal"].value_text == "lunch"
+
+    # 同一天两顿都叫 snack：唯一索引里有 value_text，
+    # 不区分的话第二顿会被静默丢掉。
+    obj2 = {"meals": [{"kind": "snack", "calories": 100},
+                      {"kind": "snack", "calories": 200}],
+            "totals": None, "confidence": "low", "assumptions": []}
+    labels = [e.value_text for e in P.build_events(obj2, d, "两顿零食")]
+    assert labels == ["snack", "snack #2"], labels
+
+
+check("nutrition: 从围栏里抠 JSON / 非法输出不抛", t_nutrition_extract)
+check("nutrition: 事件形状 / 同名餐次不互相覆盖", t_nutrition_events)
+
+
+print("\n[29] Publish layer: sleep / weather / nutrition fields")
+
+
+def _rows(records):
+    """[(metric, value_num, value_text, meta)] → sqlite3.Row 列表。"""
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE e (metric TEXT, value_num REAL, "
+                 "value_text TEXT, meta_json TEXT)")
+    for metric, num, text, meta in records:
+        conn.execute("INSERT INTO e VALUES (?,?,?,?)",
+                     (metric, num, text, json.dumps(meta)))
+    return conn.execute("SELECT * FROM e").fetchall()
+
+
+def t_publish_sleep():
+    import publish_life_site as PL
+
+    rows = _rows([("sleep_window", 8.5, "23:40→08:10",
+                   {"onset_local": "23:40", "wake_local": "08:10",
+                    "basis": "phone_silence", "confidence": "high"}),
+                  ("sleep_hours", 8.5, "", {})])
+    s = PL.build_sleep(rows)
+    assert s == {"onset": "23:40", "wake": "08:10", "hours": 8.5,
+                 "basis": "phone_silence", "confidence": "high"}, s
+    # 没有睡眠事件的一天必须是 None，不能变成 0 小时
+    assert PL.build_sleep(_rows([("steps", 8000, "", {})])) is None
+
+
+def t_publish_weather():
+    import publish_life_site as PL
+
+    rows = _rows([("condition", 3, "overcast", {}),
+                  ("temp_max", 21.4, "", {}), ("temp_min", 9.1, "", {}),
+                  ("precip_mm", 0.0, "", {}), ("sunshine_min", 540.0, "", {}),
+                  ("wind_max_kmh", 18.2, "", {})])
+    w = PL.build_weather(rows)
+    assert w["condition"] == "overcast", w
+    assert w["tempMax"] == 21.4 and w["tempMin"] == 9.1, w
+    assert PL.build_weather([]) is None
+
+
+def t_publish_nutrition():
+    import publish_life_site as PL
+
+    rows = _rows([
+        ("meal", 330, "lunch", {"confidence": "medium"}),
+        ("calories", 2100, "", {"confidence": "medium"}),
+        ("protein_g", 118, "", {"confidence": "medium"}),
+        ("carbs_g", 215, "", {"confidence": "medium"}),
+        ("fat_g", 75, "", {"confidence": "medium"}),
+    ])
+    n = PL.build_nutrition(rows)
+    assert n["calories"] == 2100 and n["proteinG"] == 118, n
+    assert n["meals"] == 1, n
+    assert n["confidence"] == "medium"
+
+    # ⚠️ 空串必须变成 None：Worker 的 isName() 要求长度 ≥ 1，
+    #    发一个 "" 过去会让**整天的聚合** 400，不只这一个字段。
+    bare = _rows([("calories", 500, "", {})])
+    assert PL.build_nutrition(bare)["confidence"] is None
+
+
+check("publish: sleep 字段（缺失是 null 不是 0）", t_publish_sleep)
+check("publish: weather 字段", t_publish_weather)
+check("publish: nutrition 字段（空 confidence 必须变 null）", t_publish_nutrition)
+
+
+print("\n[30] Normalize: new domains land on the timeline")
+
+
+def t_normalize_attach():
+    import normalize as N
+
+    tl = N.Timeline(day="2026-10-20")
+    # 直接喂事件字典走 attach 里的分派 —— 不碰网络。
+    # 这里复制的是 attach_other_domains 的循环体判断，改动时要一起看。
+    events = [
+        {"domain": "health", "metric": "sleep_window", "value_num": 8.5,
+         "meta": {"onset_local": "23:40", "wake_local": "08:10",
+                  "basis": "phone_silence", "confidence": "high"}},
+        {"domain": "weather", "metric": "temp_max", "value_num": 21.4,
+         "value_text": ""},
+        {"domain": "weather", "metric": "condition", "value_num": 3,
+         "value_text": "overcast"},
+        {"domain": "nutrition", "metric": "meal", "value_num": 330,
+         "value_text": "lunch", "meta": {"protein_g": 46, "text": "鸡胸肉"}},
+        {"domain": "nutrition", "metric": "calories", "value_num": 2100,
+         "meta": {"confidence": "medium"}},
+    ]
+    for e in events:
+        dom, met = e["domain"], e["metric"]
+        if dom == "health" and met == "sleep_window":
+            meta = e.get("meta") or {}
+            tl.sleep = {"onset": meta.get("onset_local"), "wake": meta.get("wake_local"),
+                        "hours": e.get("value_num"), "basis": meta.get("basis"),
+                        "confidence": meta.get("confidence")}
+            tl.health[met] = e.get("value_num")
+        elif dom == "weather":
+            tl.weather[met] = e.get("value_num")
+            if e.get("value_text"):
+                tl.weather[f"{met}_label"] = e.get("value_text")
+        elif dom == "nutrition":
+            if met == "meal":
+                tl.nutrition.setdefault("meals", []).append({"kind": e["value_text"]})
+            else:
+                tl.nutrition[met] = e.get("value_num")
+
+    assert tl.sleep["onset"] == "23:40", tl.sleep
+    assert tl.weather["condition_label"] == "overcast", tl.weather
+    assert tl.nutrition["calories"] == 2100, tl.nutrition
+    assert len(tl.nutrition["meals"]) == 1
+
+    # 这三个区块必须出现在给模型看的 markdown 里，
+    # 否则「加进事件表」只是存了没人读的数据。
+    md = N.render_markdown(tl)
+    assert "## Sleep" in md, md[:400]
+    assert "## Weather" in md
+    assert "## Nutrition" in md
+
+
+check("normalize: sleep / weather / nutrition 进 timeline 与 markdown",
+      t_normalize_attach)
+
+
 # ── 汇总 ───────────────────────────────────────────────────────────
 print("\n" + "=" * 64)
 print(f"passed {PASS} · failed {FAIL}")
