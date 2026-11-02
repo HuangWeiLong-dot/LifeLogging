@@ -2153,8 +2153,9 @@ check("feishu: 补答昨天的题，收尾卡与复盘都算在昨天（按题�
 def t_quiet_hours():
     """夜里不能发消息 —— 而且**生成器和推送层都要拦**。
 
-    ⚠️ 实测的设计漏洞：生成器有 8–22 的窗口，但推送那一层没有。于是
-       21:58 生成的题会在 22:03 被收到，或者服务器半夜重启时把待推的题发出去。
+    ⚠️ 实测的设计漏洞：生成器有窗口（现在从手机第一次亮屏开始，到
+       ASK_UNTIL_HOUR 为止），但推送那一层没有。于是 21:58 生成的题会在
+       22:03 被收到，或者服务器半夜重启时把待推的题发出去。
        两道闸缺一不可 —— 生成器只管「生不生成」，题生成完还躺着等推送。
     """
     import importlib.util
@@ -4534,6 +4535,48 @@ def t_stays_and_tracks():
     assert all(x.domain == "location" and x.metric == "transport" for x in tr)
     assert max(x.value_num for x in tr) == 10.0, [x.value_num for x in tr]
 
+    # 跨天 track 不能当成一次通勤。实测 10-27 有一条 386 km / 123.7 h
+    # 的 track（没有 mode_timeline），写进来会让 Transport 顶到 24h。
+    bad = {
+        "type": "FeatureCollection",
+        "features": [{
+            "type": "Feature",
+            "geometry": {"type": "LineString", "coordinates": []},
+            "properties": {
+                "start_at": "2026-10-13T06:00:00+08:00",
+                "duration": 445242,        # 秒 → 123.7 h
+                "distance": 386440,        # 米 → 386 km
+                "avg_speed": 3.12,
+                "dominant_mode": "driving",
+            },
+        }],
+    }
+    collect_phone._get = lambda *a, **k: bad
+    try:
+        assert collect_tracks(day) == [], "跨天 track 必须跳过"
+    finally:
+        collect_phone._get = orig
+
+    # mode_timeline 里超过 24h 的分段同样不可能属于同一个本地日
+    long_seg = {
+        "type": "FeatureCollection",
+        "features": [{
+            "type": "Feature",
+            "geometry": {"type": "LineString", "coordinates": []},
+            "properties": {
+                "id": 11,
+                "start_at": "2026-10-13T06:00:00+08:00",
+                "mode_timeline": [{"start_time": t0, "end_time": t0 + 25 * 3600,
+                                   "emoji": "🚗"}],
+            },
+        }],
+    }
+    collect_phone._get = lambda *a, **k: long_seg
+    try:
+        assert collect_tracks(day) == [], "超过 24h 的 mode 段必须跳过"
+    finally:
+        collect_phone._get = orig
+
     # 认不出的形状不能崩，也不能假装成功
     collect_phone._get = lambda *a, **k: {"unexpected": True}
     try:
@@ -4910,6 +4953,29 @@ check("publish: weather 字段", t_publish_weather)
 check("publish: nutrition 字段（空 confidence 必须变 null）", t_publish_nutrition)
 
 
+def t_publish_transport_guard():
+    """单条超过一天的 transport 行要整条丢掉，不能封顶成 24h。
+
+    实测 2026-10-27：上游写进一条 7420.7 分钟的「驾车」（跨了 5 天），
+    发布层封顶到 1440 分钟，前端 Transport 维度就显示整整 24 小时。
+    """
+    import publish_life_site as PL
+
+    rows = [
+        {"metric": "transport", "ts_utc": "2026-10-26T23:58:11Z",
+         "value_num": 7420.7, "value_text": "driving", "meta_json": "{}"},
+        {"metric": "transport", "ts_utc": "2026-10-27T01:00:00Z",
+         "value_num": 10.0, "value_text": "walking", "meta_json": "{}"},
+    ]
+    loc, _ = PL.build_location(rows)
+    assert loc is not None
+    assert loc["movingMinutes"] == 10.0, loc
+
+
+check("publish: 跨天 transport 行整条丢弃（不再显示 24h）",
+      t_publish_transport_guard)
+
+
 def t_life_slots():
     import life_slots as L
     from zoneinfo import ZoneInfo
@@ -4934,8 +5000,41 @@ def t_life_slots():
     assert parsed and parsed[0]["key"] == "lunch", parsed
     assert L.parse_evidence("some other evidence") is None
 
+    # 饭点题要一次问清「有没有吃 / 吃了什么 / 多久」，不能只问时长。
+    q = L.question_text(lunch)
+    assert "did you eat" in q and "What did you have" in q, q
+    assert "11:30–13:30" in q
+    # 晚间杂事没有"吃了什么"这一问。
+    assert "What did you have" not in L.question_text(L.SLOT_BY_KEY["evening"])
+
 
 check("life slots: 选项→分钟 / 窗口裁剪 / evidence 往返", t_life_slots)
+
+
+def t_live_wake():
+    """「几点开始问」看手机第一次亮屏 / 解锁，不是固定 08:00。"""
+    import live_questions as lq
+
+    def ev(ts, metric="screen_on", domain="phone"):
+        return {"domain": domain, "metric": metric, "ts_utc": ts}
+
+    day = "2026-11-02"
+    # 本地 03:00 亮屏（UTC 前一天 19:00）算半夜看时间，不算起床
+    assert lq.first_wake([ev("2026-11-01T19:00:00Z")], day) is None
+    # 本地 07:15 的第一条才是「人醒了」
+    got = lq.first_wake([
+        ev("2026-11-01T23:15:00Z"),
+        ev("2026-11-01T23:40:00Z", metric="unlock"),
+    ], day)
+    assert got is not None and got.strftime("%H:%M") == "07:15", got
+    # 非 phone 域的事件不算
+    assert lq.first_wake([ev("2026-11-01T23:15:00Z", domain="question")],
+                         day) is None
+    assert not lq.day_started([], day)
+    assert lq.day_started([ev("2026-11-01T23:15:00Z", metric="unlock")], day)
+
+
+check("live questions: 起床信号（手机第一次亮屏 / 解锁）", t_live_wake)
 
 
 def t_publish_activity_life():

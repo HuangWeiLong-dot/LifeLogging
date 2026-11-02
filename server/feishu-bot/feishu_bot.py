@@ -158,14 +158,16 @@ REFLEX_LOG_PATH = STATE_DIR / "reflex-log.jsonl"
 
 # 「别打扰」时段。**推送这一层也需要**，不能只靠生成器那边拦。
 #
-# ⚠️ 生成器（scripts/live_questions.py）有一个 8–22 的窗口，但那只管「生不生成」。
-#    题生成完还躺在中继上，等着这个循环来推 —— 而推送原来是**不看时间的**：
+# ⚠️ 生成器（scripts/live_questions.py）从「手机第一次亮屏 / 解锁」开始生成，
+#    到 ASK_UNTIL_HOUR 为止；但那只管「生不生成」。题生成完还躺在中继上，
+#    等着这个循环来推 —— 而推送原来是**不看时间的**：
 #      · 21:58 生成的题，5 分钟轮询正好落在 22:03 → 你已经躺下了还被叫醒
 #      · 服务器半夜重启 → 待推的那题立刻发出去
 #    两种都不会报错，只会在不该响的时候响一声。
 #
-# ⚠️ 这两个值要和 live_questions.py 的 ASK_FROM_HOUR / ASK_UNTIL_HOUR 一起改，
-#    否则会出现「生成了但永远推不出去」。
+# ⚠️ 早上这一半（QUIET_UNTIL 之前）现在不是死时间：`push_next_live()` 会看
+#    手机当天有没有亮过 / 解锁过（和生成器共用同一个判据），亮过就放行。
+#    晚上这一半（QUIET_FROM 之后）仍然是硬静音。
 QUIET_FROM = int(os.environ.get("FEISHU_QUIET_FROM", "22"))
 QUIET_UNTIL = int(os.environ.get("FEISHU_QUIET_UNTIL", "8"))
 
@@ -2605,6 +2607,27 @@ def day_is_closed(day_iso: str) -> bool:
         return False
 
 
+def _phone_woke_today(day_iso: str) -> bool:
+    """这一天手机已经亮过 / 解锁过了吗？
+
+    ⚠️ 判据**必须**和生成器共用 `live_questions.day_started`。两边各写一份
+       的话，会出现「生成器认为人醒了、机器人认为还在静音」——题生成了却
+       永远推不出去，日志上两边都正常。
+
+    读不到就当作**没醒**（保守）：宁可多等一会儿，也不要在凌晨误推一条把
+    人吵醒。生成器那边同理，读不到手机事件就不发。
+    """
+    lq = _live_questions_module()
+    if lq is None:
+        return False
+    try:
+        events = lq.relay_phone_events(day_iso, RELAY_BASE, RELAY_API_KEY)
+        return bool(lq.day_started(events, day_iso))
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN 查手机亮屏失败：{type(e).__name__}: {e}", file=sys.stderr)
+        return False
+
+
 def push_next_live(open_id: str) -> bool:
     """有新的**实时题**就立刻推一题。返回是否推了。
 
@@ -2663,9 +2686,21 @@ def push_next_live(open_id: str) -> bool:
     live_qs = [q for q in pending
                if str(q.get("source") or "") == "live"
                and str(q.get("day") or "") == live_day]
+    # ⚠️ 早上的静音不再一刀切到 08:00。生成器已经改成「手机第一次亮屏 /
+    #    解锁之后才出小时题」，这里必须认同一个信号，否则 06:30 醒了也要
+    #    干等到 8 点才收得到题 —— 那等于没改。
+    #    但只在 DAY_ROLL_HOUR 之后才认：00:30 摸一下手机是半夜看时间，
+    #    不是新的一天开始，那段时间仍然静音。
+    woke_early = (
+        bool(live_qs) and quiet and QUIET_UNTIL > DAY_ROLL_HOUR
+        and DAY_ROLL_HOUR <= now.hour < QUIET_UNTIL
+        and _phone_woke_today(live_day)
+    )
+    still_quiet = quiet and not woke_early
+
     # ⚠️ 已经收尾的一天不再推小时题。收尾之后 timer 还在生成，中继上也还躺着
     #    昨天那个小时的题 —— 不拦的话就是「复盘刚写完，又来一条 07:02–08:02」。
-    if quiet or day_is_closed(live_day):
+    if still_quiet or day_is_closed(live_day):
         # 静音时段 / 已封盘：只放行收尾题和轻量打卡（见 _survives_close）。
         live_qs = [q for q in live_qs if _survives_close(q)]
     if not live_qs:

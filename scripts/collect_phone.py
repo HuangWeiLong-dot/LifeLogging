@@ -137,6 +137,17 @@ MODE_EMOJI = {
 }
 STATIONARY_EMOJI = "📍"
 
+# 一条 track / 一个 mode 段最长能算多久。
+#
+# ⚠️ Dawarich 会把**多天**的点合成一条 track。实测 2026-10-27：386 km /
+#    123.7 h / avg 3.12 km/h 的一条 track 被当成「一次驾车」写进事件表，
+#    当天的 Transport 直接变成 24 小时（发布层按天封顶成 1440 分钟）。
+#    超过一天的分段按定义不属于同一个本地日，跳过并出声。
+MAX_SEGMENT_MIN = 24 * 60
+# 没有 mode_timeline 的旧版 fallback 更粗：整条 track 当成一次行程。
+# 正常人一天不会「移动」12 小时以上；超过基本就是跨天聚合，跳过。
+MAX_FALLBACK_TRIP_MIN = 12 * 60
+
 
 def collect_tracks(day: Day) -> list[Event]:
     """行程 + 交通方式。Dawarich 按速度/加速度分类。
@@ -222,6 +233,10 @@ def collect_tracks(day: Day) -> list[Event]:
                     continue
                 if minutes < 1.0:
                     continue                      # 几十秒的碎片没信息量
+                if minutes > MAX_SEGMENT_MIN:
+                    print(f"  ⚠️  跳过超长交通段：{minutes / 60:.1f} h "
+                          f"（{MODE_EMOJI.get(emoji, emoji)}，track {props.get('id')}）")
+                    continue
                 out.append(
                     Event(
                         ts_utc=_ts_to_iso(s_ts) or "",
@@ -243,6 +258,12 @@ def collect_tracks(day: Day) -> list[Event]:
             minutes = 0.0
         mode = (props.get("dominant_mode") or props.get("mode")
                 or props.get("transportation_mode") or "unknown")
+        if minutes > MAX_FALLBACK_TRIP_MIN:
+            # 这不是一次通勤，是 Dawarich 跨天合并出来的一条 track。
+            # 写进来会让当天的 Transport 变成假的长途旅行（并顶到 24h 上限）。
+            print(f"  ⚠️  跳过跨天 track：{minutes / 60:.1f} h / "
+                  f"{distance_km:.0f} km / {mode}（起点 {start.isoformat()}）")
+            continue
         out.append(
             Event(
                 ts_utc=start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),

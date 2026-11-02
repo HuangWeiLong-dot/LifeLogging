@@ -5,6 +5,7 @@
 
     服务器侧 `live_questions.py` 在 13:00 / 19:00 / 21:00 各发一道选择题
     （午饭、晚饭、洗澡/家务/买菜），选项直接是 15/30/45/60+ 分钟。
+    饭点题还会追问吃了什么，那句话落在答案的 `note` 里。
     答案经中继落成 `question/answer` 事件，`qa_client` 再把问题原文和答案
     对齐成 `state/qa-<day>.json` —— **这里是唯一能同时看到题面和答案的地方**。
 
@@ -110,6 +111,20 @@ def events_for_days(days: list[str]) -> dict[str, list[Event]]:
             # 所以也不写 0 分钟的事件，避免 Life 里出现一条 0 的伪记录。
             continue
         start, end = span
+        meta = {
+            "kind": slot["kind"],
+            "slot": slot["key"],
+            "label": slot["label"],
+            "minutes": minutes,
+            "start_utc": life_slots.to_utc_iso(start),
+            "end_utc": life_slots.to_utc_iso(end),
+            "qid": qid,
+        }
+        # 饭点题会追问「吃了什么」，那句话在选项后面的备注里。
+        # 原样带进 meta（不解析、不猜），由日记提示词按第一手描述使用。
+        food = str(row.get("note") or "").strip() if slot["kind"] == "meal" else ""
+        if food:
+            meta["food"] = food
         by_day[slot["_day"]].append(Event(
             ts_utc=life_slots.to_utc_iso(start),
             domain=DOMAIN,
@@ -117,15 +132,7 @@ def events_for_days(days: list[str]) -> dict[str, list[Event]]:
             value_num=float(minutes),
             value_text=str(slot["label"]),
             source=SOURCE,
-            meta={
-                "kind": slot["kind"],
-                "slot": slot["key"],
-                "label": slot["label"],
-                "minutes": minutes,
-                "start_utc": life_slots.to_utc_iso(start),
-                "end_utc": life_slots.to_utc_iso(end),
-                "qid": qid,
-            },
+            meta=meta,
         ))
 
     for evs in by_day.values():

@@ -216,7 +216,7 @@ sudo /opt/lifelogging/repo/server/deploy.sh           # git ff-only + 按改动�
 | `lifelogging-live-now`（`server/live-now/`） | timer 2 分钟 | 组装 `/api/life/now`；笔记本关机后继续更新位置 / 手机 / 问答 / 手表 |
 | `lifelogging-watch-publish`（`server/watch-publisher/`） | timer 15 分钟 | 直接解析中继的 GPX/FIT → `life/raw/watch/<day>.json`；**不写 events.db、不做聚合** |
 | `lifelogging-feishu-bot`（可选） | 常驻，出站长连接 | 提问推送与文字答题；挂了是**静默的**（进程活着、长连接死了） |
-| `lifelogging-live-questions`（可选） | timer 30 分钟 | 08:00–22:00 生成小时实时题；默认 23:00 收尾 |
+| `lifelogging-live-questions`（可选） | timer 30 分钟 | 手机当天第一次亮屏 / 解锁后开始生成小时实时题（不再固定 08:00）；默认 23:00 收尾 |
 
 `server/README.md` 开头还写着「两个服务」，且没列 watch-publisher —— 以本文件为准。
 Cloudflare Tunnel（`server/cloudflare-tunnel/`）把中继暴露成 `relay.liveinpassion.me`，

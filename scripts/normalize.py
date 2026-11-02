@@ -1405,13 +1405,18 @@ def attach_other_domains(tl: Timeline, day: Day) -> None:
             start = e.get("ts_utc")
             if start and float(minutes) > 0:
                 meta = e.get("meta") or {}
-                tl.activities.append({
+                item = {
                     "start": start,
                     "end": meta.get("end_utc") or "",
                     "minutes": round(float(minutes), 1),
                     "kind": meta.get("kind") or "",
                     "label": meta.get("label") or str(e.get("value_text") or ""),
-                })
+                }
+                # 饭点题追问的「吃了什么」，原样带下去（不解析、不当成测量值）。
+                food = str(meta.get("food") or "").strip()
+                if food:
+                    item["food"] = food
+                tl.activities.append(item)
         elif dom == "manual":
             # 用户在飞书里随手记的一笔。**原样**带下去，不做任何改写 ——
             # 这是全系统里唯一一条「用户直接说的话」，价值最高。

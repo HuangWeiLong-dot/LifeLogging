@@ -7,8 +7,9 @@
     它问的是**昨天**的事，而且是「拿你自己写的话堵你」——那很有用，但它
     看不见今天正在发生的事。
 
-    这个脚本补的就是那一块：白天在服务器上，**每个小时问一次**
-    「刚才这一小时你在干嘛」——在它还新鲜的时候问，而不是等明天。
+    这个脚本补的就是那一块：手机上第一次亮屏 / 解锁之后（不是固定 08:00），
+    在服务器上**每个小时问一次**「刚才这一小时你在干嘛」——在它还新鲜的时候
+    问，而不是等明天。人没醒就没有「这一小时」，所以那条信号是发问的总开关。
 
     题是**固定节拍**的，不是「够阈值才问」：哪怕过去一小时很平淡，也会照实
     说「电脑上没记录、手机没解锁」，然后问你那段时间在做什么。阈值（停留
@@ -70,9 +71,22 @@ from common import Day, header, load_config  # noqa: E402
 CFG = load_config()
 TZ = ZoneInfo(CFG["timezone"])
 
-# 只在白天到睡前问。凌晨扫出来的「你 03:00 在哪」没有意义，
-# 而且会吵醒人（如果推送开着）。
-ASK_FROM_HOUR = 8
+# 一天从什么时候开始问：**不是固定 08:00**，而是手机第一次亮屏 / 解锁。
+#
+# 手机上的 Tasker 会上报 `screen_on`（屏幕亮）和 `unlock`（解锁），中继按
+# 本地日期存着。当天第一条落在 `WAKE_AFTER_HOUR` 之后，才算这一天开始了；
+# 之后才发小时题 —— 睡到 10:00 就 10:00 开始，07:00 醒就 07:00 开始。
+#
+# ⚠️ `WAKE_AFTER_HOUR` 要和飞书的 `FEISHU_DAY_ROLL_HOUR` 对齐（默认都是 5）：
+#    在那之前解锁多半是半夜看时间，不该把「今天」提前开始。
+# ⚠️ `screen_on` 可能只是通知把屏幕点亮（人还在睡），`unlock` 才是真的拿起来
+#    用。默认两个都认；嫌启动太早的话把 LIVE_WAKE_METRICS 设成 `unlock`。
+WAKE_AFTER_HOUR = int(os.environ.get("LIVE_WAKE_AFTER_HOUR", "5"))
+WAKE_METRICS: tuple[str, ...] = tuple(
+    x.strip() for x in
+    os.environ.get("LIVE_WAKE_METRICS", "unlock,screen_on").split(",")
+    if x.strip()
+)
 # ⚠️ 这是**开区间上界**（`hour < ASK_UNTIL_HOUR`）。收尾定在 23:00 之后，
 #    这里必须是 24 而不是 23 —— 写 23 的话 23 点那一轮会在窗口检查处直接
 #    返回，收尾永远等不到。踩过一次这个坑，别改回去。
@@ -373,6 +387,43 @@ def _parse_iso(v: Any) -> datetime | None:
         return datetime.fromisoformat(str(v)).astimezone(TZ)
     except (TypeError, ValueError):
         return None
+
+
+def first_wake(events: list[dict], day_iso: str,
+               after_hour: int = WAKE_AFTER_HOUR) -> datetime | None:
+    """当天**第一条「人醒了」的时辰**（本地时间）。没有返回 None。
+
+    只认手机上报的 `screen_on` / `unlock`（见 WAKE_METRICS）。`after_hour`
+    之前的那些不算 —— 半夜亮屏看一眼不属于新的一天。
+
+    这是「几点开始提问」的唯一判据：生成器用它决定发不发小时题，飞书机器人
+    用同一个函数决定早上别打扰时段要不要为它让路。两边各写一份的话，
+    迟早会出现「生成了但永远推不出去」。
+    """
+    try:
+        d = date.fromisoformat(day_iso)
+    except ValueError:
+        return None
+    best: datetime | None = None
+    for e in events or []:
+        if not isinstance(e, dict):
+            continue
+        if str(e.get("domain") or "") != "phone":
+            continue
+        if str(e.get("metric") or "") not in WAKE_METRICS:
+            continue
+        dt = _parse_iso(e.get("ts_utc"))
+        if dt is None or dt.date() != d or dt.hour < after_hour:
+            continue
+        if best is None or dt < best:
+            best = dt
+    return best
+
+
+def day_started(events: list[dict], day_iso: str,
+                after_hour: int = WAKE_AFTER_HOUR) -> bool:
+    """手机今天已经亮过 / 解锁过了吗？见 `first_wake`。"""
+    return first_wake(events, day_iso, after_hour) is not None
 
 
 def rule_hourly(day_iso: str, stays: list[dict], events: list[dict],
@@ -924,8 +975,6 @@ def summary_questions(day_iso: str, stays: list[dict],
 
 def build(day: Day, base: str, key: str) -> list[dict]:
     events = relay_phone_events(day.iso, base, key)
-    stays = today_stays(day)
-    snap = relay_desktop(base, key)
     now = datetime.now(TZ)
 
     # 已经发过的（按 key）—— 同一小时只问一次，收尾一天一次
@@ -945,6 +994,8 @@ def build(day: Day, base: str, key: str) -> list[dict]:
         try:
             # ⚠️ 这里**不封盘**。封盘要等 push 成功（见 main()）—— 先封的话，
             #    一次推送失败会让这一天再也生不出收尾，而服务器上看不出异常。
+            stays = today_stays(day)
+            snap = relay_desktop(base, key)
             return known + summary_questions(day.iso, stays, events, snap, now=now)
         except Exception as e:  # noqa: BLE001
             print(f"  ⚠️  收尾题生成失败：{type(e).__name__}: {e}")
@@ -954,14 +1005,51 @@ def build(day: Day, base: str, key: str) -> list[dict]:
     if _summary_soon(now):
         return known
 
+    # ── 手机还没第一次亮屏 / 解锁：人还没醒，不出小时题 ──
+    #
+    # ⚠️ 原来这里是一刀切的 08:00（ASK_FROM_HOUR）。改成看手机的实际信号：
+    #    06:30 醒了就该 06:30 开始问，而不是干等到 8 点；睡到 10:00 也不该
+    #    在 08:00 对着空数据硬问。收尾题不受这条影响 —— 那是按钟点走的。
+    wake = first_wake(events, day.iso)
+    if wake is None:
+        print(f"  . 手机今天 {WAKE_AFTER_HOUR}:00 之后还没亮过 / 解锁过，先不问")
+        return known
+
+    stays = today_stays(day)
+    snap = relay_desktop(base, key)
     new: list[dict] = []
+
+    # ── 每小时一题：固定节拍，**任何一小时都不能空着** ──
+    #
+    # ⚠️ 这一条必须放在任务检查**前面**，而且不能被任务检查挤掉。
+    #    原来问责题是「替换」这一小时的小时题，于是 10、14、18、21 这四个
+    #    检查时段本该覆盖的那个小时**从来没被问过** —— 实测 13:04–14:04 整段
+    #    没有任何一题。「这一小时你在干嘛」和「那条任务做了没有」是两个问题，
+    #    后者回答不了前者。现在两条都发；多出来的只是一天四条。
+    #
+    # ⚠️ 生活活动题（见下面）也**不再**替换它。原来饭点那一小时只问
+    #    「午饭花了多久」，于是 13:00、19:00、21:00 三个小时的「你在干嘛」
+    #    被静默吞掉 —— 而那是每小时轮询的本职。现在先问小时题，答完之后
+    #    再问饭点题，两条都保留。
+    hour_key = f"hour-{day.iso}T{now:%H}"
+    if hour_key not in fired:
+        try:
+            q = rule_hourly(day.iso, stays, events, snap, now)
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠️  生成失败：{type(e).__name__}: {e}")
+            q = None
+        if q and q["_key"] not in fired:
+            new.append(q)
 
     # ── 生活活动：饭点 / 晚间各一题（见 life_slots.py）──
     #
-    # ⚠️ 它**占掉**那个整点的小时题，不是并列。理由：饭点问「这一小时你在
-    #    干嘛」得到的是又一句自由文本，而这里要的是**时长**（Life 维度目前
-    #    完全看不见吃饭洗澡的时间）。同一小时问两条只是增加打扰。
-    #    一个整点只问一次是硬约定 —— 第二次 tick 靠 fired 里的 key 挡住。
+    # ⚠️ 它和上面那条**并列**，排在小时题之后。理由：
+    #    · 小时题是每小时轮询的本职，不能被饭点吞掉；
+    #    · 饭点题问的是**时长**（Life 维度目前完全看不见吃饭洗澡的时间），
+    #      小时题答的是「这一小时你在干嘛」，两个问题都要。
+    #    推送端一次只发一题（飞书机器人的 awaiting），所以列表顺序就是
+    #    实际提问顺序：先小时题，答完再问饭点题。
+    #    一个整点各只问一次是硬约定 —— 第二次 tick 靠 fired 里的 key 挡住。
     slot = life_slots.slot_for_hour(now.hour)
     if slot:
         slot_key = f"life-{day.iso}-{slot['key']}"
@@ -973,22 +1061,6 @@ def build(day: Day, base: str, key: str) -> list[dict]:
                 slot_key, kind="routine", fmt="choice",
                 options=list(life_slots.OPTIONS), id_salt=slot_key,
             ))
-    # ── 每小时一题：固定节拍，**任何一小时都不能空着** ──
-    #
-    # ⚠️ 这一条必须放在任务检查**前面**，而且不能被任务检查挤掉。
-    #    原来问责题是「替换」这一小时的小时题，于是 10、14、18、21 这四个
-    #    检查时段本该覆盖的那个小时**从来没被问过** —— 实测 13:04–14:04 整段
-    #    没有任何一题。「这一小时你在干嘛」和「那条任务做了没有」是两个问题，
-    #    后者回答不了前者。现在两条都发；多出来的只是一天四条。
-    hour_key = f"hour-{day.iso}T{now:%H}"
-    if not slot and hour_key not in fired:
-        try:
-            q = rule_hourly(day.iso, stays, events, snap, now)
-        except Exception as e:  # noqa: BLE001
-            print(f"  ⚠️  生成失败：{type(e).__name__}: {e}")
-            q = None
-        if q and q["_key"] not in fired:
-            new.append(q)
 
     # ── 固定时段的任务检查（和上面那条并列，不是替换）──
     if now.hour in COMMITMENT_HOURS and not any(
@@ -1099,9 +1171,9 @@ def main() -> int:
     header(f"Live questions · {day.iso}")
 
     now = datetime.now(TZ)
-    if args.date == "today" and not (ASK_FROM_HOUR <= now.hour < ASK_UNTIL_HOUR):
+    if args.date == "today" and now.hour >= ASK_UNTIL_HOUR:
         # 静默退出，**不算失败** —— timer 每 30 分钟拉一次，夜里那次本来就该没事做。
-        print(f"  . {now.strftime('%H:%M')} 不在 {ASK_FROM_HOUR}:00–{ASK_UNTIL_HOUR}:00 之间，不问")
+        print(f"  . {now.strftime('%H:%M')} 已过 {ASK_UNTIL_HOUR}:00，不问")
         return 0
 
     endpoint = relay()

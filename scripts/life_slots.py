@@ -10,9 +10,11 @@
     所以这里补一条**确定性的提问 + 确定性的解析**：
 
       1. 服务器上 `live_questions.py` 在固定时段发一道选择题
-         （午饭 / 晚饭 / 晚间杂事），选项直接是时长；
+         （午饭 / 晚饭 / 晚间杂事），选项直接是时长；饭点题同时问
+         「有没有吃 / 吃了什么」，食物写在选项后的备注里。
+         **它不再替换那个整点的小时题** —— 小时题照常先问，答完再问它。
       2. 笔记本侧 `parse_life_activity.py` 把答案读回来，写成
-         `manual/activity` 事件（带开始时间和分钟数）；
+         `manual/activity` 事件（带开始时间和分钟数，备注进 meta.food）；
       3. `normalize` 把它放进 timeline，`publish_life_site` 把它并进
          Life 维度和 collapsedHours 的并集。
 
@@ -90,6 +92,15 @@ def slot_for_hour(hour: int) -> dict | None:
 def question_text(slot: dict) -> str:
     # ⚠️ 和 live_questions 的其它题一样：只写具体的时间区间，不写
     #    today / yesterday —— 题可能隔天才被读到。
+    #
+    # 饭点题要一次问清三件事：有没有吃 / 吃了什么 / 花了多久。
+    # 「吃了什么」写在选项后面的备注里（机器人提示 reply 1-5 + note），
+    # 落到 `manual/activity` 的 meta.food，进日记；时长仍然由选项决定。
+    if slot["kind"] == "meal":
+        return (f"{slot['start']}–{slot['end']} · "
+                f"{slot['label']}: did you eat? What did you have? "
+                "How long did it take? (reply with the minutes, then the food "
+                "after the number, e.g. “2 rice and chicken”)")
     return (f"{slot['start']}–{slot['end']} · how long did "
             f"{slot['label']} take?")
 

@@ -405,11 +405,15 @@ def build_user_prompt(tl: dict, day: Day, carryover: list[str],
                 hhmm = datetime.fromisoformat(start).astimezone(day.tz).strftime("%H:%M")
             except (TypeError, ValueError):
                 hhmm = start[11:16]
+            food = str(a.get("food") or "").strip()
             lines.append(f"- [{hhmm}] {a.get('label') or a.get('kind') or 'activity'}: "
-                         f"{a.get('minutes')} min")
+                         f"{a.get('minutes')} min"
+                         + (f" — {food}" if food else ""))
         lines.append("- Chosen by the user from fixed options when the system asked. It is")
         lines.append("  **first-hand** but it is NOT measured screen time: do not turn these")
         lines.append("  into Time Log blocks and do not add them to the recorded total.")
+        lines.append("- Anything after “—” is what the user said they ate, in their own")
+        lines.append("  words. Mention it as they said it; do not estimate portions from it.")
         lines.append("")
 
     health = tl.get("health") or {}

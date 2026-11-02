@@ -470,6 +470,13 @@ def build_location(
                 })
         elif metric == "transport":
             minutes = num(row["value_num"], 1) or 0.0
+            # 单条超过一天 = 上游把多天合成了一条 track（见 collect_phone
+            # 的 MAX_FALLBACK_TRIP_MIN）。这种行不是通勤，**整条丢掉**；
+            # 只把它封顶到 1440 会让 Transport 维度显示成整整 24 小时。
+            if minutes > 1440:
+                print(f"  ⚠️  location: 忽略 {minutes:.0f} 分钟的 transport 行 "
+                      f"（{row['ts_utc']}，超过一天，上游 track 跨天了）")
+                continue
             if minutes > 0:
                 moving += minutes
                 meta = meta_of(row)
