@@ -3,5 +3,8 @@ build/
 LifeBridge.apk
 *.idsig
 
+# 给 IDE 用的 android.jar（26MB，由 build.sh 自动复制）
+libs/
+
 # 调试签名（不要提交）
 debug.keystore

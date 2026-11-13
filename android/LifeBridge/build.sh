@@ -11,6 +11,11 @@ ANDROID_JAR="$SDK/platforms/android-36/android.jar"
 [ -f "$BT/aapt2.exe" ] || { echo "找不到 build-tools：$BT"; exit 1; }
 [ -f "$ANDROID_JAR" ] || { echo "找不到 android.jar：$ANDROID_JAR"; exit 1; }
 
+# IDE（VSCode Java 扩展）靠 libs/android.jar 解析 android.* 的 import；
+# 这里保证它存在，且不提交进仓库。
+mkdir -p libs
+[ -f libs/android.jar ] || cp "$ANDROID_JAR" libs/android.jar
+
 OUT=build
 rm -rf "$OUT"
 mkdir -p "$OUT/gen" "$OUT/classes" "$OUT/dex"

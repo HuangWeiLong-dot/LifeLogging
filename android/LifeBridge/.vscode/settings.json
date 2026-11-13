@@ -1,0 +1,7 @@
+{
+  // 如果直接把 android/LifeBridge 作为工作区打开，用这份（路径相对本目录）。
+  // 打开仓库根目录时用的是仓库根的 .vscode/settings.json。
+  "java.project.sourcePaths": ["src", "build/gen"],
+  "java.project.referencedLibraries": ["libs/*.jar"],
+  "java.configuration.updateBuildConfiguration": "automatic"
+}
