@@ -224,6 +224,7 @@ def phone_server(day: str) -> dict | None:
         music = {
             "title": music_row["value_text"],
             "app": (music_row.get("meta") or {}).get("app"),
+            "at": base.iso(base.to_utc(music_row.get("ts_utc"))),
         }
 
     net_row = newest("network", need_text=True)

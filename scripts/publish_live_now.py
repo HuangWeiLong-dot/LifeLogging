@@ -336,7 +336,7 @@ def phone_now(conn, day: str) -> dict | None:
 
     # 正在听什么：取当天最新一条 music 事件。
     music_row = conn.execute(
-        """SELECT value_text, meta_json FROM events
+        """SELECT value_text, meta_json, ts_utc FROM events
            WHERE day_local = ? AND domain = 'phone' AND metric = 'music'
            ORDER BY ts_utc DESC LIMIT 1""",
         (day,),
@@ -347,7 +347,12 @@ def phone_now(conn, day: str) -> dict | None:
             mmeta = json.loads(music_row["meta_json"] or "{}")
         except (TypeError, ValueError):
             mmeta = {}
-        music = {"title": music_row["value_text"], "app": mmeta.get("app")}
+        # at：前端靠它判断「现在还在放」还是「今天最后放的一首」
+        music = {
+            "title": music_row["value_text"],
+            "app": mmeta.get("app"),
+            "at": iso(to_utc(music_row["ts_utc"])),
+        }
 
     net_row = conn.execute(
         """SELECT value_text FROM events
