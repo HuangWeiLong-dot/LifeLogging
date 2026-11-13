@@ -72,6 +72,7 @@ public final class Heartbeat {
                     JSONObject e = new JSONObject();
                     e.put("ts", now);
                     e.put("domain", "phone");
+            e.put("source", "lifebridge");
                     e.put("metric", "battery");
                     e.put("value_num", Math.round(level * 100.0 / scale));
                     e.put("meta", meta);
@@ -93,6 +94,7 @@ public final class Heartbeat {
             JSONObject e = new JSONObject();
             e.put("ts", now);
             e.put("domain", "phone");
+            e.put("source", "lifebridge");
             e.put("metric", "network");
             e.put("value_text", mode);
             events.put(e);

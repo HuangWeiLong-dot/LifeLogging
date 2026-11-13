@@ -111,6 +111,7 @@ public class SettingsActivity extends Activity {
             JSONObject e = new JSONObject();
             e.put("ts", System.currentTimeMillis() / 1000);
             e.put("domain", "phone");
+            e.put("source", "lifebridge");
             // 专用 metric：不会被当成音乐或别的数据
             e.put("metric", "bridge_test");
             e.put("value_text", "Life Bridge - Connectivity Test");

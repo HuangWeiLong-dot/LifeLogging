@@ -32,8 +32,8 @@ bash build.sh          # → LifeBridge.apk
 改 `version.properties`：
 
 ```properties
-versionCode=8      # 必须递增，否则不能覆盖安装
-versionName=1.7
+versionCode=9      # 必须递增，否则不能覆盖安装
+versionName=1.8
 ```
 
 manifest 里**不写**版本号——写死会覆盖 `aapt2` 传入的参数。

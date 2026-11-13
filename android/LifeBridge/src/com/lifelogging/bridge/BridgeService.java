@@ -79,6 +79,7 @@ public class BridgeService extends NotificationListenerService {
             JSONObject e = new JSONObject();
             e.put("ts", System.currentTimeMillis() / 1000);
             e.put("domain", "phone");
+            e.put("source", "lifebridge");
             e.put("metric", metric);
             JSONArray events = new JSONArray();
             events.put(e);
@@ -245,6 +246,7 @@ public class BridgeService extends NotificationListenerService {
             JSONObject e = new JSONObject();
             e.put("ts", System.currentTimeMillis() / 1000);
             e.put("domain", "phone");
+            e.put("source", "lifebridge");
             e.put("metric", "music_position");
             e.put("value_num", posMs / 1000);
             e.put("value_text", title);
@@ -289,6 +291,7 @@ public class BridgeService extends NotificationListenerService {
             JSONObject e = new JSONObject();
             e.put("ts", System.currentTimeMillis() / 1000);
             e.put("domain", "phone");
+            e.put("source", "lifebridge");
             e.put("metric", "music");
             // 兼容现有解析：没有歌手时就是纯歌名
             e.put("value_text", TextUtils.isEmpty(artist) ? title : artist + " - " + title);
@@ -356,6 +359,7 @@ public class BridgeService extends NotificationListenerService {
             JSONObject e = new JSONObject();
             e.put("ts", now / 1000);
             e.put("domain", "phone");
+            e.put("source", "lifebridge");
             e.put("metric", "payment");
             e.put("value_num", amount);
             e.put("value_text", pkg.contains("Alipay") ? "Alipay" : "WeChat");
