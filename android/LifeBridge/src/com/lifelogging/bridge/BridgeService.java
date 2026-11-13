@@ -195,11 +195,14 @@ public class BridgeService extends NotificationListenerService {
         public void run() {
             if (!ticking) return;
             sendPosition();
-            tickHandler.postDelayed(this, 30_000);
+            tickHandler.postDelayed(this, 10_000);
         }
     };
 
-    /** 只在播放中打点；暂停就停，避免位置一直往上漂。 */
+    /**
+     * 播放中每 10 秒打点；**播放/暂停/拖动时立即补一条**。
+     * 位置事件里带 meta.playing，/now 不再靠自己猜「是不是还在放」。
+     */
     private void syncTicker(MediaController mc) {
         if (mc == null) {
             ticking = false;
@@ -208,6 +211,7 @@ public class BridgeService extends NotificationListenerService {
         }
         PlaybackState st = mc.getPlaybackState();
         boolean playing = st != null && st.getState() == PlaybackState.STATE_PLAYING;
+        sendPosition();  // 状态一变就推，不用等下一个 10 秒
         if (playing && !ticking) {
             ticking = true;
             tickHandler.post(tick);
@@ -222,23 +226,29 @@ public class BridgeService extends NotificationListenerService {
         if (mc == null) return;
         PlaybackState st = mc.getPlaybackState();
         MediaMetadata md = mc.getMetadata();
-        if (st == null || md == null || st.getState() != PlaybackState.STATE_PLAYING) return;
+        if (st == null || md == null) return;
 
         String title = md.getString(MediaMetadata.METADATA_KEY_TITLE);
         if (TextUtils.isEmpty(title)) return;
 
+        boolean playing = st.getState() == PlaybackState.STATE_PLAYING;
         long posMs = st.getPosition();
-        long since = SystemClock.elapsedRealtime() - st.getLastPositionUpdateTime();
-        if (since > 0) posMs += since;
+        if (playing) {
+            long since = SystemClock.elapsedRealtime() - st.getLastPositionUpdateTime();
+            if (since > 0) posMs += since;
+        }
         if (posMs < 0) posMs = 0;
 
         try {
+            JSONObject meta = new JSONObject();
+            meta.put("playing", playing);
             JSONObject e = new JSONObject();
             e.put("ts", System.currentTimeMillis() / 1000);
             e.put("domain", "phone");
             e.put("metric", "music_position");
             e.put("value_num", posMs / 1000);
             e.put("value_text", title);
+            e.put("meta", meta);
             JSONArray events = new JSONArray();
             events.put(e);
             JSONObject body = new JSONObject();

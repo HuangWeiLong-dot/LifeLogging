@@ -254,10 +254,14 @@ def phone_server(day: str) -> dict | None:
             None,
         )
         pos_at = base.to_utc(pos_row.get("ts_utc")) if pos_row else None
-        playing = (
-            (datetime.now(timezone.utc) - pos_at).total_seconds() < 90
-            if pos_at else None
-        )
+        # 新版 App 的 meta.playing 是准的（暂停/拖动立即推）；旧版按 90 秒心跳推算
+        playing = None
+        if pos_row:
+            pmeta = pos_row.get("meta") or {}
+            if "playing" in pmeta:
+                playing = bool(pmeta.get("playing"))
+            elif pos_at is not None:
+                playing = (datetime.now(timezone.utc) - pos_at).total_seconds() < 90
         music = {
             "title": track_title,
             "artist": mmeta.get("artist"),

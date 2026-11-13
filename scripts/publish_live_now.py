@@ -452,16 +452,25 @@ def phone_now(conn, day: str) -> dict | None:
         track_title = mmeta.get("title") or music_row["value_text"]
         # App 每 30 秒发的播放位置（value_text 用纯歌名），用于歌词高亮
         pos_row = conn.execute(
-            """SELECT value_num, ts_utc FROM events
+            """SELECT value_num, ts_utc, meta_json FROM events
                WHERE day_local = ? AND domain = 'phone' AND metric = 'music_position'
                  AND value_text = ?
                ORDER BY ts_utc DESC LIMIT 1""",
             (day, track_title),
         ).fetchone()
-        # App 只在播放中每 30 秒发位置；90 秒内还有心跳就认为仍在播放。
-        # 没有位置数据（旧版 App / Tasker）时给 None，前端退回按「30 分钟内」判断。
+        # 新版 App 在 meta.playing 里直接给状态（播放/暂停/拖动都会立即推）；
+        # 旧版没有这个字段时退回「90 秒内还有心跳就算在播」。
         pos_at = to_utc(pos_row["ts_utc"]) if pos_row is not None else None
-        playing = (now_utc() - pos_at).total_seconds() < 90 if pos_at else None
+        playing = None
+        if pos_row is not None:
+            try:
+                pmeta = json.loads(pos_row["meta_json"] or "{}")
+            except (TypeError, ValueError):
+                pmeta = {}
+            if "playing" in pmeta:
+                playing = bool(pmeta.get("playing"))
+            elif pos_at is not None:
+                playing = (now_utc() - pos_at).total_seconds() < 90
         music = {
             # 手机 App 会单独给 title/artist/album；Tasker 只有整行 value_text。
             "title": track_title,
