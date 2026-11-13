@@ -814,6 +814,8 @@ def t_phone_state():
          "meta": {"app": "com.netease.cloudmusic"}},
         {"ts_utc": iso(t0 + timedelta(minutes=5)), "metric": "music", "value_text": "Song B",
          "meta": {"app": "com.netease.cloudmusic"}},
+        # Tasker 变量没替换时会把 %MTRACK 原样发上来；不能算成一首歌
+        {"ts_utc": iso(t0 + timedelta(minutes=6)), "metric": "music", "value_text": "%MTRACK"},
         {"ts_utc": iso(t0), "metric": "notification", "value_text": "com.tencent.mm"},
         {"ts_utc": iso(t0 + timedelta(minutes=1)), "metric": "notification",
          "value_text": "com.tencent.mm"},

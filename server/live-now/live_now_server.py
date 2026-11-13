@@ -218,7 +218,14 @@ def phone_server(day: str) -> dict | None:
             "at": base.iso(base.to_utc(batt.get("ts_utc"))),
         }
 
-    music_row = newest("music", need_text=True)
+    # Tasker 变量没替换时会把 %MTRACK 原样发上来，它不是歌名
+    music_row = next(
+        (e for e in sorted(events, key=ts, reverse=True)
+         if e.get("metric") == "music"
+         and e.get("value_text")
+         and not str(e["value_text"]).startswith("%")),
+        None,
+    )
     music = None
     if music_row:
         mmeta = music_row.get("meta") or {}
@@ -230,7 +237,11 @@ def phone_server(day: str) -> dict | None:
             "raw": music_row["value_text"],
             "app": mmeta.get("app"),
             "at": base.iso(base.to_utc(music_row.get("ts_utc"))),
-            "plays": sum(1 for e in events if e.get("metric") == "music"),
+            "plays": sum(
+                1 for e in events
+                if e.get("metric") == "music"
+                and not str(e.get("value_text") or "").startswith("%")
+            ),
         }
 
     net_row = newest("network", need_text=True)

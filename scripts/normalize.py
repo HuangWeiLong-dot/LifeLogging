@@ -1172,7 +1172,9 @@ def summarize_phone(events: list[dict[str, Any]]) -> dict[str, Any]:
                 measured[raw_app] = measured.get(raw_app, 0.0) + secs
         elif met == "music":
             title = (e.get("value_text") or "").strip()
-            if title:
+            # `%` 开头 = Tasker 变量没被替换（%MTRACK），不是歌名。
+            # 实测一天能刷出 20 多条，不挡会直接变成「最常听的歌」。
+            if title and not title.startswith("%"):
                 music.append((ts, title, str((e.get("meta") or {}).get("app") or "")))
         elif met == "notification":
             app = (e.get("value_text") or "").strip()

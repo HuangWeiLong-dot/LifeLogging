@@ -338,6 +338,7 @@ def phone_now(conn, day: str) -> dict | None:
     music_row = conn.execute(
         """SELECT value_text, meta_json, ts_utc FROM events
            WHERE day_local = ? AND domain = 'phone' AND metric = 'music'
+             AND value_text IS NOT NULL AND substr(value_text, 1, 1) != '%'
            ORDER BY ts_utc DESC LIMIT 1""",
         (day,),
     ).fetchone()
@@ -350,7 +351,8 @@ def phone_now(conn, day: str) -> dict | None:
         # at：前端靠它判断「现在还在放」还是「今天最后放的一首」
         music_plays = conn.execute(
             """SELECT COUNT(*) FROM events
-               WHERE day_local = ? AND domain = 'phone' AND metric = 'music'""",
+               WHERE day_local = ? AND domain = 'phone' AND metric = 'music'
+                 AND value_text IS NOT NULL AND substr(value_text, 1, 1) != '%'""",
             (day,),
         ).fetchone()[0]
         music = {
