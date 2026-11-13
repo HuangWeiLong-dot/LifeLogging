@@ -84,15 +84,22 @@ def lyrics_for(artist: str | None, title: str | None,
     """返回带时间戳的 LRC 文本；查不到返回 None。"""
     artist = (artist or "").strip()
     title = (title or "").strip()
+    # 个别曲目的元数据里带非法字节，解码后会留下孤立代理字符（\udc81 之类）。
+    # 它通常顶替的是一个分隔符（`A、B` 的 `、`），所以歌手名里换成逗号，
+    # 标题里直接去掉。
+    artist = "".join(
+        ", " if 0xD800 <= ord(ch) <= 0xDFFF else ch for ch in artist
+    ).replace(",,", ",").replace(" ,", ",")
+    title = "".join(ch for ch in title if not (0xD800 <= ord(ch) <= 0xDFFF))
     # 播放器用中文顿号/全角逗号分隔多个歌手，LRCLIB 只认英文逗号。
     # 例：`Daniel Caesar、Bon Iver` 会 404，换成 `Daniel Caesar, Bon Iver` 才命中。
     artist = artist.replace("、", ", ").replace("，", ", ").replace("＆", " & ")
     # 标题里的弯引号和 (Explicit) 后缀也会让精确匹配失败：
     # `Emily’s Song (Explicit)` → `Emily's Song`
     title = title.replace("’", "'").replace("‘", "'")
-    for suffix in (" (Explicit)", " [Explicit]", " (explicit)", " [explicit]"):
+    for suffix in ("(Explicit)", "[Explicit]", "(explicit)", "[explicit]"):
         if title.endswith(suffix):
-            title = title[: -len(suffix)].strip()
+            title = title[: -len(suffix)].rstrip()
             break
     if not artist or not title:
         return None
@@ -114,6 +121,10 @@ def lyrics_for(artist: str | None, title: str | None,
     attempts.append({"artist_name": artist, "track_name": title})
     if duration:
         attempts[0]["duration"] = int(duration)
+    # 合作曲目的第二歌手经常是乱码/内部 ID；主歌手命中就够了
+    primary = artist.split(",")[0].strip()
+    if primary and primary != artist:
+        attempts.append({"artist_name": primary, "track_name": title})
 
     text = None
     for params in attempts:
