@@ -1,0 +1,7 @@
+# 构建产物
+build/
+LifeBridge.apk
+*.idsig
+
+# 调试签名（不要提交）
+debug.keystore

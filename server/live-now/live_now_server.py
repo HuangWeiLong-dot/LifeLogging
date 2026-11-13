@@ -221,9 +221,14 @@ def phone_server(day: str) -> dict | None:
     music_row = newest("music", need_text=True)
     music = None
     if music_row:
+        mmeta = music_row.get("meta") or {}
         music = {
-            "title": music_row["value_text"],
-            "app": (music_row.get("meta") or {}).get("app"),
+            "title": mmeta.get("title") or music_row["value_text"],
+            "artist": mmeta.get("artist"),
+            "album": mmeta.get("album"),
+            "duration": mmeta.get("duration"),
+            "raw": music_row["value_text"],
+            "app": mmeta.get("app"),
             "at": base.iso(base.to_utc(music_row.get("ts_utc"))),
             "plays": sum(1 for e in events if e.get("metric") == "music"),
         }

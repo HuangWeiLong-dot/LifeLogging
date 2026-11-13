@@ -819,6 +819,10 @@ def t_phone_state():
          "value_text": "com.tencent.mm"},
         {"ts_utc": iso(t0 + timedelta(minutes=2)), "metric": "notification",
          "value_text": "com.android.chrome"},
+        {"ts_utc": iso(t0 + timedelta(minutes=5)), "metric": "payment",
+         "value_num": 23.5, "value_text": "Alipay"},
+        {"ts_utc": iso(t0 + timedelta(minutes=6)), "metric": "payment",
+         "value_num": 10.0, "value_text": "WeChat"},
     ]
     s = N.summarize_phone(evs)
 
@@ -837,6 +841,9 @@ def t_phone_state():
     assert s["music"]["plays"] == 2 and s["music"]["last"] == "Song B", s["music"]
     nf = s["notifications"]
     assert nf["total"] == 3 and dict(nf["by_app"])["WeChat"] == 2, nf
+
+    assert s["payments"]["count"] == 2, s["payments"]
+    assert s["payments"]["total"] == 33.5, s["payments"]
 
     # 停报 5 小时之后的那一条，不能把整段都算成「充电中」
     s2 = N.summarize_phone([

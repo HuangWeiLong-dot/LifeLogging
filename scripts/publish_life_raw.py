@@ -224,6 +224,10 @@ def build_events(conn: sqlite3.Connection, day: str) -> list[dict[str, Any]]:
             meta = json.loads(row["meta_json"] or "{}")
         except (TypeError, ValueError):
             meta = {}
+        # 支付记录（金额 + 商户/备注）整个不进公开归档。
+        # 通知正文已经脱敏，财务数据没有「脱敏后还有意义」的形态，只能整条丢弃。
+        if row["domain"] == "phone" and row["metric"] == "payment":
+            continue
         if row["domain"] == "phone" and row["metric"] == "notification":
             meta = {k: v for k, v in meta.items() if k not in NOTIFICATION_DROP_META}
             meta["body"] = "redacted"

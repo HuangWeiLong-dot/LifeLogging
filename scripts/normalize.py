@@ -1138,6 +1138,7 @@ def summarize_phone(events: list[dict[str, Any]]) -> dict[str, Any]:
     measured: dict[str, float] = {}
     music: list[tuple[datetime, str, str]] = []
     notif: dict[str, int] = {}
+    payments: list[tuple[datetime, float, str]] = []
 
     for e in events:
         ts = _parse(e.get("ts_utc"))
@@ -1178,6 +1179,14 @@ def summarize_phone(events: list[dict[str, Any]]) -> dict[str, Any]:
             if app:
                 # 按包名计数，出报表时再翻译成人话
                 notif[app] = notif.get(app, 0) + 1
+        elif met == "payment" and e.get("value_num") is not None:
+            # 手机 App 从支付通知里抓的金额。**只留本地**：
+            # publish_life_raw 会整条丢弃，站点聚合里也没有这个字段。
+            payments.append((
+                ts,
+                float(e.get("value_num") or 0),
+                (e.get("value_text") or "").strip() or "unknown",
+            ))
 
     unlocks.sort()
     switches.sort(key=lambda x: x[0])
@@ -1307,6 +1316,21 @@ def summarize_phone(events: list[dict[str, Any]]) -> dict[str, Any]:
             "by_app": [[a, c] for a, c in sorted(by_name.items(), key=lambda x: -x[1])[:40]],
         }
 
+    # ---- 消费（仅本地；不上站点、不进公开归档）----
+    payments_summary = None
+    if payments:
+        payments.sort(key=lambda x: x[0])
+        by_channel: dict[str, float] = {}
+        for _, amount, channel in payments:
+            by_channel[channel] = by_channel.get(channel, 0.0) + amount
+        payments_summary = {
+            "count": len(payments),
+            "total": round(sum(a for _, a, _ in payments), 2),
+            "by_channel": [[c, round(v, 2)]
+                           for c, v in sorted(by_channel.items(), key=lambda x: -x[1])],
+            "last": round(payments[-1][1], 2),
+        }
+
     return {
         "unlocks": len(unlocks),
         "app_switches": len(switches),
@@ -1320,6 +1344,7 @@ def summarize_phone(events: list[dict[str, Any]]) -> dict[str, Any]:
         "network": network_summary,
         "music": music_summary,
         "notifications": notif_summary,
+        "payments": payments_summary,
         # **屏幕使用时间**（亮屏总时长）。这是拿 screen_on / screen_off
         # 直接测出来的，不是推的 —— 手机加了 Display 事件之后才有。
         "screen_minutes": round(screen_seconds / 60.0, 1),

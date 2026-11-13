@@ -210,6 +210,19 @@ def write_phone(day_iso: str, tl: dict) -> Path | None:
                 body.append(f"| {title} | {plays} |")
         body.append("")
 
+    payments = phone.get("payments")
+    if payments:
+        body += ["## Payments (local only)", ""]
+        body.append(
+            f"- {payments['count']} transaction(s), total **{payments['total']:.2f}**"
+        )
+        by_channel = payments.get("by_channel") or []
+        if by_channel:
+            body += ["", "| Channel | Amount |", "|---|---|"]
+            for name, amount in by_channel:
+                body.append(f"| {name} | {amount:.2f} |")
+        body.append("")
+
     notif = phone.get("notifications")
     if notif:
         body += ["## Notifications", ""]

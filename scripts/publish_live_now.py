@@ -354,7 +354,12 @@ def phone_now(conn, day: str) -> dict | None:
             (day,),
         ).fetchone()[0]
         music = {
-            "title": music_row["value_text"],
+            # 手机 App 会单独给 title/artist/album；Tasker 只有整行 value_text。
+            "title": mmeta.get("title") or music_row["value_text"],
+            "artist": mmeta.get("artist"),
+            "album": mmeta.get("album"),
+            "duration": mmeta.get("duration"),
+            "raw": music_row["value_text"],
             "app": mmeta.get("app"),
             "at": iso(to_utc(music_row["ts_utc"])),
             "plays": int(music_plays or 0),

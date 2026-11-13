@@ -1,0 +1,194 @@
+package com.lifelogging.bridge;
+
+import android.app.Notification;
+import android.content.ComponentName;
+import android.media.MediaMetadata;
+import android.media.session.MediaController;
+import android.media.session.MediaSessionManager;
+import android.os.Bundle;
+import android.service.notification.NotificationListenerService;
+import android.service.notification.StatusBarNotification;
+import android.text.TextUtils;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * 一个通知监听服务干两件事：
+ *
+ *   1. 媒体会话（MediaSession）→ music 事件：歌名 / 歌手 / 专辑 / 时长
+ *      比 Tasker 的 %MTRACK 多出专辑和时长，歌手也不会丢。
+ *   2. 支付通知 → payment 事件：金额 + 来源 App
+ *      支付宝一般有通知；微信支付大多没有，所以它只是补充，不是账本。
+ *
+ * 注意：payment 事件**不进公开归档**（publish_life_raw 已按 metric 过滤）。
+ */
+public class BridgeService extends NotificationListenerService {
+
+    private static final String[] PAY_APPS = {
+        "com.eg.android.AlipayGphone",   // 支付宝
+        "com.tencent.mm",                // 微信
+    };
+    private static final Pattern AMOUNT =
+        Pattern.compile("(?:¥|￥)\\s*([0-9]+(?:\\.[0-9]{1,2})?)");
+
+    private MediaSessionManager mediaManager;
+    private MediaController controller;
+    private String lastTrack = "";
+
+    private String lastPay = "";
+    private long lastPayAt = 0L;
+
+    // ── 通知监听连接 ──────────────────────────────────────────────
+
+    @Override
+    public void onListenerConnected() {
+        try {
+            mediaManager = (MediaSessionManager) getSystemService(MEDIA_SESSION_SERVICE);
+            ComponentName me = new ComponentName(this, BridgeService.class);
+            mediaManager.addOnActiveSessionsChangedListener(this::bindSessions, me);
+            bindSessions(mediaManager.getActiveSessions(me));
+        } catch (Exception ignored) {
+            // 没有通知使用权时这里会抛 SecurityException
+        }
+    }
+
+    // ── 媒体会话 ─────────────────────────────────────────────────
+
+    private void bindSessions(List<MediaController> sessions) {
+        if (sessions == null) return;
+        String want = Config.mediaPackage(this);
+        for (MediaController mc : sessions) {
+            String pkg = mc.getPackageName();
+            if (!want.isEmpty() && !want.equals(pkg)) continue;
+            if (controller != null) {
+                controller.unregisterCallback(metadataCallback);
+            }
+            controller = mc;
+            mc.registerCallback(metadataCallback);
+            publishTrack(mc.getMetadata(), pkg);
+            return;
+        }
+    }
+
+    private final MediaController.Callback metadataCallback = new MediaController.Callback() {
+        @Override
+        public void onMetadataChanged(MediaMetadata metadata) {
+            if (controller != null) {
+                publishTrack(metadata, controller.getPackageName());
+            }
+        }
+    };
+
+    private void publishTrack(MediaMetadata md, String pkg) {
+        if (md == null) return;
+
+        String title = md.getString(MediaMetadata.METADATA_KEY_TITLE);
+        String artist = md.getString(MediaMetadata.METADATA_KEY_ARTIST);
+        String album = md.getString(MediaMetadata.METADATA_KEY_ALBUM);
+        long durationMs = md.getLong(MediaMetadata.METADATA_KEY_DURATION);
+
+        if (TextUtils.isEmpty(title)) return;
+
+        // 同一首歌会反复回调（进度、缓冲），去重
+        String signature = pkg + "|" + title + "|" + artist;
+        if (signature.equals(lastTrack)) return;
+        lastTrack = signature;
+
+        try {
+            JSONObject meta = new JSONObject();
+            meta.put("app", pkg);
+            meta.put("title", title);
+            if (!TextUtils.isEmpty(artist)) meta.put("artist", artist);
+            if (!TextUtils.isEmpty(album)) meta.put("album", album);
+            if (durationMs > 0) meta.put("duration", durationMs / 1000);
+
+            JSONObject e = new JSONObject();
+            e.put("ts", System.currentTimeMillis() / 1000);
+            e.put("domain", "phone");
+            e.put("metric", "music");
+            // 兼容现有解析：没有歌手时就是纯歌名
+            e.put("value_text", TextUtils.isEmpty(artist) ? title : artist + " - " + title);
+            e.put("meta", meta);
+
+            JSONObject body = new JSONObject();
+            JSONArray events = new JSONArray();
+            events.put(e);
+            body.put("events", events);
+            Http.post(this, body.toString());
+        } catch (Exception ignored) {
+        }
+    }
+
+    // ── 支付通知 ─────────────────────────────────────────────────
+
+    @Override
+    public void onNotificationPosted(StatusBarNotification sbn) {
+        String pkg = sbn.getPackageName();
+        if (!isPaymentApp(pkg)) return;
+
+        Notification n = sbn.getNotification();
+        if (n == null) return;
+
+        Bundle ex = n.extras;
+        String title = text(ex.getCharSequence(Notification.EXTRA_TITLE));
+        String body = text(ex.getCharSequence(Notification.EXTRA_TEXT));
+        String big = text(ex.getCharSequence(Notification.EXTRA_BIG_TEXT));
+        String all = (title + " " + body + " " + big).trim();
+
+        Matcher m = AMOUNT.matcher(all);
+        if (!m.find()) return;
+
+        double amount;
+        try {
+            amount = Double.parseDouble(m.group(1));
+        } catch (Exception e) {
+            return;
+        }
+        if (amount <= 0) return;
+
+        // 同一条通知可能被重复投递；90 秒内同样的金额+文案只记一次
+        String signature = pkg + "|" + amount + "|" + all;
+        long now = System.currentTimeMillis();
+        if (signature.equals(lastPay) && now - lastPayAt < 90_000L) return;
+        lastPay = signature;
+        lastPayAt = now;
+
+        try {
+            JSONObject meta = new JSONObject();
+            meta.put("app", pkg);
+            meta.put("title", title);
+            meta.put("text", body);
+
+            JSONObject e = new JSONObject();
+            e.put("ts", now / 1000);
+            e.put("domain", "phone");
+            e.put("metric", "payment");
+            e.put("value_num", amount);
+            e.put("value_text", pkg.contains("Alipay") ? "Alipay" : "WeChat");
+            e.put("meta", meta);
+
+            JSONObject bodyJson = new JSONObject();
+            JSONArray events = new JSONArray();
+            events.put(e);
+            bodyJson.put("events", events);
+            Http.post(this, bodyJson.toString());
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static boolean isPaymentApp(String pkg) {
+        for (String p : PAY_APPS) {
+            if (p.equals(pkg)) return true;
+        }
+        return false;
+    }
+
+    private static String text(CharSequence cs) {
+        return cs == null ? "" : cs.toString();
+    }
+}
