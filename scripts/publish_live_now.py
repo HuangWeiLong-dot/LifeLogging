@@ -84,6 +84,9 @@ def lyrics_for(artist: str | None, title: str | None,
     """返回带时间戳的 LRC 文本；查不到返回 None。"""
     artist = (artist or "").strip()
     title = (title or "").strip()
+    # 播放器用中文顿号/全角逗号分隔多个歌手，LRCLIB 只认英文逗号。
+    # 例：`Daniel Caesar、Bon Iver` 会 404，换成 `Daniel Caesar, Bon Iver` 才命中。
+    artist = artist.replace("、", ", ").replace("，", ", ").replace("＆", " & ")
     if not artist or not title:
         return None
 
