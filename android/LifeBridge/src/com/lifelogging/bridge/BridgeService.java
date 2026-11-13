@@ -392,9 +392,11 @@ public class BridgeService extends NotificationListenerService {
         }
         if (art == null) return null;
         try {
-            Bitmap scaled = Bitmap.createScaledBitmap(art, 96, 96, true);
+            // 160 而不是 96：站点按 132px 显示，96 是放大后糊；q75 在
+            // 5-8KB 之间，/now 的 64KB 上限和 JSONL 体积都还宽裕。
+            Bitmap scaled = Bitmap.createScaledBitmap(art, 160, 160, true);
             ByteArrayOutputStream bos = new ByteArrayOutputStream();
-            scaled.compress(Bitmap.CompressFormat.JPEG, 60, bos);
+            scaled.compress(Bitmap.CompressFormat.JPEG, 75, bos);
             if (scaled != art) scaled.recycle();
             return Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP);
         } catch (Exception e) {
