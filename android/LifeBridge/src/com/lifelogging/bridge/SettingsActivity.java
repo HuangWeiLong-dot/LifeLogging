@@ -78,25 +78,41 @@ public class SettingsActivity extends Activity {
         return flat != null && flat.contains(getPackageName());
     }
 
-    /** 发一条测试事件，确认地址 / 密钥 / Tunnel 头都对。 */
+    /**
+     * 发一条测试事件，确认地址 / 密钥 / Tunnel 头都对。
+     * 必须等 HTTP 结果再显示 —— 只弹「已发送」的话，401/403 也看不出来。
+     */
     private void sendTest() {
+        last.setText("发送中…");
         try {
             JSONObject meta = new JSONObject();
             meta.put("app", "test");
             JSONObject e = new JSONObject();
             e.put("ts", System.currentTimeMillis() / 1000);
             e.put("domain", "phone");
-            e.put("metric", "music");
+            // 专用 metric：不会被当成音乐或别的数据
+            e.put("metric", "bridge_test");
             e.put("value_text", "Life Bridge - Connectivity Test");
             e.put("meta", meta);
             JSONArray events = new JSONArray();
             events.put(e);
             JSONObject body = new JSONObject();
             body.put("events", events);
-            Http.post(this, body.toString());
-            last.setText("已发送测试事件。去中继确认，或看笔记本的 collect_phone_events 输出。");
+
+            Http.post(this, body.toString(), (code, error) -> runOnUiThread(() -> {
+                if (code == 200) {
+                    last.setText("✓ 已送达（HTTP 200）。中继当天会多一条 bridge_test。");
+                } else if (code > 0) {
+                    last.setText("✗ 中继返回 HTTP " + code
+                        + (code == 401 ? "：X-API-Key 不对" : "")
+                        + (code == 403 ? "：Cloudflare Access 的 Token 不对或没加进 Policy" : ""));
+                } else {
+                    last.setText("✗ 连不上：" + (error == null ? "未知错误" : error)
+                        + "\n检查地址、手机网络，以及是否走了 Tunnel 但没填 Token。");
+                }
+            }));
         } catch (Exception ex) {
-            last.setText("发送失败：" + ex.getMessage());
+            last.setText("✗ 构造请求失败：" + ex.getMessage());
         }
     }
 }

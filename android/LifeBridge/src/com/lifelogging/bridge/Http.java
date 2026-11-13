@@ -9,16 +9,27 @@ import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/** 单线程顺序 POST 到中继；失败静默（Android 上重试队列反而更容易丢数据）。 */
+/** 单线程顺序 POST 到中继。 */
 public final class Http {
     private static final ExecutorService POOL = Executors.newSingleThreadExecutor();
 
     private Http() {}
 
-    public static void post(final Context context, final String body) {
+    /** 结果回调；code 为 HTTP 状态码，失败时 -1 并带 error。 */
+    public interface Result {
+        void onResult(int code, String error);
+    }
+
+    public static void post(Context context, String body) {
+        post(context, body, null);
+    }
+
+    public static void post(final Context context, final String body, final Result cb) {
         final Context app = context.getApplicationContext();
         POOL.execute(() -> {
             HttpURLConnection c = null;
+            int code = -1;
+            String error = null;
             try {
                 c = (HttpURLConnection) new URL(Config.url(app)).openConnection();
                 c.setRequestMethod("POST");
@@ -37,12 +48,13 @@ public final class Http {
                 try (OutputStream os = c.getOutputStream()) {
                     os.write(body.getBytes(StandardCharsets.UTF_8));
                 }
-                c.getResponseCode();  // 触发请求
-            } catch (Exception ignored) {
-                // 网络失败就不发了：中继那边没有队列，重试也只会把时间戳拖后
+                code = c.getResponseCode();
+            } catch (Exception e) {
+                error = e.getClass().getSimpleName() + ": " + e.getMessage();
             } finally {
                 if (c != null) c.disconnect();
             }
+            if (cb != null) cb.onResult(code, error);
         });
     }
 }
