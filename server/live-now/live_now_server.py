@@ -228,7 +228,23 @@ def phone_server(day: str) -> dict | None:
     )
     music = None
     if music_row:
-        mmeta = music_row.get("meta") or {}
+        mmeta = dict(music_row.get("meta") or {})
+        # App 和 Tasker 可能各发一条：Tasker 那条没有 meta，但时间更晚。
+        if not mmeta.get("artist"):
+            for e in sorted(events, key=ts, reverse=True):
+                if e is music_row:
+                    continue
+                if e.get("metric") != "music":
+                    continue
+                alt = e.get("meta") or {}
+                if not alt.get("artist"):
+                    continue
+                # App 的 value_text 是「歌手 - 歌名」，Tasker 的是纯歌名
+                if alt.get("title") != music_row.get("value_text"):
+                    continue
+                for k, v in alt.items():
+                    mmeta.setdefault(k, v)
+                break
         music = {
             "title": mmeta.get("title") or music_row["value_text"],
             "artist": mmeta.get("artist"),

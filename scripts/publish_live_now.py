@@ -335,19 +335,37 @@ def phone_now(conn, day: str) -> dict | None:
         }
 
     # 正在听什么：取当天最新一条 music 事件。
-    music_row = conn.execute(
+    music_rows = conn.execute(
         """SELECT value_text, meta_json, ts_utc FROM events
            WHERE day_local = ? AND domain = 'phone' AND metric = 'music'
              AND value_text IS NOT NULL AND substr(value_text, 1, 1) != '%'
-           ORDER BY ts_utc DESC LIMIT 1""",
+           ORDER BY ts_utc DESC LIMIT 10""",
         (day,),
-    ).fetchone()
+    ).fetchall()
+    music_row = music_rows[0] if music_rows else None
     music = None
     if music_row is not None and music_row["value_text"]:
         try:
             mmeta = json.loads(music_row["meta_json"] or "{}")
         except (TypeError, ValueError):
             mmeta = {}
+        # App 和 Tasker 可能各发一条：Tasker 那条没有 meta，但时间更晚。
+        # 回看同名的最近几条，把歌手/专辑/时长补上。
+        if not mmeta.get("artist"):
+            for r in music_rows[1:]:
+                try:
+                    alt = json.loads(r["meta_json"] or "{}")
+                except (TypeError, ValueError):
+                    continue
+                # App 的 value_text 是「歌手 - 歌名」，Tasker 的是纯歌名，
+                # 所以按 meta.title 比对，不按 value_text。
+                if not alt.get("artist"):
+                    continue
+                if alt.get("title") != music_row["value_text"]:
+                    continue
+                for k, v in alt.items():
+                    mmeta.setdefault(k, v)
+                break
         # at：前端靠它判断「现在还在放」还是「今天最后放的一首」
         music_plays = conn.execute(
             """SELECT COUNT(*) FROM events
