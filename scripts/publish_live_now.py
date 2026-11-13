@@ -87,6 +87,13 @@ def lyrics_for(artist: str | None, title: str | None,
     # 播放器用中文顿号/全角逗号分隔多个歌手，LRCLIB 只认英文逗号。
     # 例：`Daniel Caesar、Bon Iver` 会 404，换成 `Daniel Caesar, Bon Iver` 才命中。
     artist = artist.replace("、", ", ").replace("，", ", ").replace("＆", " & ")
+    # 标题里的弯引号和 (Explicit) 后缀也会让精确匹配失败：
+    # `Emily’s Song (Explicit)` → `Emily's Song`
+    title = title.replace("’", "'").replace("‘", "'")
+    for suffix in (" (Explicit)", " [Explicit]", " (explicit)", " [explicit]"):
+        if title.endswith(suffix):
+            title = title[: -len(suffix)].strip()
+            break
     if not artist or not title:
         return None
 
