@@ -718,6 +718,13 @@ def main() -> int:
             "watch": watch_now(conn, day),
             "qa": qa_now(day) or qa_local(conn, day),
         }
+        # 本机 events.db 可能落后中继（Tailscale 抽风时 collect 会失败）。
+        # 记下本地手机最新事件，发布前和线上比，别用旧数据覆盖新的。
+        local_seen = conn.execute(
+            """SELECT MAX(ts_utc) FROM events
+               WHERE day_local = ? AND domain = 'phone'""",
+            (day,),
+        ).fetchone()[0] or ""
     finally:
         conn.close()
 
@@ -747,6 +754,19 @@ def main() -> int:
         return 2
 
     url = resolve_now_url(args.api_base)
+
+    # 线上快照更新就跳过：服务器每 2 分钟从**中继**直接读，永远比笔记本的
+    # events.db 新；笔记本落后时再发一次会把 status 覆盖回旧值
+    #（屏幕明明亮着却显示 OFF 就是这么来的）。
+    try:
+        remote = httpx.get(url, timeout=8.0).json()
+        remote_seen = ((remote.get("phone") or {}).get("lastSeen") or "")
+        if remote_seen and local_seen and remote_seen > local_seen:
+            print(f"  跳过：线上快照更新（{remote_seen} > 本地 {local_seen}）",
+                  file=sys.stderr)
+            return 0
+    except Exception:  # noqa: BLE001 — 比不出来就照常发
+        pass
     try:
         res = httpx.post(
             url,
