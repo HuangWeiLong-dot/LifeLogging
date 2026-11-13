@@ -147,7 +147,7 @@ sudo /opt/lifelogging/repo/server/deploy.sh           # git ff-only + 按改动�
 | `location` | `collect_phone.py` | Dawarich 停留点 / 轨迹 / 通勤 |
 | `health` | `ingest_gadgetbridge.py` / `infer_sleep.py` | 手环步数 / 心率；**睡眠来自推断**（见下） |
 | `fitness` | `import_gpx.py` / `import_fit.py` | 锻炼轨迹，固定 `metric=watch_track` |
-| `phone` | `collect_phone_events.py` | 中继的解锁 / 切应用 / 屏幕亮灭 / 电量 / 网络 / UsageStats 实测应用时长 |
+| `phone` | `collect_phone_events.py` | 中继的解锁 / 切应用 / 屏幕亮灭 / 电量 / 网络 / UsageStats 实测应用时长 / 音乐（含封面与播放位置）/ 通知计数 / 支付 |
 | `web` | 浏览器扩展 | 页面标题 / URL |
 | `manual` | 手工 | — |
 | `ai` | `collect_ai_usage.py` | 每日花费 / 余额 / token |
@@ -446,6 +446,8 @@ Leisure / Health / Social`（小时）：Work/Study/Life/Leisure = 桌面分类 
 - `docs/手机自动化-Tasker.md` —— **当前在用**的手机侧配置（电量/网络/音乐/通知/应用时长）
 - `docs/手机自动化-OpenTasker.md` —— 想换开源替代时的迁移记录，请求体与 Tasker 版一致
 - `docs/lls-dataflow.mmd` + `render_dataflow.py` —— 数据流图源文件
+- `android/LifeBridge/README.md` —— 手机采集 App（媒体元数据 / 封面 / 播放位置 /
+  屏幕亮灭 / 电量 / 网络 / 支付），含无 Gradle 构建、版本与签名说明
 - `server/*/README.md`、`docker/grafana/README.md`、`windows/live-daemon/README.md`
 - `README.md` —— 总览与「已验证到什么程度」；注意里面 smoke 数字（8/8）已过时，
   以本文件 71 项为准。`docs/实现文档.md`（20/20）同理。
