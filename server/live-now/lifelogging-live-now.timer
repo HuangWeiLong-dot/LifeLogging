@@ -1,18 +1,19 @@
-# 每 2 分钟发布一次 24h 实时快照。
+# 每 20 秒发布一次 24h 实时快照。
 #
-# 为什么是 2 分钟：站点 LifeNow 每 30 秒轮询，笔记本上的实时任务也是 2 分钟；
-# 服务器这条用同样的节拍，笔记本关掉后站点的延迟不会突然从 2 分钟变成一夜。
+# 为什么是 20 秒：站点 LifeNow 5 秒轮询一次，手机 App 播放中每 10 秒推位置、
+# 切歌/暂停立即推。2 分钟的话切歌要等两分钟才反映到页面上，实测体感很差。
+# 单次运行约 2 秒，20 秒一次压力可以忽略。
 #
-# OnBootSec 让重启后也尽快补一份，不用等第一个 2 分钟窗口。
+# OnBootSec 让重启后也尽快补一份。
 
 [Unit]
-Description=LifeLogging - publish live NOW every 2 minutes
+Description=LifeLogging - publish live NOW every 20 seconds
 Requires=lifelogging-live-now.service
 
 [Timer]
-OnBootSec=2min
-OnUnitActiveSec=2min
-AccuracySec=15s
+OnBootSec=20s
+OnUnitActiveSec=20s
+AccuracySec=5s
 Persistent=true
 
 [Install]

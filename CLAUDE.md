@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Win11 笔记本**：有 GUI 的采集（ActivityWatch 必须在本机）、规则归类、写 vault。
   靠计划任务 + 无窗口守护程序 `windows/live-daemon/LifeLoggingLive.exe`。
 - **Linux 服务器（24h 开着，Tailscale 主机名 `vm-0-17-ubuntu-1`）**：手机上报的中继、
-  每 15 分钟用 `close_day.py` 写日记正文、每 2 分钟发实时 NOW、每 15 分钟发布手表轨迹。
+  每 15 分钟用 `close_day.py` 写日记正文、每 20 秒发实时 NOW、每 15 分钟发布手表轨迹。
   代码在 `/opt/lifelogging/repo`（git clone），venv 在 `/opt/lifelogging/venv`，
   数据在 `/var/lib/lifelogging/`，密钥在 `/etc/lifelogging/*.env`。
 - **个人站点**（另一个仓库 `C:\Users\LongGe\Desktop\liveinpassion`）：Cloudflare Worker
