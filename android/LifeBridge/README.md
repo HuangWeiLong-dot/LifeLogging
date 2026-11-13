@@ -76,10 +76,13 @@ c023913905e7a7964d56a181db6a652037deb4f3e473fa65a13c58f2bc62dbd5
 
 ## 隐私边界
 
-- **通知正文不上站**：`publish_life_raw` 发布前删掉 `title`/`text` 等字段
+- **通知正文**：`/life/archive` 的归档里仍然删掉 `title`/`text`；
+  但 `/api/life/now` 会带最近 8 条的原文（NOW 面板滚动展示），
+  2026-11-13 按需求开放，**这是公开接口**——里面是别人发给你的消息
 - **支付记录完全不上站**：`publish_life_raw` 按 `metric=payment` 整条丢弃，
   站点聚合里也没有这个字段；金额只留在本地 `events.db` 和 `02-Phone`
 - 封面只在实时卡片上用，公开归档里会去掉（一天几十首会撑大 archive）
+- 所有事件都带 `source=lifebridge`，和 Tasker 的数据在库里能分开
 
 ## 已知限制
 

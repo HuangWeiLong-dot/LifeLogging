@@ -368,6 +368,9 @@ Leisure / Health / Social`（小时）：Work/Study/Life/Leisure = 桌面分类 
   `sk-`/`gh[pousr]_`/`github_pat_`/`xox`/`AKIA`、`Bearer` 头、`password=`、敏感 dict 键值
   替换成 `REDACTED`。**这是防凭证泄露，不是生活数据脱敏。**
 - `/api/life/now` **故意含当前坐标**，和 `/api/life` 的边界不同。
+  2026-11-13 起 `phone.notificationsRecent` 也带**最近 8 条通知原文**
+  （站点 NOW 面板滚动展示）——归档里删、/now 里不删，这是刻意的不对称：
+  归档是长期公开的存档，/now 只是当下快照。改这里之前先想清楚。
 - 翻译只改**发布副本**，本机原文不动。发布失败时保留线上已有的英文版，不发布半截中文。
 - 时区：`publish_life_raw` 按天分片、`watch-publisher` 的 `WATCH_TZ`、站点展示都必须是
   `Asia/Shanghai`，不一致会让同一次活动落到两天。
