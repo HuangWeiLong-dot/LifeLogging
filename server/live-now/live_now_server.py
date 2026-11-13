@@ -245,8 +245,20 @@ def phone_server(day: str) -> dict | None:
                 for k, v in alt.items():
                     mmeta.setdefault(k, v)
                 break
+        track_title = mmeta.get("title") or music_row["value_text"]
+        pos_row = next(
+            (e for e in sorted(events, key=ts, reverse=True)
+             if e.get("metric") == "music_position"
+             and e.get("value_text") == track_title),
+            None,
+        )
+        pos_at = base.to_utc(pos_row.get("ts_utc")) if pos_row else None
+        playing = (
+            (datetime.now(timezone.utc) - pos_at).total_seconds() < 90
+            if pos_at else None
+        )
         music = {
-            "title": mmeta.get("title") or music_row["value_text"],
+            "title": track_title,
             "artist": mmeta.get("artist"),
             "album": mmeta.get("album"),
             "duration": mmeta.get("duration"),
@@ -259,6 +271,11 @@ def phone_server(day: str) -> dict | None:
                 if e.get("metric") == "music"
                 and not str(e.get("value_text") or "").startswith("%")
             ),
+            "playing": playing,
+            "position": pos_row.get("value_num") if pos_row else None,
+            "positionAt": base.iso(pos_at) if pos_at else None,
+            "lyrics": base.lyrics_for(mmeta.get("artist"), track_title,
+                                      mmeta.get("album"), mmeta.get("duration")),
         }
 
     net_row = newest("network", need_text=True)

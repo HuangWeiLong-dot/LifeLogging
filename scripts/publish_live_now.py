@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 import os
 import re
 import sys
@@ -54,6 +55,70 @@ SITE = CFG.get("life_site") or {}
 STATE_DIR = Path(CFG.get("state_dir") or (Path(__file__).resolve().parent.parent / "state"))
 
 MAX_TEXT = 180
+
+# ── 歌词（LRCLIB）────────────────────────────────────────────────
+# lrclib.net 是公开的同步歌词库，不需要 key。查不到很正常（纯音乐、
+# 冷门曲目），缓存成 null 之后 24 小时内不再重试，避免每 2 分钟打一次。
+LYRICS_CACHE = STATE_DIR / "lyrics-cache.json"
+LYRICS_TTL_OK = 30 * 86400
+LYRICS_TTL_MISS = 86400
+
+
+def _load_lyrics_cache() -> dict:
+    try:
+        return json.loads(LYRICS_CACHE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_lyrics_cache(cache: dict) -> None:
+    try:
+        LYRICS_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        LYRICS_CACHE.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def lyrics_for(artist: str | None, title: str | None,
+               album: str | None = None, duration: float | None = None) -> str | None:
+    """返回带时间戳的 LRC 文本；查不到返回 None。"""
+    artist = (artist or "").strip()
+    title = (title or "").strip()
+    if not artist or not title:
+        return None
+
+    key = f"{artist}|{title}|{album or ''}|{int(duration or 0)}"
+    now = time.time()
+    cache = _load_lyrics_cache()
+    hit = cache.get(key)
+    if hit:
+        ttl = LYRICS_TTL_OK if hit.get("lyrics") else LYRICS_TTL_MISS
+        if now - float(hit.get("at") or 0) < ttl:
+            return hit.get("lyrics")
+
+    # LRCLIB 的 /get 是**精确匹配**：专辑名带 (Explicit) 之类的后缀就 404。
+    # 所以逐级放宽：带专辑 → 不带专辑 → 连时长也不带。
+    attempts = []
+    if album:
+        attempts.append({"artist_name": artist, "track_name": title, "album_name": album})
+    attempts.append({"artist_name": artist, "track_name": title})
+    if duration:
+        attempts[0]["duration"] = int(duration)
+
+    text = None
+    for params in attempts:
+        try:
+            res = httpx.get("https://lrclib.net/api/get", params=params, timeout=6.0)
+            if res.status_code == 200:
+                text = (res.json().get("syncedLyrics") or "").strip() or None
+                if text:
+                    break
+        except Exception:  # noqa: BLE001 — 歌词是锦上添花，失败不能影响 /now
+            continue
+
+    cache[key] = {"lyrics": text, "at": now}
+    _save_lyrics_cache(cache)
+    return text
 
 
 def now_utc() -> datetime:
@@ -373,9 +438,22 @@ def phone_now(conn, day: str) -> dict | None:
                  AND value_text IS NOT NULL AND substr(value_text, 1, 1) != '%'""",
             (day,),
         ).fetchone()[0]
+        track_title = mmeta.get("title") or music_row["value_text"]
+        # App 每 30 秒发的播放位置（value_text 用纯歌名），用于歌词高亮
+        pos_row = conn.execute(
+            """SELECT value_num, ts_utc FROM events
+               WHERE day_local = ? AND domain = 'phone' AND metric = 'music_position'
+                 AND value_text = ?
+               ORDER BY ts_utc DESC LIMIT 1""",
+            (day, track_title),
+        ).fetchone()
+        # App 只在播放中每 30 秒发位置；90 秒内还有心跳就认为仍在播放。
+        # 没有位置数据（旧版 App / Tasker）时给 None，前端退回按「30 分钟内」判断。
+        pos_at = to_utc(pos_row["ts_utc"]) if pos_row is not None else None
+        playing = (now_utc() - pos_at).total_seconds() < 90 if pos_at else None
         music = {
             # 手机 App 会单独给 title/artist/album；Tasker 只有整行 value_text。
-            "title": mmeta.get("title") or music_row["value_text"],
+            "title": track_title,
             "artist": mmeta.get("artist"),
             "album": mmeta.get("album"),
             "duration": mmeta.get("duration"),
@@ -385,6 +463,11 @@ def phone_now(conn, day: str) -> dict | None:
             "app": mmeta.get("app"),
             "at": iso(to_utc(music_row["ts_utc"])),
             "plays": int(music_plays or 0),
+            "playing": playing,
+            "position": pos_row["value_num"] if pos_row is not None else None,
+            "positionAt": iso(pos_at) if pos_at else None,
+            "lyrics": lyrics_for(mmeta.get("artist"), track_title,
+                                 mmeta.get("album"), mmeta.get("duration")),
         }
 
     net_row = conn.execute(
