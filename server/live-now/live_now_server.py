@@ -191,10 +191,48 @@ def phone_server(day: str) -> dict | None:
         None,
     )
     unlocks = sum(1 for e in events if e.get("metric") == "unlock")
+
+    def newest(metric, need_text=False):
+        for e in sorted(events, key=ts, reverse=True):
+            if e.get("metric") != metric:
+                continue
+            if need_text and not e.get("value_text"):
+                continue
+            return e
+        return None
+
+    batt = newest("battery")
+    battery = None
+    if batt and batt.get("value_num") is not None:
+        meta = batt.get("meta") or {}
+        # Tasker 变量没定义时会原样发 `%CHARGING`，不能当成 True
+        chg = meta.get("charging")
+        charging = chg is True or (
+            isinstance(chg, str)
+            and not chg.startswith("%")
+            and chg.strip().lower() in ("true", "1", "yes", "on")
+        )
+        battery = {
+            "level": round(float(batt["value_num"]), 0),
+            "charging": charging,
+            "at": base.iso(base.to_utc(batt.get("ts_utc"))),
+        }
+
+    music_row = newest("music", need_text=True)
+    music = None
+    if music_row:
+        music = {
+            "title": music_row["value_text"],
+            "app": (music_row.get("meta") or {}).get("app"),
+        }
+
     return {
         "app": base.friendly_phone(app_row.get("value_text")) if app_row else None,
         "screenOn": (screen_row.get("metric") == "screen_on") if screen_row else None,
         "unlocks": int(unlocks),
+        "battery": battery,
+        "music": music,
+        "notifications": sum(1 for e in events if e.get("metric") == "notification"),
         "lastSeen": base.iso(base.to_utc(latest.get("ts_utc"))),
         "lastEvent": latest.get("metric"),
     }
