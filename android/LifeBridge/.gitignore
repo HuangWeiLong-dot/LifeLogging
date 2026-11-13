@@ -9,5 +9,9 @@ libs/
 # 图标预览图
 _preview*.png
 
+# 签名密钥和密码 —— 不进仓库，务必自己备份 release.jks
+keystore/
+keystore.properties
+
 # 调试签名（不要提交）
 debug.keystore

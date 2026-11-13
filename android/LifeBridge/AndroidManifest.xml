@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- 版本号不写在这里：由 build.sh 从 version.properties 注入。
+     manifest 里写死会覆盖 aapt2 传入的版本参数。 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.lifelogging.bridge"
-    android:versionCode="1"
-    android:versionName="1.0">
+    package="com.lifelogging.bridge">
 
     <uses-permission android:name="android.permission.INTERNET" />
 
