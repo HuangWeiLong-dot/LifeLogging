@@ -6,6 +6,8 @@ import android.graphics.Bitmap;
 import android.media.MediaMetadata;
 import android.media.session.MediaController;
 import android.media.session.MediaSessionManager;
+import android.net.ConnectivityManager;
+import android.net.Network;
 import android.os.Bundle;
 import android.service.notification.NotificationListenerService;
 import android.service.notification.StatusBarNotification;
@@ -62,6 +64,27 @@ public class BridgeService extends NotificationListenerService {
             bindSessions(mediaManager.getActiveSessions(me));
         } catch (Exception ignored) {
             // 没有通知使用权时这里会抛 SecurityException
+        }
+
+        // 网络切换立即补发一条。CONNECTIVITY_CHANGE 在 Android 8+ 已不给
+        // manifest 接收器，所以只能在服务里注册回调。
+        try {
+            ConnectivityManager cm =
+                (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (cm != null) {
+                cm.registerDefaultNetworkCallback(new ConnectivityManager.NetworkCallback() {
+                    @Override
+                    public void onAvailable(Network network) {
+                        Heartbeat.sendNow(BridgeService.this);
+                    }
+
+                    @Override
+                    public void onLost(Network network) {
+                        Heartbeat.sendNow(BridgeService.this);
+                    }
+                });
+            }
+        } catch (Exception ignored) {
         }
     }
 

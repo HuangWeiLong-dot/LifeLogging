@@ -60,6 +60,10 @@ public class SettingsActivity extends Activity {
         });
 
         findViewById(R.id.test).setOnClickListener(v -> sendTest());
+
+        // 打开一次就把心跳排上（幂等），并立刻补一条电量/网络
+        Heartbeat.schedule(this);
+        Heartbeat.sendNow(this);
     }
 
     @Override

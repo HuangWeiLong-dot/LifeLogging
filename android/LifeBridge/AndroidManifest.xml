@@ -5,6 +5,8 @@
     package="com.lifelogging.bridge">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
         android:label="@string/app_name"
@@ -22,6 +24,27 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 15 分钟心跳 + 插拔电源时立即补发 -->
+        <receiver
+            android:name=".HeartbeatReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.lifelogging.bridge.HEARTBEAT" />
+                <action android:name="android.intent.action.POWER_CONNECTED" />
+                <action android:name="android.intent.action.POWER_DISCONNECTED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 重启 / 覆盖安装后重新排闹钟 -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <!-- 通知使用权：媒体会话元数据 + 支付通知都从这里来 -->
         <service
