@@ -226,12 +226,19 @@ def phone_server(day: str) -> dict | None:
             "app": (music_row.get("meta") or {}).get("app"),
         }
 
+    net_row = newest("network", need_text=True)
+    network = None
+    if net_row:
+        kind = str(net_row["value_text"]).split(":", 1)[0]
+        network = {"mode": kind or None}
+
     return {
         "app": base.friendly_phone(app_row.get("value_text")) if app_row else None,
         "screenOn": (screen_row.get("metric") == "screen_on") if screen_row else None,
         "unlocks": int(unlocks),
         "battery": battery,
         "music": music,
+        "network": network,
         "notifications": sum(1 for e in events if e.get("metric") == "notification"),
         "lastSeen": base.iso(base.to_utc(latest.get("ts_utc"))),
         "lastEvent": latest.get("metric"),

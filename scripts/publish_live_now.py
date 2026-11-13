@@ -349,6 +349,18 @@ def phone_now(conn, day: str) -> dict | None:
             mmeta = {}
         music = {"title": music_row["value_text"], "app": mmeta.get("app")}
 
+    net_row = conn.execute(
+        """SELECT value_text FROM events
+           WHERE day_local = ? AND domain = 'phone' AND metric = 'network'
+             AND value_text IS NOT NULL
+           ORDER BY ts_utc DESC LIMIT 1""",
+        (day,),
+    ).fetchone()
+    network = None
+    if net_row is not None and net_row["value_text"]:
+        kind = str(net_row["value_text"]).split(":", 1)[0]
+        network = {"mode": kind or None}
+
     notif_today = conn.execute(
         """SELECT COUNT(*) FROM events
            WHERE day_local = ? AND domain = 'phone' AND metric = 'notification'""",
@@ -361,6 +373,7 @@ def phone_now(conn, day: str) -> dict | None:
         "unlocks": int(unlocks or 0),
         "battery": battery,
         "music": music,
+        "network": network,
         "notifications": int(notif_today or 0),
         "lastSeen": iso(to_utc(latest["ts_utc"])),
         "lastEvent": latest["metric"],
