@@ -348,10 +348,16 @@ def phone_now(conn, day: str) -> dict | None:
         except (TypeError, ValueError):
             mmeta = {}
         # at：前端靠它判断「现在还在放」还是「今天最后放的一首」
+        music_plays = conn.execute(
+            """SELECT COUNT(*) FROM events
+               WHERE day_local = ? AND domain = 'phone' AND metric = 'music'""",
+            (day,),
+        ).fetchone()[0]
         music = {
             "title": music_row["value_text"],
             "app": mmeta.get("app"),
             "at": iso(to_utc(music_row["ts_utc"])),
+            "plays": int(music_plays or 0),
         }
 
     net_row = conn.execute(
@@ -375,7 +381,7 @@ def phone_now(conn, day: str) -> dict | None:
         """SELECT value_text AS app, COUNT(*) AS n FROM events
            WHERE day_local = ? AND domain = 'phone' AND metric = 'notification'
              AND value_text IS NOT NULL AND value_text != ''
-           GROUP BY value_text ORDER BY n DESC LIMIT 3""",
+           GROUP BY value_text ORDER BY n DESC LIMIT 30""",
         (day,),
     ).fetchall()
     notif_top = [[friendly_phone(r["app"]), int(r["n"])] for r in notif_top_rows]

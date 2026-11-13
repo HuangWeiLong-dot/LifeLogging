@@ -1303,7 +1303,8 @@ def summarize_phone(events: list[dict[str, Any]]) -> dict[str, Any]:
             by_name[name] = by_name.get(name, 0) + cnt
         notif_summary = {
             "total": sum(by_name.values()),
-            "by_app": [[a, c] for a, c in sorted(by_name.items(), key=lambda x: -x[1])[:20]],
+            # 40 与 Worker 的 isPairs 上限一致；通知应用一般 10–20 个
+            "by_app": [[a, c] for a, c in sorted(by_name.items(), key=lambda x: -x[1])[:40]],
         }
 
     return {

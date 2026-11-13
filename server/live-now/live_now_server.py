@@ -225,6 +225,7 @@ def phone_server(day: str) -> dict | None:
             "title": music_row["value_text"],
             "app": (music_row.get("meta") or {}).get("app"),
             "at": base.iso(base.to_utc(music_row.get("ts_utc"))),
+            "plays": sum(1 for e in events if e.get("metric") == "music"),
         }
 
     net_row = newest("network", need_text=True)
@@ -240,7 +241,7 @@ def phone_server(day: str) -> dict | None:
             notif_counts[app] = notif_counts.get(app, 0) + 1
     notif_top = [
         [base.friendly_phone(app), n]
-        for app, n in sorted(notif_counts.items(), key=lambda x: -x[1])[:3]
+        for app, n in sorted(notif_counts.items(), key=lambda x: -x[1])[:30]
     ]
 
     return {
