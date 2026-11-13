@@ -375,6 +375,53 @@ def desktop_now(conn, day: str) -> dict | None:
     }
 
 
+def _pick_state(rows, max_age: float = 7200):
+    """同一状态有 Tasker 和 App 两个来源时，优先用 App 的。
+
+    Tasker 的 `%LL_CHG` / `%SSID` 经常没被替换或卡在旧值，而且每 15 分钟一条，
+    时间戳往往比 App 晚，会把最新状态盖掉（「没充电却显示 CHARGING」就是这么来的）。
+    `source` 为 None 的是 1.8 之前的 App 事件，也按 App 处理。
+    """
+    if not rows:
+        return None
+    for r in rows:
+        if (r["source"] or "") != "tasker":
+            try:
+                age = (now_utc() - to_utc(r["ts_utc"])).total_seconds()
+            except (TypeError, ValueError):
+                continue
+            if 0 <= age <= max_age:
+                return r
+    return rows[0]
+
+
+def _pick_battery(rows):
+    """优先 App 的电池事件：它发的是 JSON 布尔，Tasker 发的是字符串 "true"。
+
+    1.8 之前的事件没有 source，靠这个类型差异也能分辨。
+    """
+    if not rows:
+        return None
+    for r in rows:
+        try:
+            meta = json.loads(r["meta_json"] or "{}")
+        except (TypeError, ValueError):
+            meta = {}
+        if isinstance(meta.get("charging"), bool):
+            return r
+    return rows[0]
+
+
+def _pick_network(rows):
+    """Tasker 的 SSID 变量没替换时会发 `wifi:%SSID`；App 只有 wifi/mobile。"""
+    if not rows:
+        return None
+    for r in rows:
+        if "%" not in (r["value_text"] or ""):
+            return r
+    return rows[0]
+
+
 def phone_now(conn, day: str) -> dict | None:
     rows = conn.execute(
         """SELECT ts_utc, metric, value_text FROM events
@@ -388,13 +435,13 @@ def phone_now(conn, day: str) -> dict | None:
     app_row = next((r for r in rows if r["metric"] == "app_switch" and r["value_text"]), None)
     # 单独查最新的屏幕事件：最后 60 条里可能全是 app_switch / music_position。
     # unlock 也是「屏幕亮着」的证据 —— 只认 screen_off 会把刚解锁的手机显示成 OFF。
-    screen_row = conn.execute(
-        """SELECT metric FROM events
+    screen_row = _pick_state(conn.execute(
+        """SELECT metric, ts_utc, source FROM events
            WHERE day_local = ? AND domain = 'phone'
              AND metric IN ('screen_on', 'screen_off', 'unlock')
-           ORDER BY ts_utc DESC LIMIT 1""",
+           ORDER BY ts_utc DESC LIMIT 20""",
         (day,),
-    ).fetchone()
+    ).fetchall())
     unlocks = conn.execute(
         """SELECT COUNT(*) FROM events WHERE day_local = ? AND domain = 'phone' AND metric = 'unlock'""",
         (day,),
@@ -402,13 +449,13 @@ def phone_now(conn, day: str) -> dict | None:
     # 电量：手机每 15 分钟上报一条，取当天最新的一条。
     # 注意 Worker 只校验 /now 的**顶层**字段（location/desktop/phone/watch/qa），
     # section 内部是自由形状 —— 往 phone 里加 battery 不需要改站点。
-    batt = conn.execute(
-        """SELECT value_num, meta_json, ts_utc FROM events
+    batt = _pick_battery(conn.execute(
+        """SELECT value_num, meta_json, ts_utc, source FROM events
            WHERE day_local = ? AND domain = 'phone'
              AND metric = 'battery' AND value_num IS NOT NULL
-           ORDER BY ts_utc DESC LIMIT 1""",
+           ORDER BY ts_utc DESC LIMIT 20""",
         (day,),
-    ).fetchone()
+    ).fetchall())
     battery = None
     if batt is not None:
         try:
@@ -508,13 +555,13 @@ def phone_now(conn, day: str) -> dict | None:
                                  mmeta.get("album"), mmeta.get("duration")),
         }
 
-    net_row = conn.execute(
-        """SELECT value_text FROM events
+    net_row = _pick_network(conn.execute(
+        """SELECT value_text, ts_utc, source FROM events
            WHERE day_local = ? AND domain = 'phone' AND metric = 'network'
              AND value_text IS NOT NULL
-           ORDER BY ts_utc DESC LIMIT 1""",
+           ORDER BY ts_utc DESC LIMIT 20""",
         (day,),
-    ).fetchone()
+    ).fetchall())
     network = None
     if net_row is not None and net_row["value_text"]:
         kind = str(net_row["value_text"]).split(":", 1)[0]

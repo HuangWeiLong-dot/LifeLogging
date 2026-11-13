@@ -179,6 +179,34 @@ def phone_server(day: str) -> dict | None:
     def ts(e):
         return str(e.get("ts_utc") or "")
 
+    def pick_state(candidates):
+        """同一状态有 Tasker 和 App 两个来源时优先 App 的。
+
+        Tasker 的 %LL_CHG 会卡在旧值，且时间戳往往比 App 晚，会把状态盖掉。
+        """
+        ordered = sorted(candidates, key=ts, reverse=True)
+        for e in ordered:
+            if (e.get("source") or "") != "tasker":
+                t = base.to_utc(e.get("ts_utc"))
+                if t and 0 <= (datetime.now(timezone.utc) - t).total_seconds() <= 7200:
+                    return e
+        return ordered[0] if ordered else None
+
+    def pick_battery(candidates):
+        """App 发的是 JSON 布尔；Tasker 发字符串 "true"。优先布尔那份。"""
+        ordered = sorted(candidates, key=ts, reverse=True)
+        for e in ordered:
+            if isinstance((e.get("meta") or {}).get("charging"), bool):
+                return e
+        return ordered[0] if ordered else None
+
+    def pick_network(candidates):
+        ordered = sorted(candidates, key=ts, reverse=True)
+        for e in ordered:
+            if "%" not in str(e.get("value_text") or ""):
+                return e
+        return ordered[0] if ordered else None
+
     latest = max(events, key=ts)
     app_row = next(
         (e for e in sorted(events, key=ts, reverse=True)
@@ -186,11 +214,9 @@ def phone_server(day: str) -> dict | None:
         None,
     )
     # unlock 也是「屏幕亮着」的证据，只认 screen_off 会把刚解锁的手机显示成 OFF
-    screen_row = next(
-        (e for e in sorted(events, key=ts, reverse=True)
-         if e.get("metric") in ("screen_on", "screen_off", "unlock")),
-        None,
-    )
+    screen_row = pick_state([
+        e for e in events if e.get("metric") in ("screen_on", "screen_off", "unlock")
+    ])
     unlocks = sum(1 for e in events if e.get("metric") == "unlock")
 
     def newest(metric, need_text=False):
@@ -202,7 +228,10 @@ def phone_server(day: str) -> dict | None:
             return e
         return None
 
-    batt = newest("battery")
+    batt = pick_battery([
+        e for e in events
+        if e.get("metric") == "battery" and e.get("value_num") is not None
+    ])
     battery = None
     if batt and batt.get("value_num") is not None:
         meta = batt.get("meta") or {}
@@ -283,7 +312,9 @@ def phone_server(day: str) -> dict | None:
                                       mmeta.get("album"), mmeta.get("duration")),
         }
 
-    net_row = newest("network", need_text=True)
+    net_row = pick_network([
+        e for e in events if e.get("metric") == "network" and e.get("value_text")
+    ])
     network = None
     if net_row:
         kind = str(net_row["value_text"]).split(":", 1)[0]
