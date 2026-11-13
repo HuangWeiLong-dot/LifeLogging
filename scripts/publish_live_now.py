@@ -371,6 +371,14 @@ def phone_now(conn, day: str) -> dict | None:
            WHERE day_local = ? AND domain = 'phone' AND metric = 'notification'""",
         (day,),
     ).fetchone()[0]
+    notif_top_rows = conn.execute(
+        """SELECT value_text AS app, COUNT(*) AS n FROM events
+           WHERE day_local = ? AND domain = 'phone' AND metric = 'notification'
+             AND value_text IS NOT NULL AND value_text != ''
+           GROUP BY value_text ORDER BY n DESC LIMIT 3""",
+        (day,),
+    ).fetchall()
+    notif_top = [[friendly_phone(r["app"]), int(r["n"])] for r in notif_top_rows]
 
     return {
         "app": friendly_phone(app_row["value_text"]) if app_row else None,
@@ -380,6 +388,7 @@ def phone_now(conn, day: str) -> dict | None:
         "music": music,
         "network": network,
         "notifications": int(notif_today or 0),
+        "notificationsTop": notif_top,
         "lastSeen": iso(to_utc(latest["ts_utc"])),
         "lastEvent": latest["metric"],
     }
