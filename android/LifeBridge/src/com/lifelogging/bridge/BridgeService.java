@@ -1,7 +1,11 @@
 package com.lifelogging.bridge;
 
 import android.app.Notification;
+import android.content.BroadcastReceiver;
 import android.content.ComponentName;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.graphics.Bitmap;
 import android.media.MediaMetadata;
 import android.media.session.MediaController;
@@ -53,6 +57,37 @@ public class BridgeService extends NotificationListenerService {
     private MediaSessionManager mediaManager;
     private MediaController controller;
     private String lastTrack = "";
+    private boolean screenReceiverOn = false;
+
+    // 屏幕亮灭 / 解锁。Tasker 的对应 Profile 可以停掉了。
+    private final BroadcastReceiver screenReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            String action = intent.getAction();
+            if (Intent.ACTION_SCREEN_ON.equals(action)) {
+                sendScreen("screen_on");
+            } else if (Intent.ACTION_SCREEN_OFF.equals(action)) {
+                sendScreen("screen_off");
+            } else if (Intent.ACTION_USER_PRESENT.equals(action)) {
+                sendScreen("unlock");
+            }
+        }
+    };
+
+    private void sendScreen(String metric) {
+        try {
+            JSONObject e = new JSONObject();
+            e.put("ts", System.currentTimeMillis() / 1000);
+            e.put("domain", "phone");
+            e.put("metric", metric);
+            JSONArray events = new JSONArray();
+            events.put(e);
+            JSONObject body = new JSONObject();
+            body.put("events", events);
+            Http.post(this, body.toString());
+        } catch (Exception ignored) {
+        }
+    }
 
     private String lastPay = "";
     private long lastPayAt = 0L;
@@ -90,6 +125,31 @@ public class BridgeService extends NotificationListenerService {
             }
         } catch (Exception ignored) {
         }
+
+        // 屏幕亮灭 / 解锁：动态注册，不受 Android 8+ 隐式广播限制
+        if (!screenReceiverOn) {
+            try {
+                IntentFilter filter = new IntentFilter();
+                filter.addAction(Intent.ACTION_SCREEN_ON);
+                filter.addAction(Intent.ACTION_SCREEN_OFF);
+                filter.addAction(Intent.ACTION_USER_PRESENT);
+                registerReceiver(screenReceiver, filter);
+                screenReceiverOn = true;
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    @Override
+    public void onDestroy() {
+        if (screenReceiverOn) {
+            try {
+                unregisterReceiver(screenReceiver);
+            } catch (Exception ignored) {
+            }
+            screenReceiverOn = false;
+        }
+        super.onDestroy();
     }
 
     // ── 媒体会话 ─────────────────────────────────────────────────

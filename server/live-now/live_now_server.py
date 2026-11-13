@@ -185,9 +185,10 @@ def phone_server(day: str) -> dict | None:
          if e.get("metric") == "app_switch" and e.get("value_text")),
         None,
     )
+    # unlock 也是「屏幕亮着」的证据，只认 screen_off 会把刚解锁的手机显示成 OFF
     screen_row = next(
         (e for e in sorted(events, key=ts, reverse=True)
-         if e.get("metric") in ("screen_on", "screen_off")),
+         if e.get("metric") in ("screen_on", "screen_off", "unlock")),
         None,
     )
     unlocks = sum(1 for e in events if e.get("metric") == "unlock")
@@ -296,7 +297,7 @@ def phone_server(day: str) -> dict | None:
 
     return {
         "app": base.friendly_phone(app_row.get("value_text")) if app_row else None,
-        "screenOn": (screen_row.get("metric") == "screen_on") if screen_row else None,
+        "screenOn": (screen_row.get("metric") != "screen_off") if screen_row else None,
         "unlocks": int(unlocks),
         "battery": battery,
         "music": music,

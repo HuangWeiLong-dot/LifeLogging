@@ -368,7 +368,15 @@ def phone_now(conn, day: str) -> dict | None:
         return None
     latest = rows[0]
     app_row = next((r for r in rows if r["metric"] == "app_switch" and r["value_text"]), None)
-    screen_row = next((r for r in rows if r["metric"] in ("screen_on", "screen_off")), None)
+    # 单独查最新的屏幕事件：最后 60 条里可能全是 app_switch / music_position。
+    # unlock 也是「屏幕亮着」的证据 —— 只认 screen_off 会把刚解锁的手机显示成 OFF。
+    screen_row = conn.execute(
+        """SELECT metric FROM events
+           WHERE day_local = ? AND domain = 'phone'
+             AND metric IN ('screen_on', 'screen_off', 'unlock')
+           ORDER BY ts_utc DESC LIMIT 1""",
+        (day,),
+    ).fetchone()
     unlocks = conn.execute(
         """SELECT COUNT(*) FROM events WHERE day_local = ? AND domain = 'phone' AND metric = 'unlock'""",
         (day,),
@@ -501,7 +509,7 @@ def phone_now(conn, day: str) -> dict | None:
 
     return {
         "app": friendly_phone(app_row["value_text"]) if app_row else None,
-        "screenOn": (screen_row["metric"] == "screen_on") if screen_row else None,
+        "screenOn": (screen_row["metric"] != "screen_off") if screen_row else None,
         "unlocks": int(unlocks or 0),
         "battery": battery,
         "music": music,
