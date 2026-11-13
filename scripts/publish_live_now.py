@@ -581,6 +581,31 @@ def phone_now(conn, day: str) -> dict | None:
     ).fetchall()
     notif_top = [[friendly_phone(r["app"]), int(r["n"])] for r in notif_top_rows]
 
+    # 最近几条通知的正文（站点 NOW 面板滚动展示）。
+    # ⚠️ 这是**别人发给你的消息**，会出现在公开页面上；publish_life_raw 的归档
+    # 仍然会删掉正文，只有 /now 这一路带原文。
+    notif_recent_rows = conn.execute(
+        """SELECT value_text AS app, meta_json, ts_utc FROM events
+           WHERE day_local = ? AND domain = 'phone' AND metric = 'notification'
+           ORDER BY ts_utc DESC LIMIT 8""",
+        (day,),
+    ).fetchall()
+    notif_recent = []
+    for r in notif_recent_rows:
+        try:
+            m = json.loads(r["meta_json"] or "{}")
+        except (TypeError, ValueError):
+            m = {}
+        text = str(m.get("text") or "").strip()
+        title = str(m.get("title") or "").strip()
+        if not text and not title:
+            continue
+        notif_recent.append({
+            "app": friendly_phone(r["app"]),
+            "title": title[:60],
+            "text": text[:120],
+        })
+
     return {
         "app": friendly_phone(app_row["value_text"]) if app_row else None,
         "screenOn": (screen_row["metric"] != "screen_off") if screen_row else None,
@@ -590,6 +615,7 @@ def phone_now(conn, day: str) -> dict | None:
         "network": network,
         "notifications": int(notif_today or 0),
         "notificationsTop": notif_top,
+        "notificationsRecent": notif_recent,
         "lastSeen": iso(to_utc(latest["ts_utc"])),
         "lastEvent": latest["metric"],
     }

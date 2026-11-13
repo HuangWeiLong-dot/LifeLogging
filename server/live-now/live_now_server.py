@@ -330,6 +330,24 @@ def phone_server(day: str) -> dict | None:
         for app, n in sorted(notif_counts.items(), key=lambda x: -x[1])[:30]
     ]
 
+    # 最近几条通知正文（只在 /now 里；publish_life_raw 的归档仍会删掉正文）
+    notif_recent = []
+    for e in sorted(events, key=ts, reverse=True):
+        if e.get("metric") != "notification":
+            continue
+        meta = e.get("meta") or {}
+        text = str(meta.get("text") or "").strip()
+        title = str(meta.get("title") or "").strip()
+        if not text and not title:
+            continue
+        notif_recent.append({
+            "app": base.friendly_phone(e.get("value_text") or ""),
+            "title": title[:60],
+            "text": text[:120],
+        })
+        if len(notif_recent) >= 8:
+            break
+
     return {
         "app": base.friendly_phone(app_row.get("value_text")) if app_row else None,
         "screenOn": (screen_row.get("metric") != "screen_off") if screen_row else None,
@@ -339,6 +357,7 @@ def phone_server(day: str) -> dict | None:
         "network": network,
         "notifications": sum(1 for e in events if e.get("metric") == "notification"),
         "notificationsTop": notif_top,
+        "notificationsRecent": notif_recent,
         "lastSeen": base.iso(base.to_utc(latest.get("ts_utc"))),
         "lastEvent": latest.get("metric"),
     }
