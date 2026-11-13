@@ -36,8 +36,13 @@ public class BridgeService extends NotificationListenerService {
         "com.eg.android.AlipayGphone",   // 支付宝
         "com.tencent.mm",                // 微信
     };
-    private static final Pattern AMOUNT =
-        Pattern.compile("(?:¥|￥)\\s*([0-9]+(?:\\.[0-9]{1,2})?)");
+    // 金额两种写法都认：¥12.00 / 12.00元
+    private static final Pattern AMOUNT = Pattern.compile(
+        "(?:¥|￥)\\s*([0-9]+(?:\\.[0-9]{1,2})?)|([0-9]+(?:\\.[0-9]{1,2})?)\\s*元");
+    // 必须是支付类文案，否则「5元优惠券」也会被当成消费
+    private static final String[] PAY_WORDS = {
+        "支付", "付款", "消费", "扣款", "转账", "收款", "已付", "退款",
+    };
 
     private MediaSessionManager mediaManager;
     private MediaController controller;
@@ -148,12 +153,22 @@ public class BridgeService extends NotificationListenerService {
         String big = text(ex.getCharSequence(Notification.EXTRA_BIG_TEXT));
         String all = (title + " " + body + " " + big).trim();
 
+        boolean payWord = false;
+        for (String w : PAY_WORDS) {
+            if (all.contains(w)) {
+                payWord = true;
+                break;
+            }
+        }
+        if (!payWord) return;
+
         Matcher m = AMOUNT.matcher(all);
         if (!m.find()) return;
 
+        String digits = m.group(1) != null ? m.group(1) : m.group(2);
         double amount;
         try {
-            amount = Double.parseDouble(m.group(1));
+            amount = Double.parseDouble(digits);
         } catch (Exception e) {
             return;
         }
