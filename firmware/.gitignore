@@ -1,0 +1,13 @@
+# PlatformIO 构建产物
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# 本机工具链 venv
+.venv/
+
+# 构建日志
+build.log
+
+# Wi-Fi 凭证（只保留 .example）
+esp32-dashboard/include/secrets.h
