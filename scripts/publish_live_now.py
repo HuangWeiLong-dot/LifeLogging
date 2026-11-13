@@ -379,6 +379,8 @@ def phone_now(conn, day: str) -> dict | None:
             "artist": mmeta.get("artist"),
             "album": mmeta.get("album"),
             "duration": mmeta.get("duration"),
+            # 96x96 JPEG 的 base64，站点直接渲染成 data URI
+            "cover": mmeta.get("cover"),
             "raw": music_row["value_text"],
             "app": mmeta.get("app"),
             "at": iso(to_utc(music_row["ts_utc"])),

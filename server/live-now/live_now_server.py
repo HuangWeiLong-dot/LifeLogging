@@ -250,6 +250,7 @@ def phone_server(day: str) -> dict | None:
             "artist": mmeta.get("artist"),
             "album": mmeta.get("album"),
             "duration": mmeta.get("duration"),
+            "cover": mmeta.get("cover"),
             "raw": music_row["value_text"],
             "app": mmeta.get("app"),
             "at": base.iso(base.to_utc(music_row.get("ts_utc"))),

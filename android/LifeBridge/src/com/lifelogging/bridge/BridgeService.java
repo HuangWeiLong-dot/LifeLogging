@@ -2,6 +2,7 @@ package com.lifelogging.bridge;
 
 import android.app.Notification;
 import android.content.ComponentName;
+import android.graphics.Bitmap;
 import android.media.MediaMetadata;
 import android.media.session.MediaController;
 import android.media.session.MediaSessionManager;
@@ -9,10 +10,12 @@ import android.os.Bundle;
 import android.service.notification.NotificationListenerService;
 import android.service.notification.StatusBarNotification;
 import android.text.TextUtils;
+import android.util.Base64;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -107,6 +110,11 @@ public class BridgeService extends NotificationListenerService {
             if (!TextUtils.isEmpty(album)) meta.put("album", album);
             if (durationMs > 0) meta.put("duration", durationMs / 1000);
 
+            // 封面：缩到 96x96 JPEG 再 base64，一张约 2-4KB。
+            // 站点通过 /now 直接渲染 data URI，不需要额外的图床。
+            String cover = albumArt(md);
+            if (cover != null) meta.put("cover", cover);
+
             JSONObject e = new JSONObject();
             e.put("ts", System.currentTimeMillis() / 1000);
             e.put("domain", "phone");
@@ -178,6 +186,22 @@ public class BridgeService extends NotificationListenerService {
             bodyJson.put("events", events);
             Http.post(this, bodyJson.toString());
         } catch (Exception ignored) {
+        }
+    }
+
+    /** 专辑封面 → 96x96 JPEG base64；没有就返回 null。 */
+    private static String albumArt(MediaMetadata md) {
+        Bitmap art = md.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART);
+        if (art == null) art = md.getBitmap(MediaMetadata.METADATA_KEY_ART);
+        if (art == null) return null;
+        try {
+            Bitmap scaled = Bitmap.createScaledBitmap(art, 96, 96, true);
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            scaled.compress(Bitmap.CompressFormat.JPEG, 60, bos);
+            if (scaled != art) scaled.recycle();
+            return Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP);
+        } catch (Exception e) {
+            return null;
         }
     }
 

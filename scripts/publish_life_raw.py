@@ -231,6 +231,10 @@ def build_events(conn: sqlite3.Connection, day: str) -> list[dict[str, Any]]:
         if row["domain"] == "phone" and row["metric"] == "notification":
             meta = {k: v for k, v in meta.items() if k not in NOTIFICATION_DROP_META}
             meta["body"] = "redacted"
+        # 封面是 96x96 JPEG 的 base64，一天几十首会把归档撑大几 MB；
+        # 它只在实时卡片上有意义，归档里去掉。
+        if row["domain"] == "phone" and row["metric"] == "music":
+            meta.pop("cover", None)
         out.append({
             "ts_utc": row["ts_utc"],
             "domain": row["domain"],
