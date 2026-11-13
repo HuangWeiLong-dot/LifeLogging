@@ -781,8 +781,74 @@ def t_phone_events():
         f"屏幕数据之前那 6 分钟被吞掉了: {s7['top_apps']}"
 
 
+def t_phone_state():
+    """手机「状态」类事件：电量 / 网络 / UsageStats 实测应用时长。
+
+    这几类是 2026-11 加的。之前手机只有 unlock / app_switch / screen，
+    应用时长全靠切换事件一阶差分推出来 —— 漏一次切换就记错。
+    """
+    from datetime import datetime, timedelta
+    import normalize as N
+
+    tz = ZoneInfo(CFG["timezone"])
+    t0 = datetime(2026, 11, 12, 9, 0, 0, tzinfo=tz)
+
+    def iso(dt):
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    evs = [
+        {"ts_utc": iso(t0), "metric": "battery", "value_num": 80, "meta": {"charging": True}},
+        {"ts_utc": iso(t0 + timedelta(minutes=15)), "metric": "battery", "value_num": 85,
+         "meta": {"charging": True}},
+        {"ts_utc": iso(t0 + timedelta(minutes=30)), "metric": "battery", "value_num": 84,
+         "meta": {"charging": False}},
+        {"ts_utc": iso(t0), "metric": "network", "value_text": "wifi:home"},
+        {"ts_utc": iso(t0 + timedelta(minutes=20)), "metric": "network", "value_text": "mobile"},
+        {"ts_utc": iso(t0 + timedelta(minutes=50)), "metric": "network", "value_text": "wifi:home"},
+        # UsageStats 量出来的前台秒数（微信 400s、Chrome 200s）
+        {"ts_utc": iso(t0 + timedelta(minutes=15)), "metric": "app_usage",
+         "value_text": "com.tencent.mm", "value_num": 400},
+        {"ts_utc": iso(t0 + timedelta(minutes=15)), "metric": "app_usage",
+         "value_text": "com.android.chrome", "value_num": 200},
+        {"ts_utc": iso(t0), "metric": "music", "value_text": "Song A",
+         "meta": {"app": "com.netease.cloudmusic"}},
+        {"ts_utc": iso(t0 + timedelta(minutes=5)), "metric": "music", "value_text": "Song B",
+         "meta": {"app": "com.netease.cloudmusic"}},
+        {"ts_utc": iso(t0), "metric": "notification", "value_text": "com.tencent.mm"},
+        {"ts_utc": iso(t0 + timedelta(minutes=1)), "metric": "notification",
+         "value_text": "com.tencent.mm"},
+        {"ts_utc": iso(t0 + timedelta(minutes=2)), "metric": "notification",
+         "value_text": "com.android.chrome"},
+    ]
+    s = N.summarize_phone(evs)
+
+    b = s["battery"]
+    assert b["start"] == 80 and b["end"] == 84 and b["max"] == 85, b
+    assert b["charging_minutes"] == 30.0, f"两段各 15 分钟充电，得到 {b}"
+
+    n = s["network"]
+    assert n["wifi_minutes"] == 20.0 and n["mobile_minutes"] == 30.0, n
+
+    # 实测总量过了 5 分钟门槛，应该顶掉「切换推断」的 top_apps
+    assert s["measured_app_minutes"] == 10.0, s["measured_app_minutes"]
+    top = dict(s["top_apps"])
+    assert top["WeChat"] == 6.7 and top["Chrome"] == 3.3, top
+
+    assert s["music"]["plays"] == 2 and s["music"]["last"] == "Song B", s["music"]
+    nf = s["notifications"]
+    assert nf["total"] == 3 and dict(nf["by_app"])["WeChat"] == 2, nf
+
+    # 停报 5 小时之后的那一条，不能把整段都算成「充电中」
+    s2 = N.summarize_phone([
+        {"ts_utc": iso(t0), "metric": "battery", "value_num": 50, "meta": {"charging": True}},
+        {"ts_utc": iso(t0 + timedelta(hours=5)), "metric": "battery", "value_num": 100},
+    ])
+    assert s2["battery"]["charging_minutes"] == 0.0, s2["battery"]
+
+
 check("package→name mapping / inferred foreground time / long gaps ignored",
       t_phone_events)
+check("phone battery / network / measured app usage", t_phone_state)
 
 
 # ── 7d. 服务器中继 ────────────────────────────────────────────────

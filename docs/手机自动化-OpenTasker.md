@@ -119,6 +119,115 @@ Body：
 > 都会触发，行为等价。但**第一次上线后看一眼中继的当天条数**，如果比平时多
 > 一倍，说明它把「离开」也算了一次，需要加个条件。
 
+### 3.5 电量（2026-11 新增）
+
+- 触发：时间上下文**每 15 分钟**；再加一个「电源状态变化」上下文（插拔充电器）
+- Body：
+
+```json
+{"ts":"now","domain":"phone","metric":"battery","value_num":72,"meta":{"charging":true},"source":"opentasker"}
+```
+
+- `value_num` 是 0–100 的整数（`%BATT`）
+- `meta.charging` 用 `%CHARGING`（`true` / `false`）
+- 落库后 `normalize.summarize_phone` 会算出当天起始/最低电量、掉电量和充电时长
+
+### 3.6 网络
+
+- 触发：Wi-Fi 连接 / 断开、移动数据开 / 关（**只在变化时发**，不要定时发）
+- Body：
+
+```json
+{"ts":"now","domain":"phone","metric":"network","value_text":"wifi:301-2.4G","source":"opentasker"}
+```
+
+- `value_text` 三种形态：`wifi:<SSID>`、`mobile`、`off`
+- 两条之间的空档超过 45 分钟就不计入，防止停报后把一整天算成 Wi-Fi
+
+### 3.7 实测应用时长（UsageStats）——最重要的一条
+
+> **为什么需要它**：现在的「使用最久的 App」是拿两条 `app_switch` 的
+> **时间差推**出来的。漏一次切换（Tasker 被系统杀、或者切到一个没触发
+> 的应用），后面整段都会记到上一个应用头上，而且**不报错**。
+> UsageStats 是系统自己记的，直接读秒数。
+
+- 触发：时间上下文**每 15 分钟**
+- 权限：Usage Access（OpenTasker 的前台应用检测本来就要这个）
+- 一次发一批，别一个应用发一次：
+
+```json
+{"events":[
+  {"ts":"now","domain":"phone","metric":"app_usage","value_text":"com.tencent.mm","value_num":312},
+  {"ts":"now","domain":"phone","metric":"app_usage","value_text":"com.android.chrome","value_num":96}
+]}
+```
+
+- `value_num` = **本周期新增的前台秒数**，不是当天累计
+
+> ⚠️ **必须做差分**：`UsageStats.totalTimeInForeground` 是**当天累计**。
+> 直接把累计值发上来，一天会被加几十次。做法是存一个全局变量
+> （`%USAGE_SNAPSHOT`，JSON：包名 → 累计秒），每轮减去上一轮的值，
+> **跨天清零**。
+
+参考代码（放进 Java Function / JSlet）：
+
+```java
+UsageStatsManager usm = (UsageStatsManager) ctx.getSystemService(Context.USAGE_STATS_SERVICE);
+long now = System.currentTimeMillis();
+long midnight = /* 今天 00:00 的毫秒 */;
+List<UsageStats> list = usm.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, midnight, now);
+for (UsageStats u : list) {
+    long total = u.totalTimeInForeground / 1000;      // 当天累计秒
+    long prev  = snapshot.getOrDefault(u.getPackageName(), 0L);
+    long delta = Math.max(0, total - prev);
+    snapshot.put(u.getPackageName(), total);
+    if (delta >= 30) send(u.getPackageName(), delta); // 少于 30 秒的忽略
+}
+```
+
+> 本地侧的处理：`summarize_phone` 会在实测总量 **≥ 5 分钟**时才用它替换
+> 推断值，并同时保留 `inferred_top_apps`，出问题能立刻看出差在哪。
+
+> 如果 OpenTasker 的 Java Function 拿不到 Android `Context`，这条就做不了。
+> 退路有两条：① 用 **ActivityWatch Android**（开源，本身就记前台应用）；
+> ② 写一个几十行的 APK 直接 POST 到中继。**别用「拿不到就算了」糊过去** ——
+> 这条是手机侧唯一能显著提高数据质量的一条。
+
+### 3.8 在听什么（音乐）
+
+- 触发：**通知监听**里筛媒体通知，标题变化时发一次（同一首歌别重复发）
+- Body：
+
+```json
+{"ts":"now","domain":"phone","metric":"music","value_text":"Artist - Title","meta":{"app":"com.netease.cloudmusic","playing":true},"source":"opentasker"}
+```
+
+- `value_text` 就是能直接显示的那一行，**别拆成 artist/title 两个字段** ——
+  各家播放器的通知格式不一样，拆了就得为每个 App 写一套解析
+- 本地会汇成 `phone.music`（播放次数、常听曲目、最后在听什么）；
+  `/api/life/now` 里也会带上，ESP32 看板的右下角会直接显示歌名
+
+### 3.9 通知
+
+- 触发：**通知监听**，每条新通知发一次
+- Body：
+
+```json
+{"ts":"now","domain":"phone","metric":"notification","value_text":"com.tencent.mm","meta":{"title":"...","text":"...","category":"msg"},"source":"opentasker"}
+```
+
+> ⚠️ **正文只留在本地。** `publish_life_raw` 在发布前会把 `meta` 里的
+> `title` / `text` / `bigText` / `subText` / `summary` / `lines` **全部删掉**，
+> 只发布「哪个 App、什么时候、几条」。
+>
+> 这条和「发布 ≠ 脱敏」不冲突：那条说的是**你的**生活数据原样公开，
+> 而通知里是**别人**发给你的话。真要连本地也不留正文，只发包名就行，
+> 计数一样准。
+
+> ⚠️ **同一个 App 在同一秒内的多条通知会被中继去重**（去重键是
+> `(ts_utc, metric, value_text)`）。消息连发时会少计几条，能接受；
+> 要精确计数就得把 `ts` 换成 `%TIMES` 并接受同样的秒级精度限制。
+
 ---
 
 ## 4. 手环数据上传

@@ -147,7 +147,7 @@ sudo /opt/lifelogging/repo/server/deploy.sh           # git ff-only + 按改动�
 | `location` | `collect_phone.py` | Dawarich 停留点 / 轨迹 / 通勤 |
 | `health` | `ingest_gadgetbridge.py` / `infer_sleep.py` | 手环步数 / 心率；**睡眠来自推断**（见下） |
 | `fitness` | `import_gpx.py` / `import_fit.py` | 锻炼轨迹，固定 `metric=watch_track` |
-| `phone` | `collect_phone_events.py` | 中继的解锁 / 切应用事件 |
+| `phone` | `collect_phone_events.py` | 中继的解锁 / 切应用 / 屏幕亮灭 / 电量 / 网络 / UsageStats 实测应用时长 |
 | `web` | 浏览器扩展 | 页面标题 / URL |
 | `manual` | 手工 | — |
 | `ai` | `collect_ai_usage.py` | 每日花费 / 余额 / token |
@@ -361,6 +361,9 @@ Leisure / Health / Social`（小时）：Work/Study/Life/Leisure = 桌面分类 
 - `/life` 聚合：城市级位置、分类时长、步数/心率、手机计数、AI 花费，**不含坐标、轨迹、
   窗口标题、URL、包名、余额**。
 - `/life/archive` 原始文档：**完整保留**窗口标题、URL、坐标、日记、问答、`meta`。
+  **例外：`phone/notification` 的正文不发布** —— `title`/`text`/`bigText`/`subText`/
+  `summary`/`lines` 在 `publish_life_raw.build_events` 里被删掉，只留「哪个 App、
+  什么时候、几条」。通知里是**别人**发给你的话，不属于「发布你的生活数据」。
   唯一会改的是凭证：URL 里 `token`/`state`/`code`/`part` 等 query 值、URL userinfo、
   `sk-`/`gh[pousr]_`/`github_pat_`/`xox`/`AKIA`、`Bearer` 头、`password=`、敏感 dict 键值
   替换成 `REDACTED`。**这是防凭证泄露，不是生活数据脱敏。**
@@ -440,7 +443,8 @@ Leisure / Health / Social`（小时）：Work/Study/Life/Leisure = 桌面分类 
 - `docs/分阶段落地.md` —— 分阶段实施步骤与当前进度
 - `docs/运维手册.md` —— 排障、备份清单、隐私开关、每日任务
 - `docs/扩展路线图.md` —— 计划中的扩展（其中「AI 用量统计」已由 `collect_ai_usage.py` 实现）
-- `docs/手机自动化-OpenTasker.md` —— 手机侧 Tasker 配置
+- `docs/手机自动化-Tasker.md` —— **当前在用**的手机侧配置（电量/网络/音乐/通知/应用时长）
+- `docs/手机自动化-OpenTasker.md` —— 想换开源替代时的迁移记录，请求体与 Tasker 版一致
 - `docs/lls-dataflow.mmd` + `render_dataflow.py` —— 数据流图源文件
 - `server/*/README.md`、`docker/grafana/README.md`、`windows/live-daemon/README.md`
 - `README.md` —— 总览与「已验证到什么程度」；注意里面 smoke 数字（8/8）已过时，

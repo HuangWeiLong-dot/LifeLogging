@@ -305,10 +305,63 @@ def phone_now(conn, day: str) -> dict | None:
         """SELECT COUNT(*) FROM events WHERE day_local = ? AND domain = 'phone' AND metric = 'unlock'""",
         (day,),
     ).fetchone()[0]
+    # 电量：手机每 15 分钟上报一条，取当天最新的一条。
+    # 注意 Worker 只校验 /now 的**顶层**字段（location/desktop/phone/watch/qa），
+    # section 内部是自由形状 —— 往 phone 里加 battery 不需要改站点。
+    batt = conn.execute(
+        """SELECT value_num, meta_json, ts_utc FROM events
+           WHERE day_local = ? AND domain = 'phone'
+             AND metric = 'battery' AND value_num IS NOT NULL
+           ORDER BY ts_utc DESC LIMIT 1""",
+        (day,),
+    ).fetchone()
+    battery = None
+    if batt is not None:
+        try:
+            meta = json.loads(batt["meta_json"] or "{}")
+        except (TypeError, ValueError):
+            meta = {}
+        # Tasker 变量没定义时会原样发 `%CHARGING`，不能当成 True
+        chg = meta.get("charging")
+        charging = chg is True or (
+            isinstance(chg, str)
+            and not chg.startswith("%")
+            and chg.strip().lower() in ("true", "1", "yes", "on")
+        )
+        battery = {
+            "level": round(float(batt["value_num"]), 0),
+            "charging": charging,
+            "at": iso(to_utc(batt["ts_utc"])),
+        }
+
+    # 正在听什么：取当天最新一条 music 事件。
+    music_row = conn.execute(
+        """SELECT value_text, meta_json FROM events
+           WHERE day_local = ? AND domain = 'phone' AND metric = 'music'
+           ORDER BY ts_utc DESC LIMIT 1""",
+        (day,),
+    ).fetchone()
+    music = None
+    if music_row is not None and music_row["value_text"]:
+        try:
+            mmeta = json.loads(music_row["meta_json"] or "{}")
+        except (TypeError, ValueError):
+            mmeta = {}
+        music = {"title": music_row["value_text"], "app": mmeta.get("app")}
+
+    notif_today = conn.execute(
+        """SELECT COUNT(*) FROM events
+           WHERE day_local = ? AND domain = 'phone' AND metric = 'notification'""",
+        (day,),
+    ).fetchone()[0]
+
     return {
         "app": friendly_phone(app_row["value_text"]) if app_row else None,
         "screenOn": (screen_row["metric"] == "screen_on") if screen_row else None,
         "unlocks": int(unlocks or 0),
+        "battery": battery,
+        "music": music,
+        "notifications": int(notif_today or 0),
         "lastSeen": iso(to_utc(latest["ts_utc"])),
         "lastEvent": latest["metric"],
     }

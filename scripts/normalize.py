@@ -914,6 +914,24 @@ PHONE_CATEGORY_KEYWORDS = (
 DEFAULT_PHONE_CATEGORY = "Life"
 
 
+def _truthy_flag(v: Any) -> bool:
+    """Tasker 里用了不存在的变量时，会把 `%NAME` **原样**发上来。
+
+    ⚠️ 不能用 `bool(v)`：`bool("%CHARGING")` 是 True，会把「不知道」
+       变成「一直在充电」，充电时长直接算成整天。
+    """
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return v != 0
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s.startswith("%"):        # 变量没被替换
+            return False
+        return s in ("true", "1", "yes", "on", "charging")
+    return False
+
+
 def phone_app_category(raw: str) -> str:
     """应用（包名或人名）→ 七维之一。手机上的时间一定会有归属。"""
     name = phone_app_name(raw)
@@ -935,6 +953,10 @@ def phone_app_category(raw: str) -> str:
 # 这个上限只防最后一种情况：没有解锁、也没有切换，却隔了很久 ——
 # 那是 Tasker 被系统杀了一段时间，不该把整段都算成那个应用的前台。
 MAX_FOREGROUND_GAP = timedelta(minutes=60)
+
+# 电量 / 网络这类「状态」事件：两条之间的空档超过这个值就不计入，
+# 防止手机停报一整天后把「充电中」一路算到底。
+PHONE_STATE_GAP_MAX = timedelta(minutes=45)
 
 
 def phone_app_name(raw: str) -> str:
@@ -1111,6 +1133,11 @@ def summarize_phone(events: list[dict[str, Any]]) -> dict[str, Any]:
     unlocks: list[datetime] = []
     switches: list[tuple[datetime, str]] = []
     screen_events: list[tuple[datetime, str]] = []
+    battery: list[tuple[datetime, float, bool]] = []
+    network: list[tuple[datetime, str]] = []
+    measured: dict[str, float] = {}
+    music: list[tuple[datetime, str, str]] = []
+    notif: dict[str, int] = {}
 
     for e in events:
         ts = _parse(e.get("ts_utc"))
@@ -1125,6 +1152,32 @@ def summarize_phone(events: list[dict[str, Any]]) -> dict[str, Any]:
             switches.append((ts, (e.get("value_text") or "").strip()))
         elif met in ("screen_on", "screen_off"):
             screen_events.append((ts, met))
+        elif met == "battery" and e.get("value_num") is not None:
+            meta = e.get("meta") or {}
+            battery.append((ts, float(e.get("value_num") or 0),
+                            _truthy_flag(meta.get("charging"))))
+        elif met == "network":
+            kind = (e.get("value_text") or "").strip()
+            if "%" in kind:
+                # Tasker 变量没替换（例如 `wifi:%SSID`）——只保留前面的 wifi
+                kind = kind.split(":", 1)[0]
+            network.append((ts, kind))
+        elif met == "app_usage" and e.get("value_num") is not None:
+            # 手机侧用 UsageStats 量出来的前台秒数，比「切换事件一阶差分」准：
+            # 不会因为漏掉一次切换就把几十分钟记到上一个应用头上。
+            raw_app = (e.get("value_text") or "").strip()
+            secs = float(e.get("value_num") or 0)
+            if raw_app and secs > 0:
+                measured[raw_app] = measured.get(raw_app, 0.0) + secs
+        elif met == "music":
+            title = (e.get("value_text") or "").strip()
+            if title:
+                music.append((ts, title, str((e.get("meta") or {}).get("app") or "")))
+        elif met == "notification":
+            app = (e.get("value_text") or "").strip()
+            if app:
+                # 按包名计数，出报表时再翻译成人话
+                notif[app] = notif.get(app, 0) + 1
 
     unlocks.sort()
     switches.sort(key=lambda x: x[0])
@@ -1171,9 +1224,87 @@ def summarize_phone(events: list[dict[str, Any]]) -> dict[str, Any]:
         if end is not None:
             attribute(raw_last, (end - t_last).total_seconds())
 
+    # ---- 实测应用时长（UsageStats）优先于推断 ----
+    measured_named: dict[str, float] = {}
+    for raw_app, secs in measured.items():
+        if raw_app in PHONE_NOT_AN_APP or raw_app.startswith("%"):
+            continue
+        name = phone_app_name(raw_app)
+        measured_named[name] = measured_named.get(name, 0.0) + secs
+    measured_total = sum(measured_named.values())
+
     # 40 而不是 10：手机应用列表也要能在单日详情里完整展开。
     # 真实一天通常 15–30 个应用，这个上限只是防止异常数据撑爆 payload。
-    top = sorted(fore.items(), key=lambda x: -x[1])[:40]
+    inferred_top = sorted(fore.items(), key=lambda x: -x[1])[:40]
+    measured_top = sorted(measured_named.items(), key=lambda x: -x[1])[:40]
+    # 至少攒够 5 分钟的实测才敢替换推断值，否则一天刚开始时会被半截数据带偏
+    top = measured_top if measured_total >= 300 else inferred_top
+
+    # ---- 电量 ----
+    battery_summary = None
+    if battery:
+        battery.sort(key=lambda x: x[0])
+        levels = [v for _, v, _ in battery]
+        charging_seconds = 0.0
+        for (t0, _, c0), (t1, _, _) in zip(battery, battery[1:]):
+            gap = (t1 - t0).total_seconds()
+            if c0 and 0 <= gap <= PHONE_STATE_GAP_MAX.total_seconds():
+                charging_seconds += gap
+        battery_summary = {
+            "start": round(levels[0], 1),
+            "end": round(levels[-1], 1),
+            "min": round(min(levels), 1),
+            "max": round(max(levels), 1),
+            "drop": round(levels[0] - levels[-1], 1),
+            "charging_minutes": round(charging_seconds / 60.0, 1),
+            "samples": len(levels),
+        }
+
+    # ---- 网络 ----
+    network_summary = None
+    if network:
+        network.sort(key=lambda x: x[0])
+        wifi_seconds = mobile_seconds = 0.0
+        for (t0, kind), (t1, _) in zip(network, network[1:]):
+            gap = (t1 - t0).total_seconds()
+            if not (0 <= gap <= PHONE_STATE_GAP_MAX.total_seconds()):
+                continue
+            if kind.startswith("wifi"):
+                wifi_seconds += gap
+            elif kind == "mobile":
+                mobile_seconds += gap
+        network_summary = {
+            "wifi_minutes": round(wifi_seconds / 60.0, 1),
+            "mobile_minutes": round(mobile_seconds / 60.0, 1),
+            "last": network[-1][1],
+            "changes": len(network),
+        }
+
+    # ---- 在听什么 ----
+    music_summary = None
+    if music:
+        music.sort(key=lambda x: x[0])
+        counts: dict[str, int] = {}
+        for _, title, _ in music:
+            counts[title] = counts.get(title, 0) + 1
+        music_summary = {
+            "plays": len(music),
+            "tracks": [[t, c] for t, c in sorted(counts.items(), key=lambda x: -x[1])[:20]],
+            "last": music[-1][1],
+            "last_app": music[-1][2],
+        }
+
+    # ---- 通知（只有计数，正文不落这里）----
+    notif_summary = None
+    if notif:
+        by_name: dict[str, int] = {}
+        for pkg, cnt in notif.items():
+            name = phone_app_name(pkg)
+            by_name[name] = by_name.get(name, 0) + cnt
+        notif_summary = {
+            "total": sum(by_name.values()),
+            "by_app": [[a, c] for a, c in sorted(by_name.items(), key=lambda x: -x[1])[:20]],
+        }
 
     return {
         "unlocks": len(unlocks),
@@ -1181,6 +1312,13 @@ def summarize_phone(events: list[dict[str, Any]]) -> dict[str, Any]:
         "first_unlock": unlocks[0].astimezone(TZ).strftime("%H:%M") if unlocks else "",
         "last_unlock": unlocks[-1].astimezone(TZ).strftime("%H:%M") if unlocks else "",
         "top_apps": [[name, round(secs / 60.0, 1)] for name, secs in top],
+        # 实测/推断两套都留着：出问题时能立刻看出差在哪
+        "measured_app_minutes": round(measured_total / 60.0, 1),
+        "inferred_top_apps": [[name, round(secs / 60.0, 1)] for name, secs in inferred_top],
+        "battery": battery_summary,
+        "network": network_summary,
+        "music": music_summary,
+        "notifications": notif_summary,
         # **屏幕使用时间**（亮屏总时长）。这是拿 screen_on / screen_off
         # 直接测出来的，不是推的 —— 手机加了 Display 事件之后才有。
         "screen_minutes": round(screen_seconds / 60.0, 1),

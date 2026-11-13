@@ -201,6 +201,14 @@ def parse_tasks(journal: str | None) -> list[dict[str, Any]]:
     return tasks
 
 
+# 通知正文是**别人的**隐私，不进公开归档。
+#
+# 这跟「发布 ≠ 脱敏」不冲突：那条说的是「你的生活数据原样公开」，
+# 而通知里是别人发给你的话。默认只保留「谁、什么时候、几条」，
+# 正文和标题一律丢掉 —— 否则任何线上一搜就能看到朋友的聊天内容。
+NOTIFICATION_DROP_META = ("title", "text", "bigText", "subText", "summary", "lines")
+
+
 def build_events(conn: sqlite3.Connection, day: str) -> list[dict[str, Any]]:
     rows = conn.execute(
         """SELECT ts_utc, domain, metric, value_num, value_text, source,
@@ -216,6 +224,9 @@ def build_events(conn: sqlite3.Connection, day: str) -> list[dict[str, Any]]:
             meta = json.loads(row["meta_json"] or "{}")
         except (TypeError, ValueError):
             meta = {}
+        if row["domain"] == "phone" and row["metric"] == "notification":
+            meta = {k: v for k, v in meta.items() if k not in NOTIFICATION_DROP_META}
+            meta["body"] = "redacted"
         out.append({
             "ts_utc": row["ts_utc"],
             "domain": row["domain"],

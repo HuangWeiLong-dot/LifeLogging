@@ -585,9 +585,15 @@ def build_phone(rows: list[sqlite3.Row]) -> dict | None:
         return None
 
     raw = [
-        {"ts_utc": row["ts_utc"], "metric": row["metric"], "value_text": row["value_text"]}
+        {"ts_utc": row["ts_utc"], "metric": row["metric"], "value_text": row["value_text"],
+         "value_num": row["value_num"]}
         for row in rows
-        if row["metric"] in ("unlock", "app_switch", "screen_on", "screen_off")
+        # app_usage 是手机用 UsageStats 量出来的前台秒数，比切换推断准；
+        # summarize_phone 会在它够 5 分钟时自动替换 top_apps 的来源。
+        if row["metric"] in (
+            "unlock", "app_switch", "screen_on", "screen_off",
+            "app_usage", "battery", "network", "music", "notification",
+        )
     ]
     if not raw:
         return None
@@ -601,6 +607,11 @@ def build_phone(rows: list[sqlite3.Row]) -> dict | None:
         if len(apps) >= 40:
             break
 
+    batt = summary.get("battery")
+    net = summary.get("network")
+    mus = summary.get("music")
+    nf = summary.get("notifications")
+
     return {
         "unlocks": int(summary.get("unlocks") or 0),
         "screenOn": sum(1 for r in raw if r["metric"] == "screen_on"),
@@ -608,6 +619,25 @@ def build_phone(rows: list[sqlite3.Row]) -> dict | None:
         "screenMinutes": round(float(summary.get("screen_minutes") or 0.0), 1),
         "appSwitches": int(summary.get("app_switches") or 0),
         "topApps": apps,
+        # 以下四段是 2026-11 新增；Worker 的 PHONE_KEYS 里有对应白名单。
+        # 网络 / 音乐里的 last 可能是空串，Worker 的 isName 要求非空，这里转成 None。
+        "battery": {
+            "start": batt["start"], "end": batt["end"],
+            "min": batt["min"], "max": batt["max"], "drop": batt["drop"],
+            "chargingMinutes": batt["charging_minutes"], "samples": batt["samples"],
+        } if batt else None,
+        "network": {
+            "wifiMinutes": net["wifi_minutes"], "mobileMinutes": net["mobile_minutes"],
+            "last": net.get("last") or None, "changes": net["changes"],
+        } if net else None,
+        "music": {
+            "plays": mus["plays"], "last": mus.get("last") or None,
+            "tracks": [[t, int(c)] for t, c in (mus.get("tracks") or [])],
+        } if mus else None,
+        "notifications": {
+            "total": int(nf["total"]),
+            "byApp": [[a, int(c)] for a, c in (nf.get("by_app") or [])],
+        } if nf else None,
     }
 
 

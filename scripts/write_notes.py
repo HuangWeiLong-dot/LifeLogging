@@ -112,10 +112,11 @@ def write_location(day_iso: str, tl: dict) -> Path | None:
 
 
 def write_phone(day_iso: str, tl: dict) -> Path | None:
-    """02-Phone —— 解锁次数、应用切换、用得最多的应用。
+    """02-Phone —— 解锁、应用、电量、网络、音乐、通知。
 
-    数据来自 Tasker/MacroDroid 往 `/ingest/phone` 上报的两类事件；
-    手机上没配好的话这里是空的（返回 None，不生成文件）。
+    数据来自手机往 `/ingest/phone` 上报的事件；手机上没配好的话这里是空的
+    （返回 None，不生成文件）。各段都是**有数据才渲染**，所以只配了一半
+    也不会出现空标题。
 
     ⚠️ 「前台时长」是**推导**的，不是上报的：两条相邻 App 切换之间的时间差
        就是前一个应用在前台待了多久（见 `normalize.summarize_phone`）。
@@ -175,6 +176,50 @@ def write_phone(day_iso: str, tl: dict) -> Path | None:
     else:
         body += ["> No app-switch events. Check that the Tasker `App Changed` profile is"
                  " enabled and that Usage Access is granted.", ""]
+
+    battery = phone.get("battery")
+    if battery:
+        body += ["## Battery", ""]
+        body.append(
+            f"- {battery['start']:.0f}% → {battery['end']:.0f}%"
+            f" (drop {battery['drop']:.0f}), min {battery['min']:.0f}%"
+            f", max {battery['max']:.0f}%"
+        )
+        if battery.get("charging_minutes"):
+            mins = battery["charging_minutes"]
+            # 不足 1 分钟时别显示成 0，看着像没充过电
+            shown = f"{mins:.0f}" if mins >= 1 else f"{mins:.1f}"
+            body.append(f"- Charging: **{shown} min**")
+        body.append("")
+
+    network = phone.get("network")
+    if network:
+        body += ["## Network", ""]
+        body.append(f"- Wi-Fi: **{network['wifi_minutes']:.0f} min**")
+        body.append(f"- Mobile data: **{network['mobile_minutes']:.0f} min**")
+        body.append("")
+
+    music = phone.get("music")
+    if music:
+        body += ["## Music", ""]
+        body.append(f"- {music['plays']} play(s), last: **{music.get('last', '')}**")
+        tracks = music.get("tracks") or []
+        if tracks:
+            body += ["", "| Track | Plays |", "|---|---|"]
+            for title, plays in tracks[:15]:
+                body.append(f"| {title} | {plays} |")
+        body.append("")
+
+    notif = phone.get("notifications")
+    if notif:
+        body += ["## Notifications", ""]
+        body.append(f"- Total: **{notif['total']}**")
+        by_app = notif.get("by_app") or []
+        if by_app:
+            body += ["", "| App | Count |", "|---|---|"]
+            for name, cnt in by_app[:15]:
+                body.append(f"| {name} | {cnt} |")
+        body.append("")
 
     p.write_text("\n".join(body), encoding="utf-8")
     return p
