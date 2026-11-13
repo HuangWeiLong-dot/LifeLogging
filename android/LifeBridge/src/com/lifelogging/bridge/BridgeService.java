@@ -7,12 +7,14 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.media.MediaMetadata;
 import android.media.session.MediaController;
 import android.media.session.MediaSessionManager;
 import android.media.session.PlaybackState;
 import android.net.ConnectivityManager;
 import android.net.Network;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -26,6 +28,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -270,8 +273,15 @@ public class BridgeService extends NotificationListenerService {
 
         if (TextUtils.isEmpty(title)) return;
 
-        // 同一首歌会反复回调（进度、缓冲），去重
-        String signature = pkg + "|" + title + "|" + artist;
+        // 封面：缩到 96x96 JPEG 再 base64，一张约 2-4KB。
+        // 站点通过 /now 直接渲染 data URI，不需要额外的图床。
+        String cover = albumArt(md);
+
+        // 同一首歌会反复回调（进度、缓冲），去重。
+        // ⚠️ 必须把「这次有没有封面」算进去：播放器通常先给歌名、封面晚几百毫秒
+        //    才到，按歌名去重会把第二次（带封面的）回调直接吞掉，
+        //    表现就是换专辑后封面一直是空的。
+        String signature = pkg + "|" + title + "|" + artist + "|" + (cover != null);
         if (signature.equals(lastTrack)) return;
         lastTrack = signature;
 
@@ -282,10 +292,6 @@ public class BridgeService extends NotificationListenerService {
             if (!TextUtils.isEmpty(artist)) meta.put("artist", artist);
             if (!TextUtils.isEmpty(album)) meta.put("album", album);
             if (durationMs > 0) meta.put("duration", durationMs / 1000);
-
-            // 封面：缩到 96x96 JPEG 再 base64，一张约 2-4KB。
-            // 站点通过 /now 直接渲染 data URI，不需要额外的图床。
-            String cover = albumArt(md);
             if (cover != null) meta.put("cover", cover);
 
             JSONObject e = new JSONObject();
@@ -375,9 +381,15 @@ public class BridgeService extends NotificationListenerService {
     }
 
     /** 专辑封面 → 96x96 JPEG base64；没有就返回 null。 */
-    private static String albumArt(MediaMetadata md) {
+    private String albumArt(MediaMetadata md) {
         Bitmap art = md.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART);
         if (art == null) art = md.getBitmap(MediaMetadata.METADATA_KEY_ART);
+        if (art == null) {
+            // 不少播放器（包括酷狗概念版的部分曲目）只给 URI，不给 Bitmap
+            String uri = md.getString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI);
+            if (uri == null) uri = md.getString(MediaMetadata.METADATA_KEY_ART_URI);
+            if (uri != null) art = bitmapFromUri(uri);
+        }
         if (art == null) return null;
         try {
             Bitmap scaled = Bitmap.createScaledBitmap(art, 96, 96, true);
@@ -385,6 +397,14 @@ public class BridgeService extends NotificationListenerService {
             scaled.compress(Bitmap.CompressFormat.JPEG, 60, bos);
             if (scaled != art) scaled.recycle();
             return Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private Bitmap bitmapFromUri(String uri) {
+        try (InputStream in = getContentResolver().openInputStream(Uri.parse(uri))) {
+            return BitmapFactory.decodeStream(in);
         } catch (Exception e) {
             return null;
         }
