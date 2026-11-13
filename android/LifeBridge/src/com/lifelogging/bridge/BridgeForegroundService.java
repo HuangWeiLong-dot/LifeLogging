@@ -23,8 +23,8 @@ public class BridgeForegroundService extends Service {
         super.onCreate();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
-                CHANNEL, "LifeBridge 运行状态", NotificationManager.IMPORTANCE_LOW);
-            channel.setDescription("采集服务是否在运行");
+                CHANNEL, "LifeBridge Status", NotificationManager.IMPORTANCE_LOW);
+            channel.setDescription("Collector running state");
             channel.setShowBadge(false);
             NotificationManager nm = getSystemService(NotificationManager.class);
             if (nm != null) nm.createNotificationChannel(channel);
@@ -48,8 +48,8 @@ public class BridgeForegroundService extends Service {
             ? new Notification.Builder(this, CHANNEL)
             : new Notification.Builder(this);
         return builder
-            .setContentTitle("LifeBridge 正在采集")
-            .setContentText("音乐 · 屏幕 · 电量 · 网络 · 通知")
+            .setContentTitle("LifeBridge is collecting")
+            .setContentText("Music · Screen · Battery · Network · Notifications")
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setOngoing(true)
             .setShowWhen(false)

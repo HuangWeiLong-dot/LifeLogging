@@ -50,7 +50,7 @@ public class SettingsActivity extends Activity {
                 .putString("cf_secret", cfSecret.getText().toString().trim())
                 .putString("media_pkg", mediaPkg.getText().toString().trim())
                 .apply();
-            last.setText("已保存。触发一次换歌就能在中继里看到事件。");
+            last.setText("Saved. Play a track and the relay should receive it.");
         });
 
         findViewById(R.id.openAccess).setOnClickListener(v -> {
@@ -88,8 +88,8 @@ public class SettingsActivity extends Activity {
         super.onResume();
         boolean granted = notificationAccessGranted();
         status.setText(granted
-            ? "通知使用权：已开启 ✓"
-            : "通知使用权：未开启 —— 点下面的按钮，找到「Life Bridge」打开");
+            ? "Notification access: granted ✓"
+            : "Notification access: not granted — tap the button below and enable Life Bridge");
         status.setTextColor(granted ? 0xFF2E7D32 : 0xFFC62828);
     }
 
@@ -104,7 +104,7 @@ public class SettingsActivity extends Activity {
      * 必须等 HTTP 结果再显示 —— 只弹「已发送」的话，401/403 也看不出来。
      */
     private void sendTest() {
-        last.setText("发送中…");
+        last.setText("Sending…");
         try {
             JSONObject meta = new JSONObject();
             meta.put("app", "test");
@@ -123,18 +123,18 @@ public class SettingsActivity extends Activity {
 
             Http.post(this, body.toString(), (code, error) -> runOnUiThread(() -> {
                 if (code == 200) {
-                    last.setText("✓ 已送达（HTTP 200）。中继当天会多一条 bridge_test。");
+                    last.setText("✓ Delivered (HTTP 200). The relay now has one bridge_test event.");
                 } else if (code > 0) {
-                    last.setText("✗ 中继返回 HTTP " + code
-                        + (code == 401 ? "：X-API-Key 不对" : "")
-                        + (code == 403 ? "：Cloudflare Access 的 Token 不对或没加进 Policy" : ""));
+                    last.setText("✗ Relay returned HTTP " + code
+                        + (code == 401 ? ": wrong X-API-Key" : "")
+                        + (code == 403 ? ": Cloudflare Access token wrong or not in the policy" : ""));
                 } else {
-                    last.setText("✗ 连不上：" + (error == null ? "未知错误" : error)
+                    last.setText("✗ Cannot connect: " + (error == null ? "未知错误" : error)
                         + "\n检查地址、手机网络，以及是否走了 Tunnel 但没填 Token。");
                 }
             }));
         } catch (Exception ex) {
-            last.setText("✗ 构造请求失败：" + ex.getMessage());
+            last.setText("✗ Failed to build request: " + ex.getMessage());
         }
     }
 }
