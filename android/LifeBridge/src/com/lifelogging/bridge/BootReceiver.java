@@ -11,5 +11,12 @@ public class BootReceiver extends BroadcastReceiver {
         Context app = context.getApplicationContext();
         Heartbeat.schedule(app);
         Heartbeat.sendNow(app);
+
+        Intent service = new Intent(app, BridgeForegroundService.class);
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            app.startForegroundService(service);
+        } else {
+            app.startService(service);
+        }
     }
 }

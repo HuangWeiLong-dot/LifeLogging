@@ -2,6 +2,7 @@ package com.lifelogging.bridge;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.widget.Button;
@@ -64,6 +65,22 @@ public class SettingsActivity extends Activity {
         // 打开一次就把心跳排上（幂等），并立刻补一条电量/网络
         Heartbeat.schedule(this);
         Heartbeat.sendNow(this);
+        startBridgeService();
+
+        // Android 13+ 发通知要运行时授权；不给也不影响采集，只是看不到常驻通知
+        if (Build.VERSION.SDK_INT >= 33) {
+            requestPermissions(
+                new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 1);
+        }
+    }
+
+    private void startBridgeService() {
+        Intent intent = new Intent(this, BridgeForegroundService.class);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent);
+        } else {
+            startService(intent);
+        }
     }
 
     @Override

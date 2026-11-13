@@ -32,8 +32,8 @@ bash build.sh          # → LifeBridge.apk
 改 `version.properties`：
 
 ```properties
-versionCode=7      # 必须递增，否则不能覆盖安装
-versionName=1.6
+versionCode=8      # 必须递增，否则不能覆盖安装
+versionName=1.7
 ```
 
 manifest 里**不写**版本号——写死会覆盖 `aapt2` 传入的参数。
@@ -66,6 +66,13 @@ c023913905e7a7964d56a181db6a652037deb4f3e473fa65a13c58f2bc62dbd5
 
 > 装好后可以停用 Tasker 里这些 Profile：音乐、屏幕亮灭、电量、网络。
 > 同一个数据两个来源都发会重复计数（中继只按时间戳去重）。
+
+## 常驻通知
+
+打开 App 后会启动一个前台服务，通知栏常驻一条「LifeBridge 正在采集」。
+它有两个作用：看得见服务在跑；foreground service 的优先级比普通后台进程高，
+通知监听服务不容易被系统回收。Android 13+ 首次打开会请求通知权限，
+不允许也不影响采集，只是看不到这条通知。
 
 ## 隐私边界
 
