@@ -5208,6 +5208,76 @@ check("normalize: sleep / weather / nutrition 进 timeline 与 markdown",
       t_normalize_attach)
 
 
+# ── 31. 相关性分析 ────────────────────────────────────────────────
+print("\n[31] Pattern analysis: correlation, FDR, source filter")
+
+
+def t_pearson():
+    import patterns as P
+
+    # 完全正相关 / 完全负相关
+    assert abs(P._pearson([1, 2, 3, 4], [2, 4, 6, 8]) - 1.0) < 1e-9
+    assert abs(P._pearson([1, 2, 3, 4], [8, 6, 4, 2]) + 1.0) < 1e-9
+    # 常数序列没有相关性可言 —— 必须返回 None，不能返回 0 或 nan
+    assert P._pearson([1, 1, 1, 1], [1, 2, 3, 4]) is None
+    # 样本不足
+    assert P._pearson([1, 2], [3, 4]) is None
+
+
+def t_bh():
+    import patterns as P
+
+    # 经典例子：一个很小的 p 通过 FDR，其余不通过
+    q = P._benjamini_hochberg([0.001, 0.5, 0.6, 0.7])
+    assert q[0] < 0.10, q
+    assert all(x > 0.10 for x in q[1:]), q
+    # q 值必须单调不降（按 p 排序后），且都 <= 1
+    assert all(0.0 <= x <= 1.0 for x in q), q
+    assert P._benjamini_hochberg([]) == []
+
+
+def t_fisher_ci():
+    import patterns as P
+
+    lo, hi = P._fisher_ci(0.6, 30)
+    assert lo < 0.6 < hi, (lo, hi)
+    # n 越小，区间越宽
+    lo2, hi2 = P._fisher_ci(0.6, 12)
+    assert (hi2 - lo2) > (hi - lo), (lo2, hi2, lo, hi)
+    assert P._fisher_ci(1.0, 30) is None
+
+
+def t_source_filter():
+    import patterns as P
+
+    # 同一来源的两列不该被当成候选（构造性相关，不是行为发现）
+    # ⚠️ 别用完美线性数据：r=±1 会让 p 值算不出来（被跳过），
+    #    那样「同来源被排除」这条断言会因为**别的原因**通过，等于没测到。
+    rows = []
+    for i in range(20):
+        h = 1.0 + (i % 6)                      # 1..6，周期性
+        rows.append({
+            "day": f"2026-01-{i+1:02d}",
+            "desktop_hours": h,
+            "desktop_blocks": 2.0 + ((i * 2) % 5),      # 和时长相关但不完美
+            "steps": 8000.0 - 400.0 * h + (i % 4) * 150,  # 跨来源、真有关系
+        })
+    res = P.analyse(rows, min_n=10)
+    pairs = {(t["a"], t["b"]) for t in res["all"]}
+    assert ("desktop_hours", "desktop_blocks") not in pairs, pairs
+    # 跨来源那对应该在
+    assert any({a, b} == {"desktop_hours", "steps"} for a, b in pairs), pairs
+    # 结果里每条都必须带 n / r / q
+    for t in res["all"]:
+        assert t["n"] >= 10 and -1 <= t["r"] <= 1 and 0 <= t["q"] <= 1, t
+
+
+check("patterns: Pearson（含常数序列返回 None）", t_pearson)
+check("patterns: Benjamini–Hochberg 校正", t_bh)
+check("patterns: Fisher z 置信区间", t_fisher_ci)
+check("patterns: 同来源配对被排除 / 结果字段完整", t_source_filter)
+
+
 # ── 汇总 ───────────────────────────────────────────────────────────
 print("\n" + "=" * 64)
 print(f"passed {PASS} · failed {FAIL}")

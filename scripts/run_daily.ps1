@@ -201,6 +201,9 @@ function Invoke-OneDay($d) {
         $featArgs = @()
         if (-not $Refresh) { $featArgs = @("--coverage") }
         Invoke-Step "features" "scripts\features.py" $featArgs | Out-Null
+        # 相关性分析：日特征两两做相关 + FDR 校正，写 state/patterns.json。
+        # 纯本地计算、不花钱。只报跨来源的配对（同来源的相关是构造性的）。
+        Invoke-Step "patterns" "scripts\patterns.py" @() | Out-Null
         # 标签 + 证据 → state/graph.json（节点=天×维度，边分证词/统计两种）。
         # 纯本地计算、不花钱；样本不够时它会明说，不会编统计结论。
         Invoke-Step "graph" "scripts\link_graph.py" @() | Out-Null

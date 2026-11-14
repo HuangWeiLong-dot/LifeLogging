@@ -176,7 +176,8 @@ sudo /opt/lifelogging/repo/server/deploy.sh           # git ff-only + 按改动�
   `parse_nutrition`（飞书饮食记录 → 热量 / 三大营养素，**调 LLM**）、
   `normalize.py`（确定性规则，核心）；`label_free_text`（自由文本 → 1–5 分 +
   证据）、`structure_text`（自由文本 → 结构化事件）、`learn_apps` / `app_map`（未知应用映射）、
-  `features`（日状态向量，带 `FEATURE_VERSION`）、`link_graph`、`routine`（课表 vs 实际 →
+  `features`（日状态向量，带 `FEATURE_VERSION`）、`patterns`（日特征两两相关 + FDR 校正 →
+  `state/patterns.json`，**只测跨来源配对**）、`link_graph`、`routine`（课表 vs 实际 →
   偏离）、`baseline`（中位数 + MAD）、`memory`（FTS5 长期记忆）、`dataset`（离线训练集，
   **不在定时流水线**）。
 - **问答 / 复盘**：`generate_questions`（问责 4 + 常规 3）、`live_questions`（服务器，
