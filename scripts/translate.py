@@ -425,15 +425,25 @@ class Translator:
         if not items:
             return obj
 
-        translated = self.translate_many(items)
+        # ⚠️ 只把**真的需要翻译**的串送去模型。
+        #
+        #    原来是把所有字符串（包括 `msedge.exe`、`吹雪云.com`、URL）
+        #    一股脑塞给模型。那些串模型只能原样返回，而单串失败一次就会
+        #    `failed += 1`，发布层据此中止整轮 —— 一个中文域名就能让
+        #    30 天的聚合发不出去（实测踩到）。
+        #
+        #    `_needs_more_translation` 已经知道「URL / 专名之外还有没有中文」，
+        #    用它来过滤，既省 token 又不会制造假失败。
+        pending = [s for s in items if _needs_more_translation(s)]
+        translated = self.translate_many(pending) if pending else []
+        mapping = dict(zip(pending, translated))
         index = 0
 
         def rebuild(value: Any) -> Any:
             nonlocal index
             if isinstance(value, str):
-                out = translated[index]
                 index += 1
-                return out
+                return mapping.get(value, value)
             if isinstance(value, list):
                 return [rebuild(item) for item in value]
             if isinstance(value, dict):

@@ -45,7 +45,9 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import header, load_config  # noqa: E402
 from normalize import phone_category_intervals, summarize_phone  # noqa: E402
-from translate import Translator, has_cjk  # noqa: E402
+from translate import (  # noqa: E402
+    Translator, _needs_more_translation, has_cjk,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 MAX_DAY_BYTES = 32 * 1024
@@ -630,13 +632,18 @@ def build_phone(rows: list[sqlite3.Row]) -> dict | None:
             "wifiMinutes": net["wifi_minutes"], "mobileMinutes": net["mobile_minutes"],
             "last": net.get("last") or None, "changes": net["changes"],
         } if net else None,
+        # ⚠️ Worker 对这两张榜单的长度上限是 **40**（见 life.js 的 isPairs）。
+        #    不截断的话，某一天听了 41 首不同的歌就会让**整批 30 天** 400 ——
+        #    实测踩过（phone.music.tracks）。第 41 首之后对「今天听了什么」
+        #    没有额外信息，截断是安全的。
         "music": {
             "plays": mus["plays"], "last": mus.get("last") or None,
-            "tracks": [[t, int(c)] for t, c in (mus.get("tracks") or [])],
+            # 歌名截到 120：Worker 对音乐单独放宽到这个长度（见 life.js）
+            "tracks": [[str(t)[:120], int(c)] for t, c in (mus.get("tracks") or [])[:40]],
         } if mus else None,
         "notifications": {
             "total": int(nf["total"]),
-            "byApp": [[a, int(c)] for a, c in (nf.get("by_app") or [])],
+            "byApp": [[a, int(c)] for a, c in (nf.get("by_app") or [])[:40]],
         } if nf else None,
     }
 
@@ -1026,13 +1033,102 @@ def encode_day(day_obj: dict) -> str:
     return raw
 
 
+# ── 相关性结论 ────────────────────────────────────────────────
+#
+# `state/patterns.py` 用的是中文标签（给人看的控制台输出）；站点是英文的，
+# 所以这里单独维护一份英文名。**键必须和 patterns.FEATURE_SPECS 对齐**，
+# 对不上就退回原键 —— 宁可显示 desktop_hours，也不要显示空白。
+
+PATTERN_LABELS = {
+    "desktop_hours": "Computer hours",
+    "desktop_blocks": "Time blocks",
+    "desktop_longest_h": "Longest block",
+    "desktop_late_h": "Late-night hours",
+    "cat_work": "Work hours",
+    "cat_study": "Study hours",
+    "cat_leisure": "Leisure hours",
+    "cat_life": "Life hours",
+    "phone_screen_h": "Phone screen time",
+    "phone_fg_h": "Phone foreground",
+    "phone_unlocks": "Unlocks",
+    "phone_switches": "App switches",
+    "phone_leisure_min": "Phone leisure",
+    "loc_stays": "Stays",
+    "loc_distinct": "Districts visited",
+    "loc_stayed_h": "Time away",
+    "steps": "Steps",
+    "hr_avg": "Avg heart rate",
+    "hr_min": "Resting heart rate",
+    "hr_max": "Peak heart rate",
+    "sleep_h": "Sleep duration",
+    "sleep_onset": "Bedtime",
+    "sleep_mid": "Sleep midpoint",
+    "mood": "Mood",
+    "energy": "Energy",
+    "self_sleep": "Sleep (self-rated)",
+    "social": "Social",
+    "rest": "Rest",
+    "food": "Food",
+    "learn": "Learning",
+}
+
+MAX_PATTERNS = 20
+
+
+def build_patterns_payload(state_dir: Path) -> dict | None:
+    """读 state/patterns.json，压成站点要的形状。
+
+    ⚠️ 只发**通过 FDR 的前 20 条**，不发 `all`：候选对可能有几百条，
+       全发会把请求撑大，而且站点只展示过校正的结论。
+    """
+    path = state_dir / "patterns.json"
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+
+    findings = []
+    for f in (raw.get("findings") or [])[:MAX_PATTERNS]:
+        if not isinstance(f, dict):
+            continue
+        ci = f.get("ci")
+        findings.append({
+            "a": PATTERN_LABELS.get(str(f.get("a")), str(f.get("a")))[:40],
+            "b": PATTERN_LABELS.get(str(f.get("b")), str(f.get("b")))[:40],
+            "lag": "next-day" if f.get("lag") else "same-day",
+            "n": int(f.get("n") or 0),
+            "r": round(float(f.get("r") or 0.0), 3),
+            "ci": ([round(float(ci[0]), 3), round(float(ci[1]), 3)]
+                   if isinstance(ci, (list, tuple)) and len(ci) == 2 else None),
+            "q": round(float(f.get("q") or 0.0), 4),
+        })
+    if not findings:
+        return None
+
+    return {
+        "generatedAt": str(raw.get("generated_at") or ""),
+        "window": list(raw.get("window") or []),
+        "days": int(raw.get("days") or 0),
+        "tests": int(raw.get("tests") or 0),
+        "findings": findings,
+    }
+
+
 # ── 发送 ──────────────────────────────────────────────────────
 
-def post_days(url: str, token: str, days: list[dict], chunk_size: int, timeout: float) -> int:
+def post_days(url: str, token: str, days: list[dict], chunk_size: int, timeout: float,
+              patterns: dict | None = None) -> int:
     sent = 0
     for start in range(0, len(days), chunk_size):
         chunk = days[start:start + chunk_size]
         body = {"v": 1, "days": chunk}
+        # 结论是跨天的整份，只随第一块发一次（Worker 那边是 upsert）
+        if patterns and start == 0:
+            body["patterns"] = patterns
         last_error = None
         for attempt in range(4):
             try:
@@ -1149,6 +1245,8 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="只聚合不发送")
     parser.add_argument("--print-json", action="store_true", help="与 --dry-run 一起，打印完整 JSON")
     parser.add_argument("--no-translate", action="store_true", help="不翻译（调试用；会发布中文标签）")
+    parser.add_argument("--no-patterns", action="store_true",
+                        help="不发相关性结论（只发日聚合）")
     args = parser.parse_args()
 
     cfg = load_config()
@@ -1224,9 +1322,25 @@ def main() -> int:
             print(f"✗ 翻译失败：{exc}")
             return 1
         translation_failed = translator.failed
-        if has_cjk(json.dumps(payloads, ensure_ascii=False)):
+        # ⚠️ 不能直接 `has_cjk(json.dumps(...))`：payload 里**有意保留**中文的
+        #    东西（`吹雪云.com` 这种域名/专名）会被当成「没翻译完」，
+        #    于是一次发布被中止，而实际上什么都译好了（实测踩到）。
+        #    用翻译器自己的判据：URL / 已知专名之外还有没有中文。
+        def _walk_strings(v):
+            if isinstance(v, str):
+                yield v
+            elif isinstance(v, list):
+                for x in v:
+                    yield from _walk_strings(x)
+            elif isinstance(v, dict):
+                for x in v.values():
+                    yield from _walk_strings(x)
+
+        leftovers = [s for s in _walk_strings(payloads) if _needs_more_translation(s)]
+        if leftovers:
             translation_failed += 1
-            print("  ⚠️  聚合 payload 仍含中文")
+            print(f"  ⚠️  聚合 payload 仍含中文（{len(leftovers)} 处，"
+                  f"例：{leftovers[0][:40]}）")
         print(
             f"  · 翻译完成（缓存 {len(translator.cache)} 条，"
             f"失败 {translation_failed} 段）"
@@ -1262,7 +1376,14 @@ def main() -> int:
     timeout = float(site.get("timeout_s") or 30)
 
     try:
-        sent = post_days(url, token, payloads, chunk_size, timeout)
+        patterns = build_patterns_payload(state_dir) if not args.no_patterns else None
+        if patterns:
+            print(f"  · 相关性结论：{len(patterns['findings'])} 条（窗口 "
+                  f"{(patterns.get('window') or ['—', '—'])[0]} → "
+                  f"{(patterns.get('window') or ['—', '—'])[1]}）")
+        else:
+            print("  . 没有 state/patterns.json，本轮不发相关性结论")
+        sent = post_days(url, token, payloads, chunk_size, timeout, patterns=patterns)
     except RuntimeError as exc:
         print(f"✗ {exc}")
         return 1
