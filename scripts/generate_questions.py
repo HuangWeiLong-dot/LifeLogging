@@ -78,12 +78,27 @@ own "Adjustments for Tomorrow", from an open task that has been carried over, or
 from a place where the recorded data contradicts what they claim they want.
 
 - kind="routine" - a standing question about ONE dimension the automatic record \
-cannot see: energy, mood, sleep quality, whether they actually rested, whether they \
-ate properly, who they spent time with, what they learned, whether anything \
-long-postponed got touched. Anchor it in something concrete from the data (a \
-number, a timestamp, a conspicuous absence) so it is answerable and comparable \
-from day to day. "Did you feel good today?" is worthless - too vague to answer \
-honestly and impossible to compare across days.
+cannot see. **Every day, exactly one question per dimension, all seven of them:**
+
+    心情 (mood)      体力 (energy)    睡眠 (sleep)
+    人际 (social)    吃饭 (food)      休息 (rest)    学习 (learn)
+
+  These seven are the backbone of the labelling pipeline: the first three become \
+1-5 scores, the other four are scored later from your text. Dropping one leaves \
+that dimension without a label for the day, so **none of them is optional** - not \
+even on a quiet day.
+
+  What is optional is how much each one costs to answer. Every question must be \
+ONE sentence, anchored in that day's actual data (a number, a timestamp, a \
+conspicuous absence) so that answering takes a second:
+
+    GOOD  休息: "14:00-17:00 had no window and no unlocks - were you resting, or out?"
+    BAD   休息: "How was your rest today?"
+
+  When a dimension's data is thin, anchor it in the absence itself \
+("no food logged at all today - what did you actually eat?") rather than falling \
+back on a generic prompt. "Did you feel good today?" is worthless - too vague to \
+answer honestly and impossible to compare across days.
 
 Hard rules for the question text:
 - ONE thing per question. Never bundle two questions into one, and never ask for a \

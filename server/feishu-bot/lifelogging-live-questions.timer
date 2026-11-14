@@ -21,8 +21,15 @@ Description=LifeLogging - run live questions every 30 minutes
 Requires=lifelogging-live-questions.service
 
 [Timer]
-OnBootSec=12min
-OnUnitActiveSec=30min
+# 2026-11-14：**关闭 30 分钟轮询，只保留 23:00 的收尾。**
+#
+#   原来这里还有 OnBootSec=12min + OnUnitActiveSec=30min，一天刷三十条
+#   小时题。实测结果是：题越堆越多，人干脆一周不答 —— 通道静音之后，
+#   连真正要的七维收尾也一起收不到了。
+#
+#   现在唯一的触发点是下面那条 OnCalendar。`live_questions.py` 在
+#   `_summary_due()` 命中时会**直接 return**，不会顺带发小时题，所以
+#   一天只有这一批：七个维度各一道的收尾题。
 
 # ⚠️ **收尾必须有一个准点触发。**
 #    上面那条 30 分钟轮询是从开机时刻起算的，实际落点是 :20 / :50 ——
