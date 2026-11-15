@@ -738,6 +738,7 @@ def merge_engage(day: str, questions: list[dict]) -> tuple[bool, str]:
             "hint": str(q.get("hint") or "")[:300],
             "layer": str(q.get("layer") or "assoc")[:20],
             "anchor": str(q.get("anchor") or "")[:200],
+            "options": [str(o)[:40] for o in (q.get("options") or [])][:6],
         }
     payload = {"day": day, "questions": list(existing.values())}
     try:

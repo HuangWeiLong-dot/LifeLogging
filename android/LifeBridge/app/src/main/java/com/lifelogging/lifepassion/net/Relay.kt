@@ -64,6 +64,14 @@ object Relay {
                     val arr = JSONObject(body).optJSONArray("questions") ?: JSONArray()
                     for (i in 0 until arr.length()) {
                         val o = arr.getJSONObject(i)
+                        val opts = ArrayList<String>()
+                        o.optJSONArray("options")?.let { a2 ->
+                            for (j in 0 until a2.length()) opts.add(a2.getString(j))
+                        }
+                        // 服务器给了选项就用选项，没给才退回文字
+                        val ctrl = if (opts.isNotEmpty()) Control.CHOICE else runCatching {
+                            Control.valueOf(o.optString("control", "TEXT"))
+                        }.getOrDefault(Control.TEXT)
                         out.add(
                             Question(
                                 id = o.getString("id"),
@@ -71,12 +79,11 @@ object Relay {
                                 persona = runCatching {
                                     Persona.valueOf(o.optString("persona", "OBSERVER"))
                                 }.getOrDefault(Persona.OBSERVER),
-                                control = runCatching {
-                                    Control.valueOf(o.optString("control", "TEXT"))
-                                }.getOrDefault(Control.TEXT),
+                                control = ctrl,
                                 text = o.optString("text", ""),
                                 hint = o.optString("hint", ""),
                                 layer = o.optString("layer", "assoc"),
+                                options = opts,
                             )
                         )
                     }

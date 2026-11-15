@@ -452,6 +452,8 @@ private fun QuestionCard(
     var perEmo by remember(q.id) {
         mutableStateOf(existing?.emotionIntensity ?: emptyMap<String, Int>())
     }
+    // 每道题都能补一句选项覆盖不到的话
+    var note by remember(q.id) { mutableStateOf(existing?.note ?: "") }
 
     Card {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -477,7 +479,7 @@ private fun QuestionCard(
                         emotions = if (e.label in emotions) emotions - e.label
                         else emotions + e.label
                         if (e.label !in emotions) perEmo = perEmo - e.label
-                        onAnswer(q, text, emotions, intensity, "", perEmo)
+                        onAnswer(q, text, emotions, intensity, note, perEmo)
                     }
                     if (emotions.isNotEmpty()) {
                         Text(
@@ -508,7 +510,7 @@ private fun QuestionCard(
                                 MiniScale(perEmo[label]) { n ->
                                     perEmo = perEmo + (label to n)
                                     intensity = perEmo.values.maxOrNull()
-                                    onAnswer(q, text, emotions, intensity, "", perEmo)
+                                    onAnswer(q, text, emotions, intensity, note, perEmo)
                                 }
                             }
                             Spacer(Modifier.height(6.dp))
@@ -522,7 +524,7 @@ private fun QuestionCard(
                         listOf("drained", "low", "okay", "good", "full")
                     ScaleFive(intensity, labels) { n ->
                         intensity = n
-                        onAnswer(q, "$n", emotions, n, "", perEmo)
+                        onAnswer(q, "$n", emotions, n, note, perEmo)
                     }
                 }
                 Control.TEXT -> {
@@ -537,7 +539,7 @@ private fun QuestionCard(
                         shape = cardShape,
                     )
                     Button(
-                        onClick = { onAnswer(q, text, emotions, intensity, text, perEmo) },
+                        onClick = { onAnswer(q, text, emotions, intensity, note, perEmo) },
                         enabled = text.isNotBlank(),
                         modifier = Modifier.fillMaxWidth(),
                         colors = ButtonDefaults.buttonColors(
@@ -555,7 +557,76 @@ private fun QuestionCard(
                         )
                     }
                 }
+                Control.CHOICE -> {
+                    // 多选：今天可能既是「和同事」又是「和家人」
+                    var primaries by remember(q.id) {
+                        mutableStateOf(
+                            existing?.value
+                                ?.split(" + ")
+                                ?.map { it.substringBefore(" (") }
+                                ?.filter { it in q.options }
+                                ?.toSet()
+                                ?: emptySet()
+                        )
+                    }
+                    var follows by remember(q.id) {
+                        mutableStateOf<Map<String, Set<String>>>(emptyMap())
+                    }
+
+                    fun emit() {
+                        val parts = primaries.map { p ->
+                            val f = follows[p].orEmpty()
+                            if (f.isEmpty()) p else "$p (" + f.joinToString(", ") + ")"
+                        }
+                        if (parts.isNotEmpty()) {
+                            onAnswer(q, parts.joinToString(" + "), emotions, intensity, note, perEmo)
+                        }
+                    }
+
+                    ChoiceChips(q.options, primaries) { opt ->
+                        primaries = if (opt in primaries) primaries - opt else primaries + opt
+                        if (opt !in primaries) follows = follows - opt
+                        emit()
+                    }
+
+                    // 每个被选中的选项各自展开一组衍生项
+                    primaries.forEach { p2 ->
+                        val fu = q.followUps[p2].orEmpty()
+                        if (fu.isEmpty()) return@forEach
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "$p2 — MORE SPECIFICALLY?",
+                            fontSize = 9.sp, letterSpacing = 1.6.sp, color = Ink.Dim,
+                        )
+                        val cur = follows[p2].orEmpty()
+                        ChoiceChips(fu, cur) { f ->
+                            val set = if (f in cur) cur - f else cur + f
+                            follows = follows + (p2 to set)
+                            emit()
+                        }
+                    }
+                }
                 Control.BOOLEAN -> Unit
+            }
+
+            // 补充栏：所有题型都有，选项盖不到的情况写在这里
+            OutlinedTextField(
+                value = note,
+                onValueChange = { note = it },
+                placeholder = {
+                    Text(
+                        "add anything the options missed (optional)",
+                        fontSize = 11.sp, color = Ink.Dim,
+                    )
+                },
+                modifier = Modifier.fillMaxWidth(),
+                minLines = 1,
+                shape = cardShape,
+            )
+            if (note.isNotBlank() && note != (existing?.note ?: "")) {
+                OutlineAction(label = "Save note", caption = "") {
+                    onAnswer(q, existing?.value ?: "", emotions, intensity, note, perEmo)
+                }
             }
 
             if (existing == null) {
@@ -618,6 +689,43 @@ fun IntroScreen(onStart: () -> Unit) {
 }
 
 /** 紧凑的 1–5，只画数字，没有词 —— 每行一个情绪时用。 */
+/** 两列选项块。选中 = 反色，和情绪块同一套视觉。 */
+@Composable
+private fun ChoiceChips(
+    options: List<String>,
+    selected: Set<String>,
+    onPick: (String) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        options.chunked(2).forEach { row ->
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                row.forEach { opt ->
+                    val on = opt in selected
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(52.dp)
+                            .background(if (on) Ink.Text else androidx.compose.ui.graphics.Color.Transparent)
+                            .border(if (on) 2.dp else 1.dp, if (on) Ink.Text else Ink.Line)
+                            .clickable { onPick(opt) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            opt,
+                            fontSize = 11.sp,
+                            letterSpacing = 0.8.sp,
+                            fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
+                            color = if (on) Ink.Bg else Ink.Text,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
+                }
+                repeat(2 - row.size) { Spacer(Modifier.weight(1f)) }
+            }
+        }
+    }
+}
+
 @Composable
 private fun MiniScale(value: Int?, onPick: (Int) -> Unit) {
     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {

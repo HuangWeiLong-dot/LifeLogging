@@ -73,11 +73,16 @@ Return ONLY a JSON object, no prose, no markdown fence:
 
 {"questions": [
   {"persona": "OBSERVER|ADVOCATE|ROMANTICIST|IDEALIST",
-   "control": "TEXT",
    "text": "one anchored sentence, ending in a question mark",
    "hint": "one short line saying where the anchor came from",
-   "anchor": "the exact string you quoted"}
+   "anchor": "the exact string you quoted",
+   "options": ["3-5 short answers that cover the realistic possibilities"]}
 ]}
+
+The options are the point: a free-text box gets skipped, chips get answered.
+Write options that are short (1-4 words), mutually exclusive, and specific to
+this question — not generic ("Yes"/"No"/"Other"). They should read like the
+person's own possible answers.
 """
 
 
@@ -200,11 +205,13 @@ def generate(day: Day, dry_run: bool) -> list[dict]:
         if anchor not in digest:
             print(f"  ⚠️ 锚点「{anchor[:40]}」不在当天数据里，丢弃")
             continue
+        opts = [str(o)[:40] for o in (q.get("options") or []) if str(o).strip()][:6]
         out.append({
             "id": f"{day.iso}-llm-{i + 1}",
+            "options": opts,
             "day": day.iso,
             "persona": str(q.get("persona") or "OBSERVER")[:20],
-            "control": "TEXT",
+            "control": "CHOICE" if opts else "TEXT",
             "text": text[:400],
             "hint": str(q.get("hint") or "")[:300],
             "layer": "assoc",

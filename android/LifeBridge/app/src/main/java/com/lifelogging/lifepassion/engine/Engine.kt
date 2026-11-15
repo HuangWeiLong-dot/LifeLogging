@@ -20,6 +20,8 @@ object Engine {
         val control: Control,
         val text: String,
         val hint: String,
+        val options: List<String> = emptyList(),
+        val followUps: Map<String, List<String>> = emptyMap(),
     )
 
     private val FIXED = listOf(
@@ -32,18 +34,45 @@ object Engine {
         Spec("sleep", Persona.OBSERVER, Control.SCALE5,
             "How did you sleep last night?",
             "1 bad — 5 great."),
-        Spec("social", Persona.ROMANTICIST, Control.TEXT,
-            "Who did you spend time with? What did you talk about?",
-            "Location only says you were nearby."),
-        Spec("food", Persona.OBSERVER, Control.TEXT,
-            "What did you eat today? Were you ever too hungry or too full?",
-            "Meals do not produce events."),
-        Spec("rest", Persona.IDEALIST, Control.TEXT,
-            "Did you step away from the screen? Doing what?",
-            "Rest and entertainment look the same in the data."),
-        Spec("learn", Persona.IDEALIST, Control.TEXT,
-            "What did you learn today that you did not know before?",
-            "A window title never says what you understood."),
+        Spec("social", Persona.ROMANTICIST, Control.CHOICE,
+            "Who did you spend time with today?",
+            "Location only says you were nearby, not who with.",
+            options = listOf("Alone", "Family", "Friends", "Colleague", "Partner", "Online only"),
+            followUps = mapOf(
+                "Family" to listOf("Ordinary day", "A long talk", "Some tension", "They needed me"),
+                "Friends" to listOf("Just hanging out", "Deep talk", "Something happened"),
+                "Colleague" to listOf("Work only", "Went beyond work"),
+                "Partner" to listOf("Easy", "Strained", "Important conversation"),
+                "Online only" to listOf("Group chat", "One person", "Mostly scrolling"),
+            )),
+        Spec("food", Persona.OBSERVER, Control.CHOICE,
+            "How did eating go today?",
+            "Meals do not produce events — only you know this.",
+            options = listOf("Regular meals", "Skipped one", "Ate late", "Snacked instead", "Overate"),
+            followUps = mapOf(
+                "Skipped one" to listOf("Too busy", "Not hungry", "Forgot", "No food around"),
+                "Ate late" to listOf("Work ran long", "Was out", "Not hungry earlier"),
+                "Snacked instead" to listOf("Working", "Bored", "Low energy"),
+                "Overate" to listOf("Was starving", "Social meal", "Stress"),
+            )),
+        Spec("rest", Persona.IDEALIST, Control.CHOICE,
+            "Did you get a real break today?",
+            "Rest and entertainment look the same in the data.",
+            options = listOf("Stepped away >30 min", "Short breaks only", "Almost none"),
+            followUps = mapOf(
+                "Stepped away >30 min" to listOf("Walked outside", "Napped", "Errands", "Sat quietly"),
+                "Short breaks only" to listOf("Phone between tasks", "Stretched", "Made food"),
+                "Almost none" to listOf("Deadline", "Kept going out of habit", "Did not notice"),
+            )),
+        Spec("learn", Persona.IDEALIST, Control.CHOICE,
+            "What kind of learning happened today?",
+            "A window title never says what you understood.",
+            options = listOf("Nothing new", "Work skill", "Technical", "Language", "Reading", "Hands-on practice"),
+            followUps = mapOf(
+                "Work skill" to listOf("Solved a bug", "Learned a tool", "Understood the domain"),
+                "Technical" to listOf("Concept clicked", "Followed a tutorial", "Read source"),
+                "Hands-on practice" to listOf("Repeatable now", "Still shaky", "Broke something"),
+            )),
     )
 
     fun questionsFor(day: String, store: Store): List<Question> {
@@ -57,6 +86,8 @@ object Engine {
                     control = s.control,
                     text = s.text,
                     hint = s.hint,
+                    options = s.options,
+                    followUps = s.followUps,
                 )
             )
         }
