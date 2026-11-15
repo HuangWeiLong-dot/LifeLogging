@@ -664,6 +664,63 @@ def save_live_questions(day: str, payload: dict) -> tuple[bool, str]:
     return True, _write_json(dest, out)
 
 
+ENGAGE_PREFIX = "engage-"
+
+
+def engage_path(day: str) -> Path | None:
+    """App 侧「带锚点的问题」的落盘位置。day 形状不对就返回 None。"""
+    if not _DAY_RE.match(day or ""):
+        return None
+    return DATA_DIR / f"{ENGAGE_PREFIX}{day}.json"
+
+
+def load_engage(day: str) -> list[dict]:
+    """读某一天的 App 侧问题。没有就是空列表（App 会退回固定七维）。"""
+    p = engage_path(day)
+    if p is None or not p.exists():
+        return []
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    qs = data.get("questions") if isinstance(data, dict) else None
+    return [q for q in (qs or []) if isinstance(q, dict) and q.get("id")]
+
+
+def merge_engage(day: str, questions: list[dict]) -> tuple[bool, str]:
+    """**按 id 合并**，不整份覆写 —— 和 save_live_questions 同一个理由：
+    生成器可能只推新增的几条，覆写会把前面的整批顶掉，而且不报错。"""
+    p = engage_path(day)
+    if p is None:
+        return False, "day should be YYYY-MM-DD"
+    existing = {str(q.get("id")): q for q in load_engage(day)}
+    for q in questions or []:
+        if not isinstance(q, dict):
+            continue
+        qid = str(q.get("id") or "")
+        if not qid or len(qid) > 80:
+            continue
+        text = str(q.get("text") or "").strip()
+        if not text or len(text) > 400:
+            continue
+        existing[qid] = {
+            "id": qid,
+            "day": day,
+            "persona": str(q.get("persona") or "OBSERVER")[:20],
+            "control": str(q.get("control") or "TEXT")[:20],
+            "text": text,
+            "hint": str(q.get("hint") or "")[:300],
+            "layer": str(q.get("layer") or "assoc")[:20],
+            "anchor": str(q.get("anchor") or "")[:200],
+        }
+    payload = {"day": day, "questions": list(existing.values())}
+    try:
+        _write_json(p, payload)
+    except OSError as exc:
+        return False, f"write failed: {exc}"
+    return True, f"{len(existing)} questions"
+
+
 def load_latest_live_questions(within_days: int = 1) -> dict | None:
     """最近那份实时问题。**超过 within_days 天就不要了。**
 
@@ -1253,6 +1310,18 @@ class Handler(BaseHTTPRequestHandler):
             self._send_text(200, str(len(left)))
             return
 
+        if u.path == "/engage/questions":
+            # App 拉取「带锚点的问题」。没有就不返回任何东西 —— App 会
+            # 退回固定七维，不会因为服务器没生成就空着。
+            if not self._authed():
+                return
+            day = (parse_qs(u.query).get("day") or [""])[0]
+            if not _DAY_RE.match(day):
+                self._send(400, {"error": "?day= should be YYYY-MM-DD"})
+                return
+            self._send(200, {"day": day, "questions": load_engage(day)})
+            return
+
         if u.path == "/questions/pending":
             # 给**飞书机器人**用的 JSON 版。它要的是题目内容本身，而上面那条
             # `/ask/pending` 只给一个数字 —— 那是给 Tasker 的（它不会解析 JSON）。
@@ -1502,6 +1571,22 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, {"error": err})
                 return
             ok, detail = save_ledger(payload)
+            self._send(200 if ok else 400, {"ok": ok, "detail": detail})
+            return
+
+        if u.path == "/engage/questions":
+            if not self._authed():
+                return
+            payload, err = self._json_body()
+            if err:
+                self._send(400, {"error": err})
+                return
+            day = str(payload.get("day") or "")
+            qs = payload.get("questions")
+            if not isinstance(qs, list):
+                self._send(400, {"error": "questions must be a list"})
+                return
+            ok, detail = merge_engage(day, qs)
             self._send(200 if ok else 400, {"ok": ok, "detail": detail})
             return
 
