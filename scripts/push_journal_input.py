@@ -126,13 +126,93 @@ def main() -> None:
     prev_qa_payload = qa_client.fetch(prev_day)
     qa = (qa_payload or {}).get("qa") or []
     previous_day_qa = (prev_qa_payload or {}).get("qa") or []
+
+    # 飞书下线后中继没有题目文件，/qa 会是空的 —— 用本地事件补上。
+    # 两边的题号不同（App 用 `2026-11-15-mood`），所以是**并集**不是覆盖。
+    local_qa = _qa_from_events(day)
+    local_prev = _qa_from_events(Day.parse(prev_day, TZ))
+    if local_qa or local_prev:
+        qa = _merge_qa(qa, local_qa)
+        previous_day_qa = _merge_qa(previous_day_qa, local_prev)
     previous_day_recap = qa_client.fetch_previous_recap(prev_day)
     if qa_payload:
         qa_client.save_local(day.iso, qa_payload)
     if prev_qa_payload:
         qa_client.save_local(prev_day, prev_qa_payload)
 
-    # ⚠️ 这一行是整套东西的关键。见模块开头的说明 —— 没有它，服务器会拿
+    
+def _qa_from_events(day: "Day") -> list[dict]:
+    """从本地事件表还原当天问答 —— 飞书下线后的**主路径**。
+
+    以前问答只有一条来源：中继的 `GET /qa`（它把题目文件和答案按题号
+    合并）。飞书机器人停用之后，中继上不再有题目文件，那条路会返回空。
+
+    App 改成了**答案自带题目原文**（`meta.question`），所以这里直接读
+    `domain=question` 的事件就够了，不依赖服务器上有任何题目文件。
+
+    读失败就返回空列表：日记少一段问答是退化，不是失败。
+    """
+    import sqlite3
+
+    db = Path(CFG["state_dir"]) / "events.db"
+    if not db.exists():
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=10.0)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT value_text, meta_json, ts_utc FROM events "
+            "WHERE day_local = ? AND domain = 'question' AND metric = 'answer' "
+            "ORDER BY ts_utc",
+            (day.iso,),
+        ).fetchall()
+        conn.close()
+    except sqlite3.Error:
+        return []
+
+    out: list[dict] = []
+    for r in rows:
+        text = str(r["value_text"] or "")
+        parts = text.split("|", 2)
+        qid = parts[0] if parts else ""
+        answer = parts[1] if len(parts) > 1 else ""
+        note = parts[2] if len(parts) > 2 else ""
+        try:
+            meta = json.loads(r["meta_json"] or "{}")
+        except (TypeError, ValueError):
+            meta = {}
+        question = str(meta.get("question") or "")
+        if not question and not answer:
+            continue
+        item = {
+            "id": qid,
+            "text": question,
+            "answer": answer,
+            "note": note,
+            "persona": meta.get("persona"),
+            "emotions": meta.get("emotions") or [],
+            "intensity": meta.get("intensity"),
+        }
+        if meta.get("missing"):
+            item["answer"] = "(marked missing)"
+        out.append(item)
+    return out
+
+
+def _merge_qa(relay: list[dict], local: list[dict]) -> list[dict]:
+    """中继那份优先（它带完整题目），缺的用本地事件补。按题号去重。"""
+    seen: dict[str, dict] = {}
+    for x in relay or []:
+        qid = str((x or {}).get("id") or "")
+        if qid:
+            seen[qid] = x
+    for x in local or []:
+        qid = str((x or {}).get("id") or "")
+        if qid and qid not in seen:
+            seen[qid] = x
+    return list(seen.values())
+
+# ⚠️ 这一行是整套东西的关键。见模块开头的说明 —— 没有它，服务器会拿
     #    笔记本 18:00 那次推送的半截数据去写一整天的日记。
     final = datetime.now(TZ) >= day.end_local
     payload = {

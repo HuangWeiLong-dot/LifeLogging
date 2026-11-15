@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 采集模块：和问答界面互不依赖。原来的 build.sh 构建仍然可用，
+     这份 manifest 只是让 Gradle 也能把它打进同一个 APK。 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <application>
+        <!-- 采集设置页：不再是 launcher，由问答端跳转进来 -->
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="true"
+            android:label="@string/app_name" />
+
+        <receiver
+            android:name=".HeartbeatReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.lifelogging.bridge.HEARTBEAT" />
+                <action android:name="android.intent.action.POWER_CONNECTED" />
+                <action android:name="android.intent.action.POWER_DISCONNECTED" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <service
+            android:name=".BridgeForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <service
+            android:name=".BridgeService"
+            android:exported="false"
+            android:label="@string/service_name"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+    </application>
+</manifest>

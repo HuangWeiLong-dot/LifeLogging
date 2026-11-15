@@ -111,70 +111,21 @@ Tasker 有内置的 **Music Track** 事件，不用碰通知监听。
 Tasker **不需要**写 Java，它内置的 **App Info** 动作就是 UsageStatsManager 的封装。
 
 - **Profile**：`Time`，每 15 分钟
-
-### 5.1 先确认 App Info 输出什么
-
-1. `TASKS` → `+` → 命名 `LL-TestUsage`
-2. `+` → **App** → **App Info**
-   - Source：**Most Used**
-   - Type：**Time**
-   - 参数：`most(time,15:0,20)`
-3. `+` → **Alert** → **Flash**，Text 填 `%app_used()`
-4. `+` → **Alert** → **Flash**，Text 填 `%app_used_time()`
-5. 点 ▶，看两次 Flash：
-   - 第一个应该是应用列表
-   - 第二个是时长。**记下格式**：如果是 `312` 这种纯数字，直接用；
-     如果是 `5m12s` 这种文本，先告诉我，本地解析要另做
-
-> 两个 Flash 都是空 → 这个 Tasker 版本的 App Info 不返回时长，
-> 这条做不了。跳过它，推断值仍然能用。
-
-### 5.2 建任务 `LL-AppUsage`
-
-按顺序加 **9 个动作**（For 和 End For 之间的动作就是循环体）：
-
-| # | 动作 | 字段 |
-|---|---|---|
-| 1 | **App Info** | Source=`Most Used`，Type=`Time`，参数=`most(time,15:0,20)` |
-| 2 | **Variables → Variable Clear** | Name=`%item*` |
-| 3 | **Task → For** | Variable=`%idx`，Items=`1:%app_used(#)` |
-| 4 | **Variables → Variable Set** | 见下方 |
-| 5 | **Task → End For** | — |
-| 6 | **Variables → Variable Join** | Variable=`%item`，Joiner=`,` |
-| 7 | **Variables → Variable Set** | Name=`%body`，To=`{"events":[%item]}` |
-| 8 | **长按 + → Paste**（HTTP Request） | Body 只填 `%body` |
-| 9 | **Variables → Variable Clear** | Name=`%body` |
-
-第 4 个动作的字段：
-
-- **Name**：`%item(%idx)`
-- **To**：
-
-```
-{"ts":%TIMES,"domain":"phone","metric":"app_usage","value_text":"%app_used(%idx)","value_num":%app_used_time(%idx)}
-```
-
-> 第 4 个动作**必须在 For 和 End For 之间**。Tasker 里在 For 后面新增的动作
-> 会自动进循环体；如果你先建好再拖动，注意别拖到 End For 后面。
-
-### 5.3 验证
-
-1. 在 HTTP Request **前面**临时插一个 `Flash %body`
-2. 点 ▶，应该看到：
+- **任务**：
+  1. `App Info` → Source **Most Used** → Type **Time** → 参数形如 `most(time,15:0,20)`
+     （从 15 分钟前到现在，取前 20 个应用）
+  2. 结果在 `%app_used()` 数组里，时长在 `%app_used_time()`（**第一次先 Flash 出来确认字段名**）
+  3. 对每个应用发一条 `app_usage`
 
 ```json
-{"events":[{"ts":1763...,"domain":"phone","metric":"app_usage","value_text":"com.tencent.mm","value_num":312}, ...]}
+{"events":[
+  {"ts":%TIMES,"domain":"phone","metric":"app_usage","value_text":"com.tencent.mm","value_num":312},
+  {"ts":%TIMES,"domain":"phone","metric":"app_usage","value_text":"com.android.chrome","value_num":96}
+]}
 ```
 
-3. 格式对了就把 Flash 删掉
-
-### 5.4 加触发
-
-`PROFILES → + → Time`，每 `15` 分钟，Both → 绑 `LL-AppUsage`
-
-> `value_num` 必须是**这 15 分钟内的前台秒数**。`most(time,...)` 本身就是按
-> 时间窗口取的，所以直接就是窗口内的值，不用自己做差分。
-> 一次发一批（`{"events":[...]}`），别一个应用发一次。
+- `value_num` 是**这 15 分钟内的前台秒数**，不是当天累计
+- 一次发一批（`{"events":[...]}`），别一个应用发一次
 
 > **为什么必须有这条**：现在的「使用最久的 App」是拿两条应用切换事件的**时间差推**的，
 > 漏一次切换，后面整段都会记到上一个应用头上，而且不报错。
