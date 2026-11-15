@@ -664,6 +664,32 @@ def save_live_questions(day: str, payload: dict) -> tuple[bool, str]:
     return True, _write_json(dest, out)
 
 
+def reset_answers(day: str) -> tuple[bool, str]:
+    """删掉某一天的**问答事件**，其余手机事件原样保留。
+
+    App 里「重置今日问答」要连服务器一起清 —— 否则重答之后，
+    笔记本下一次 collect 又会把旧答案拉回来，看起来像没重置。
+    """
+    if not _DAY_RE.match(day or ""):
+        return False, "day should be YYYY-MM-DD"
+    path = DATA_DIR / f"phone-{day}.jsonl"
+    if not path.exists():
+        return True, "nothing to clear"
+    try:
+        with _write_lock:
+            lines = path.read_text(encoding="utf-8").splitlines()
+            keep = [
+                ln for ln in lines
+                if '"domain": "question"' not in ln and '"domain":"question"' not in ln
+            ]
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text((chr(10).join(keep) + chr(10)) if keep else "", encoding="utf-8")
+            tmp.replace(path)
+    except OSError as exc:
+        return False, str(exc)
+    return True, f"removed {len(lines) - len(keep)} answers"
+
+
 ENGAGE_PREFIX = "engage-"
 
 
@@ -1571,6 +1597,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, {"error": err})
                 return
             ok, detail = save_ledger(payload)
+            self._send(200 if ok else 400, {"ok": ok, "detail": detail})
+            return
+
+        if u.path == "/engage/reset":
+            if not self._authed():
+                return
+            payload, err = self._json_body()
+            if err:
+                self._send(400, {"error": err})
+                return
+            ok, detail = reset_answers(str(payload.get("day") or ""))
             self._send(200 if ok else 400, {"ok": ok, "detail": detail})
             return
 
