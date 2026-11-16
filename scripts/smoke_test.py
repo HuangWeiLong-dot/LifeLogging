@@ -5051,6 +5051,55 @@ check("publish: 跨天 transport 行整条丢弃（不再显示 24h）",
       t_publish_transport_guard)
 
 
+def t_phone_publisher():
+    """服务器侧手机发布器：隐私过滤 + 手机聚合。
+
+    这条链路不经过 events.db，所以归档里能出现的只有这里筛过的东西。
+    支付、通知正文、音乐封面任何一条漏出去都是公开的。
+    """
+    import importlib.util
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "phone_publisher", root / "server" / "phone-publisher" / "phone_publisher.py")
+    pp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pp)
+
+    raw = [
+        {"ts_utc": "2026-11-16T01:00:00Z", "domain": "phone", "metric": "unlock"},
+        {"ts_utc": "2026-11-16T01:00:05Z", "domain": "phone", "metric": "screen_on"},
+        {"ts_utc": "2026-11-16T01:00:10Z", "domain": "phone", "metric": "app_switch",
+         "value_text": "com.tencent.mm"},
+        {"ts_utc": "2026-11-16T01:20:00Z", "domain": "phone", "metric": "app_switch",
+         "value_text": "com.deepseek.chat"},
+        {"ts_utc": "2026-11-16T01:30:00Z", "domain": "phone", "metric": "screen_off"},
+        {"ts_utc": "2026-11-16T01:31:00Z", "domain": "phone", "metric": "payment",
+         "value_num": 12.5, "value_text": "Alipay"},
+        {"ts_utc": "2026-11-16T01:32:00Z", "domain": "phone", "metric": "notification",
+         "value_text": "com.tencent.mm", "meta": {"title": "hi", "text": "secret"}},
+        {"ts_utc": "2026-11-16T01:33:00Z", "domain": "phone", "metric": "music",
+         "value_text": "Song", "meta": {"artist": "A", "cover": "BASE64"}},
+        {"ts_utc": "2026-11-16T01:34:00Z", "domain": "manual", "metric": "note",
+         "value_text": "hello"},
+    ]
+    built = pp.build_day("2026-11-16", raw)
+    assert built, "build_day returned None"
+    events = json.loads(built["content"])
+    assert "payment" not in [e["metric"] for e in events]
+    note = next(e for e in events if e["metric"] == "notification")
+    assert "title" not in note["meta"] and "text" not in note["meta"], note
+    assert note["meta"]["body"] == "redacted"
+    music = next(e for e in events if e["metric"] == "music")
+    assert "cover" not in music["meta"]
+    assert built["phone"]["unlocks"] == 1, built["phone"]
+    assert built["phone"]["topApps"], built["phone"]
+    assert built["dimensions"]["Social"] > 0 and built["collapsedHours"] > 0
+
+
+check("phone publisher: 支付/通知正文/封面不外发，手机聚合可算",
+      t_phone_publisher)
+
+
 def t_life_slots():
     import life_slots as L
     from zoneinfo import ZoneInfo

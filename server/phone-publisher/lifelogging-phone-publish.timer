@@ -1,0 +1,28 @@
+# 每 5 分钟把中继的手机事件发到站点。
+#
+# **为什么是轮询**
+#
+#   手机随时在上报，而「今天到现在为止」的聚合本来就应该跟着涨。
+#   笔记本开机时这条链路照常跑；笔记本关机时，站点靠这里保持更新。
+#   脚本本身幂等：按文件的 mtime/size + 内容摘要跳过没有变化的日期，
+#   所以高频轮询的代价只是一次目录 stat。
+#
+# **为什么是 5 分钟**
+#
+#   NOW 面板是 20 秒级的实时快照；这里补的是 LIFE 页面的当天手机卡片
+#   和归档的 EVENTS。5 分钟足够接近「刚刚」，又不会把 R2 写爆。
+#
+# Persistent=true：服务器重启过的话，欠的那一次开机后补上。
+
+[Unit]
+Description=LifeLogging - publish relay phone events every 5 minutes
+Requires=lifelogging-phone-publish.service
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

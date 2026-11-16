@@ -1,0 +1,46 @@
+# systemd 单元 —— 把中继上的手机事件直接发布到站点
+#
+# 安装：
+#   sudo cp lifelogging-phone-publish.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now lifelogging-phone-publish.timer
+#
+# 令牌在 /etc/lifelogging/watch.env（和 watch-publisher 共用同一个
+# LIFE_INGEST_TOKEN）。不要写进这个文件 —— 它是要进 git 的。
+#
+# ⚠️ 改完要 `daemon-reload` 才生效，只 restart 不行。
+
+[Unit]
+Description=LifeLogging - publish relay phone events to the site
+Documentation=https://github.com/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+
+# 和中继同一个身份、同一个数据目录：只读中继落下来的 phone-*.jsonl，
+# 再把原始文档 / 手机聚合 POST 到站点，不写 events.db、不碰笔记本。
+User=root
+Group=root
+
+Environment=RELAY_DATA_DIR=/var/lib/lifelogging
+Environment=PHONE_WINDOW_DAYS=30
+Environment=PHONE_TZ=Asia/Shanghai
+# 需要 LIFE_INGEST_TOKEN（与 Worker secret 相同）；复用 watch 那份
+EnvironmentFile=/etc/lifelogging/watch.env
+
+ExecStart=/opt/lifelogging/venv/bin/python /opt/lifelogging/repo/server/phone-publisher/phone_publisher.py
+
+# 和 watch-publisher 同一套加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/lifelogging
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+CapabilityBoundingSet=
+AmbientCapabilities=

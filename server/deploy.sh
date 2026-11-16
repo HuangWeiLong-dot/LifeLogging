@@ -97,18 +97,23 @@ fi
 if echo "$changed" | grep -q '^scripts/live_questions\.py'; then
     echo "-> live-questions 下次 tick 会自己用上新代码（oneshot，不用重启）"
 fi
+if echo "$changed" | grep -q '^server/phone-publisher/'; then
+    echo "-> phone-publisher 下次 tick 会自己用上新代码（oneshot，不用重启）"
+fi
 
 # ⚠️ 但 **unit/timer 文件本身**改了不一样：deploy.sh 只做 git pull，
 #    不会把 /etc/systemd/system/ 里那份换掉。改了 unit 就要手工重装：
 #      sudo cp /opt/lifelogging/repo/server/feishu-bot/lifelogging-*.{service,timer} \
 #              /etc/systemd/system/ && sudo systemctl daemon-reload
-if echo "$changed" | grep -qE '^server/(feishu-bot|close-day|watch-publisher)/.*\.(service|timer)$'; then
+if echo "$changed" | grep -qE '^server/(feishu-bot|close-day|watch-publisher|phone-publisher)/.*\.(service|timer)$'; then
     echo "-> ⚠️  有 unit/timer 文件改动，但它们**不会**自动生效。手工重装："
     echo "       sudo cp /opt/lifelogging/repo/server/feishu-bot/lifelogging-*.{service,timer} /etc/systemd/system/"
     echo "       sudo cp /opt/lifelogging/repo/server/close-day/lifelogging-*.{service,timer} /etc/systemd/system/"
     echo "       sudo cp /opt/lifelogging/repo/server/watch-publisher/lifelogging-*.{service,timer} /etc/systemd/system/"
+    echo "       sudo cp /opt/lifelogging/repo/server/phone-publisher/lifelogging-*.{service,timer} /etc/systemd/system/"
     echo "       sudo systemctl daemon-reload"
     echo "       sudo systemctl enable --now lifelogging-watch-publish.timer   # 仅首次"
+    echo "       sudo systemctl enable --now lifelogging-phone-publish.timer   # 仅首次"
 fi
 
 # watch-publisher 是 oneshot，下一个 tick 自己会用上新代码；只有 unit 变了要重装。

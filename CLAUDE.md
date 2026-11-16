@@ -216,6 +216,7 @@ sudo /opt/lifelogging/repo/server/deploy.sh           # git ff-only + 按改动�
 | `lifelogging-close-day`（`server/close-day/`） | timer 15 分钟 | 扫最近 3 天，只有 `final=true` 才调 AI 写正文；**不碰 vault** |
 | `lifelogging-live-now`（`server/live-now/`） | timer 2 分钟 | 组装 `/api/life/now`；笔记本关机后继续更新位置 / 手机 / 问答 / 手表 |
 | `lifelogging-watch-publish`（`server/watch-publisher/`） | timer 15 分钟 | 直接解析中继的 GPX/FIT → `life/raw/watch/<day>.json`；**不写 events.db、不做聚合** |
+| `lifelogging-phone-publish`（`server/phone-publisher/`） | timer 5 分钟 | 直接读中继的 `phone-<day>.jsonl` → `life/raw/phone/<day>.json` + `POST /api/life/phone/ingest`；笔记本关机时手机卡片和 EVENTS 仍然更新 |
 | `lifelogging-feishu-bot`（可选） | 常驻，出站长连接 | 提问推送与文字答题；挂了是**静默的**（进程活着、长连接死了） |
 | `lifelogging-live-questions`（可选） | timer 30 分钟 | 手机当天第一次亮屏 / 解锁后开始生成小时实时题（不再固定 08:00）；默认 23:00 收尾 |
 
@@ -230,9 +231,14 @@ Tasker 的每个 HTTP action 都要带 Access Service Token 头。
   `v/day/categories/trackedHours/topApps/topSites/health/location/phone/ai/workouts/
   dimensions/collapsedHours`，另有 `allTime`。位置只到城市级，不含坐标 / 轨迹 / 标题 /
   URL / 包名 / 余额。Worker 侧字段白名单会 400。
+- 手机聚合 `POST /api/life/phone/ingest`：`{"v":1,"days":[{day,phone,dimensions,collapsedHours}]}`。
+  服务器侧 phone-publisher 专用：已有完整快照的日期只替换 `phone`；没有快照的
+  日期建一个 `phoneOnly` 壳（七维 / 并集只由手机算出），笔记本下次完整发布覆盖它。
 - 原始 `POST /api/life/raw/ingest`：`{"v":1,"docs":[{kind,id,format,content}]}`。
   kind：`journal / events / blocks / notes / tasks / qa / weekly / vault`，
-  外加站点内部的 `watch`（不进归档 tab，只在索引 `watchDays` 里列日期）。
+  外加站点内部的 `watch`（不进归档 tab，只在索引 `watchDays` 里列日期）和
+  `phone`（服务器侧手机事件，不进归档 tab；`GET /raw/events/<day>` 会把它合并
+  进笔记本那份 `events`，手机-only 的日期也会出现在 EVENTS 的日期列表里）。
   **不脱敏**，只清洗凭证。`blocks` 是例外：`run_live.ps1` 每 15 分钟用 `--kinds blocks`
   单独发当天的份（站点七维详情按天拉它），其余 kind 仍然只在 23:00 那轮发。
 - 实时 `POST /api/life/now`：`{"v":1,"ts_utc","location","desktop","phone","watch","qa"}`，
