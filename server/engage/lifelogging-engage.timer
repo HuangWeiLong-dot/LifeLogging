@@ -2,9 +2,10 @@
 Description=LifeLogging - anchored questions, every 3 hours during the day
 
 [Timer]
-# 白天每三小时一次。空转的轮次很便宜（模型会返回空数组），
-# 但更密没有意义 —— 一天的素材要到傍晚才成型。
-OnCalendar=*-*-* 09,12,15,18,21:05:00
+# 每 15 分钟看一次**数据指纹**，不是每 15 分钟问一次模型。
+# 脚本自己判断：出现新歌 / 屏幕块跳增 / 步数异常 / 距上次超 3 小时
+# 才真的调 LLM，其余轮次是纯本地算术，零成本。
+OnCalendar=*:0/15
 Persistent=true
 AccuracySec=1min
 

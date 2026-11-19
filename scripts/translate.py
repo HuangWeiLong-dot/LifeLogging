@@ -122,6 +122,9 @@ class Translator:
         enabled: bool = True,
     ):
         self.enabled = enabled
+        # 单轮最多翻多少个字符串。translate_many 用它当闸门 ——
+        # 没有上限时，一次 30 天的回填会连着发几十次调用。
+        self.max_calls = max(1, int(max_calls))
         self.failed = 0
         self.state_dir = Path(state_dir)
         self.cache_path = self.state_dir / "translation_cache.json"
@@ -288,7 +291,12 @@ class Translator:
                 continue
             self.cache[self._key(source)] = english
             self._dirty = True
-        self._save()
+        # ⚠️ 这里**不要**每次 chunk 都 _save()。
+        #
+        #    缓存是几千条的整份 JSON，每写一次就是一次全量序列化 + 替换文件。
+        #    一轮发布几十个 chunk = 几十次全量写盘，而且每次都在主线程上，
+        #    发布整体就卡住了。translate_many 结束时统一存一次即可 ——
+        #    中途崩溃只会丢这一轮的新翻译，本来也要重翻。
 
     def _retry_chunk(self, chunk: list[str]) -> None:
         if not chunk:
@@ -385,8 +393,16 @@ class Translator:
                 missing.append(text)
 
         self.retry.clear()
+        # 单轮最多翻这么多段。超出的留到下一轮 —— 缓存会接上，不会丢。
+        # 没有这个闸门时，一次回填 30 天会连着发几十次调用。
+        budget = max(0, int(self.max_calls) - 0)
+        spent = 0
         for chunk in self._chunks(missing):
+            if spent >= budget:
+                print(f"  . 本轮翻译达到上限（{budget} 段），其余留到下一轮")
+                break
             self._translate_chunk(chunk)
+            spent += len(chunk)
         if self.retry:
             self._retry_sources()
         self._save()

@@ -34,6 +34,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -49,6 +50,97 @@ TZ = ZoneInfo(CFG["timezone"])
 DATA = Path(os.environ.get("LIFELOGGING_DATA", CFG["state_dir"]))
 
 MAX_QUESTIONS = 3
+
+# 每次生成的间隔下限：数据一直在变，但没人需要每 15 分钟一道新题。
+MIN_SECONDS_BETWEEN = 20 * 60
+
+# 就算什么都没发生，也至少这么久问一次（保底节奏）
+FALLBACK_SECONDS = 3 * 3600
+
+# 一天最多几次，控制成本
+MAX_PER_DAY = 8
+
+STATE = DATA / "engage-state.json"
+
+
+def facts(day: Day) -> dict:
+    """当天数据的「指纹」—— 不调模型，只做算术。"""
+    bundle = DATA / f"journal-input-{day.iso}.json"
+    blocks = 0
+    if bundle.exists():
+        try:
+            data = json.loads(bundle.read_text(encoding="utf-8"))
+            blocks = len((data.get("timeline") or {}).get("blocks") or [])
+        except (OSError, json.JSONDecodeError):
+            blocks = 0
+    events = _read_jsonl(DATA / f"phone-{day.iso}.jsonl")
+    music = [str(e.get("value_text") or "") for e in events if e.get("metric") == "music"]
+    steps = 0.0
+    for e in events:
+        if e.get("domain") == "health" and e.get("metric") == "steps":
+            steps = max(steps, float(e.get("value_num") or 0))
+    return {"blocks": blocks, "music": music[-40:], "steps": steps}
+
+
+def should_generate(day: Day, cur: dict, now: float) -> tuple[bool, str]:
+    """要不要现在就生成。返回 (是否生成, 原因)。"""
+    state = {}
+    if STATE.exists():
+        try:
+            state = json.loads(STATE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            state = {}
+    if str(state.get("day")) != day.iso:
+        return True, "今天第一次"
+
+    if int(state.get("count") or 0) >= MAX_PER_DAY:
+        return False, f"今天已经生成过 {MAX_PER_DAY} 次"
+
+    last = float(state.get("last_at") or 0)
+    if now - last < MIN_SECONDS_BETWEEN:
+        return False, "距上次不到 20 分钟"
+
+    # ① 出现了新的东西 —— 这是「直接推送」的那一类
+    old_music = set(state.get("music") or [])
+    new_tracks = [m for m in cur["music"] if m and m not in old_music]
+    if new_tracks:
+        return True, f"新出现 {len(new_tracks)} 首曲子"
+
+    if cur["blocks"] - int(state.get("blocks") or 0) >= 5:
+        return True, "屏幕块明显增加"
+
+    if abs(cur["steps"] - float(state.get("steps") or 0)) >= 3000:
+        return True, "步数跳变"
+
+    # ② 什么都没变，但离上次太久了
+    if now - last >= FALLBACK_SECONDS:
+        return True, "超过 3 小时没有新题"
+    return False, "数据没变化"
+
+
+def save_state(day: Day, cur: dict, now: float, added: int) -> None:
+    state = {}
+    if STATE.exists():
+        try:
+            state = json.loads(STATE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            state = {}
+    if str(state.get("day")) != day.iso:
+        state = {"day": day.iso, "count": 0}
+    state.update({
+        "day": day.iso,
+        "last_at": now,
+        "count": int(state.get("count") or 0) + (1 if added else 0),
+        "music": cur["music"],
+        "blocks": cur["blocks"],
+        "steps": cur["steps"],
+    })
+    try:
+        STATE.parent.mkdir(parents=True, exist_ok=True)
+        STATE.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
 
 SYSTEM_PROMPT = """You write at most three questions for a person reviewing their own day.
 
@@ -247,12 +339,25 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--day", default="today")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--force", action="store_true", help="忽略节流，强制生成")
     args = ap.parse_args()
 
     day = Day.parse(args.day, TZ)
-    print(f"Engage · {day.iso}")
+    now = time.time()
+
+    ap2 = args
+    cur = facts(day)
+    if not ap2.dry_run and not getattr(ap2, "force", False):
+        ok, why = should_generate(day, cur, now)
+        if not ok:
+            print(f"Engage · {day.iso} · skip: {why}")
+            return 0
+        print(f"Engage · {day.iso} · go: {why}")
+    else:
+        print(f"Engage · {day.iso}")
 
     questions = generate(day, args.dry_run)
+    save_state(day, cur, now, bool(questions))
     if args.dry_run:
         return 0
     if not questions:

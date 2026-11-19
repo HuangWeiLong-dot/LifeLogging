@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/lifelogging/repo
-EnvironmentFile=-/etc/lifelogging/ai.env
+EnvironmentFile=-/etc/lifelogging/close-day.env
 EnvironmentFile=-/etc/lifelogging/relay.env
 ExecStart=/opt/lifelogging/venv/bin/python server/engage/engage.py --day today
 TimeoutStartSec=180
