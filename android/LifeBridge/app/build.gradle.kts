@@ -29,8 +29,10 @@ android {
         applicationId = "com.lifelogging.bridge"
         minSdk = 26
         targetSdk = 36
-        versionCode = (versionProps.getProperty("versionCode") ?: "12").toInt() + 1
-        versionName = "2.0"
+        // version.properties 是唯一来源。以前这里写 +1，容易和文件里的值
+        // 对不上（改文件不生效、改这里又忘了同步），现在直接读。
+        versionCode = (versionProps.getProperty("versionCode") ?: "14").toInt()
+        versionName = versionProps.getProperty("versionName") ?: "2.0"
     }
 
     signingConfigs {

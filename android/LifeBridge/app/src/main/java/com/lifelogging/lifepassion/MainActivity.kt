@@ -119,6 +119,25 @@ private enum class Tab(val label: String) {
     ANSWERS("ANSWERS"), COLLECTOR("COLLECTOR")
 }
 
+/** 往前看几天。三天足够补上漏答，再长 Inbox 会变成负担。 */
+private const val LOOKBACK_DAYS = 3
+
+/**
+ * 往前 LOOKBACK_DAYS 天里**还没答**的固定题。
+ *
+ * 只取固定七维 + 问责：规则层（缺口题）依赖「此刻」的手机信号，
+ * 拿它去问三天前是错的，所以过去的只出固定题。
+ */
+private fun loadOlder(todayIso: String, store: Store): List<Question> {
+    val answered = store.answeredQids()
+    val out = ArrayList<Question>()
+    for (i in 1..LOOKBACK_DAYS) {
+        val d = java.time.LocalDate.parse(todayIso).minusDays(i.toLong()).toString()
+        out.addAll(Engine.questionsFor(d, store).filter { it.id !in answered })
+    }
+    return out.sortedByDescending { it.day }
+}
+
 @Composable
 private fun App() {
     val ctx = LocalContext.current
@@ -127,6 +146,8 @@ private fun App() {
     var day by remember { mutableStateOf(store.today()) }
     var answers by remember { mutableStateOf(store.answers()) }
     var questions by remember { mutableStateOf(Engine.withDynamic(ctx, day, store)) }
+    // 往前几天里**还没答**的题。答过的不再出现，否则 Inbox 会无限变长。
+    var older by remember { mutableStateOf(loadOlder(day, store)) }
     var tab by remember { mutableStateOf(Tab.TODAY) }
     var introDone by remember { mutableStateOf(store.introSeen()) }
     var flow by remember { mutableStateOf(0) }
@@ -149,6 +170,7 @@ private fun App() {
         if (t != day) {
             day = t
             questions = Engine.withDynamic(ctx, day, store)
+            older = loadOlder(day, store)
         }
         Relay.syncAll(ctx, store, questions)
     }
@@ -158,11 +180,27 @@ private fun App() {
     // 重新生成一批），而且会白白耗电。切回前台立即拉一次，前台期间每
     // 5 分钟补一次，离开前台循环自动取消。
     fun pullRemote() {
-        Relay.fetchQuestions(ctx, day) { remote ->
-            if (remote.isEmpty()) return@fetchQuestions
-            val have = questions.associateBy { it.id }.toMutableMap()
-            remote.forEach { q -> if (!have.containsKey(q.id)) have[q.id] = q }
-            questions = have.values.toList()
+        // 今天和往前几天都拉：服务器上那几天的题可能还没答过。
+        val days = listOf(day) + (1..LOOKBACK_DAYS).map {
+            java.time.LocalDate.parse(day).minusDays(it.toLong()).toString()
+        }
+        days.forEach { d ->
+            Relay.fetchQuestions(ctx, d) { remote ->
+                if (remote.isEmpty()) return@fetchQuestions
+                val answered = store.answeredQids()
+                if (d == day) {
+                    val have = questions.associateBy { it.id }.toMutableMap()
+                    remote.forEach { q -> if (!have.containsKey(q.id)) have[q.id] = q }
+                    questions = have.values.toList()
+                } else {
+                    // 过去的只收还没答的
+                    val have = older.associateBy { it.id }.toMutableMap()
+                    remote.forEach { q ->
+                        if (!have.containsKey(q.id) && q.id !in answered) have[q.id] = q
+                    }
+                    older = have.values.toList().sortedByDescending { it.day }
+                }
+            }
         }
     }
 
@@ -229,7 +267,7 @@ private fun App() {
             store.markDayCompleteIfNeeded(day)
             store.addXp(Persona.OBSERVER, 0)
         }
-        Notifier.refresh(ctx, questions.count { x -> answers.none { it.qid == x.id } })
+        Notifier.refresh(ctx, (questions + older).count { x -> answers.none { it.qid == x.id } })
     }
 
     fun markMissing(q: Question) {
@@ -300,7 +338,8 @@ private fun App() {
                     onOpenCollection = { tab = Tab.COLLECTOR },
                 )
                 Tab.INBOX -> InboxScreen(
-                    questions = questions,
+                    questions = questions + older,
+                    todayIso = day,
                     answers = answers,
                     onAnswer = ::submit,
                     onMissing = ::markMissing,
@@ -314,6 +353,7 @@ private fun App() {
                         store.resetDay(day)
                         answers = store.answers()
                         questions = Engine.withDynamic(ctx, day, store)
+                        older = loadOlder(day, store)
                         flow = 0
                         burst = 0
                     },

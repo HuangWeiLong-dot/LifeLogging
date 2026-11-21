@@ -244,6 +244,7 @@ private fun Stat(label: String, value: String, unit: String) {
 @Composable
 fun InboxScreen(
     questions: List<Question>,
+    todayIso: String = "",
     answers: List<Answer>,
     onAnswer: (Question, String, List<String>, Int?, String, Map<String, Int>) -> Unit,
     onMissing: (Question) -> Unit,
@@ -262,6 +263,29 @@ fun InboxScreen(
     // 停在第一屏时它们是隐藏的 —— 题目卡片上已经写了这一题属于谁。
     val scrolled by androidx.compose.runtime.derivedStateOf {
         listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 60
+    }
+
+    // ── 天数切换 ──────────────────────────────────────
+    // 一天一组平铺会让列表越来越长；改成上面一排日期按钮，一次只看一天。
+    // ⚠️ 这些必须在 LazyColumn 之外算 —— 里面是 LazyListScope，
+    //    不是 @Composable 上下文，remember / LaunchedEffect 会编译不过。
+    val days = remember(questions) { questions.map { it.day }.distinct().sortedDescending() }
+    val openByDay = remember(questions, byId) {
+        questions.groupBy { it.day }.mapValues { (_, qs) -> qs.count { it.id !in byId } }
+    }
+    var picked by remember(days) {
+        mutableStateOf(
+            days.firstOrNull { (openByDay[it] ?: 0) > 0 }
+                ?: todayIso.takeIf { it in days }
+                ?: days.firstOrNull()
+                ?: todayIso
+        )
+    }
+    // 选中的那天被答完、且别处还有未答的，自动跳到还有未答的那天
+    LaunchedEffect(openByDay) {
+        if ((openByDay[picked] ?: 0) == 0) {
+            days.firstOrNull { (openByDay[it] ?: 0) > 0 }?.let { picked = it }
+        }
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -313,7 +337,46 @@ fun InboxScreen(
                     }
                 }
             }
-            val openCount = questions.count { it.id !in byId }
+            if (days.isNotEmpty()) {
+                item(key = "day-tabs") {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        days.forEach { d ->
+                            val on = d == picked
+                            val n = openByDay[d] ?: 0
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .background(if (on) Ink.Text else androidx.compose.ui.graphics.Color.Transparent)
+                                    .border(if (on) 2.dp else 1.dp, if (on) Ink.Text else Ink.Line)
+                                    .clickable { picked = d }
+                                    .padding(vertical = 10.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text(
+                                        dayLabel(d, todayIso),
+                                        fontSize = 9.sp, letterSpacing = 1.sp,
+                                        fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (on) Ink.Bg else Ink.Text,
+                                        textAlign = TextAlign.Center,
+                                    )
+                                    Text(
+                                        if (n > 0) "$n open" else "done",
+                                        fontSize = 8.sp, letterSpacing = 0.6.sp,
+                                        color = if (on) Ink.Bg else Ink.Dim,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            val current = questions.filter { it.day == picked }
+            val openCount = current.count { it.id !in byId }
             if (openCount == 0) {
                 item {
                     Box(
@@ -324,14 +387,17 @@ fun InboxScreen(
                                 color = Ink.Text)
                             Spacer(Modifier.height(6.dp))
                             Text(
-                                "Today is complete. Come back tomorrow — or review what you wrote in Answers.",
+                                if (picked == todayIso)
+                                    "Today is complete. Come back tomorrow — or review what you wrote in Answers."
+                                else
+                                    "That day is complete. Use the tabs above to pick another day.",
                                 fontSize = 12.sp, color = Ink.Dim, lineHeight = 18.sp,
                             )
                         }
                     }
                 }
             }
-            items(questions, key = { it.id }) { q ->
+            items(current, key = { it.id }) { q ->
                 QuestionCard(
                     q = q,
                     existing = byId[q.id],
@@ -427,6 +493,22 @@ fun InboxScreen(
                 }
             }
         }
+    }
+}
+
+/** 日期按钮上的短标签：TODAY / YESTERDAY / 11-18。 */
+private fun dayLabel(day: String, todayIso: String): String {
+    if (todayIso.isBlank()) return day.takeLast(5)
+    val n = runCatching {
+        java.time.temporal.ChronoUnit.DAYS.between(
+            java.time.LocalDate.parse(day),
+            java.time.LocalDate.parse(todayIso),
+        )
+    }.getOrDefault(0L)
+    return when (n) {
+        0L -> "TODAY"
+        1L -> "YESTERDAY"
+        else -> day.takeLast(5)
     }
 }
 
