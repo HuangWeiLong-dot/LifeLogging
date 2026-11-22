@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -85,15 +86,57 @@ def fetch(base: str, key: str) -> bytes | None:
     return r.content
 
 
+def _quick_check(path: Path) -> str:
+    """对临时文件做 SQLite 完整性检查；返回空串表示 OK。"""
+    import sqlite3
+
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10.0)
+        try:
+            row = con.execute("PRAGMA quick_check").fetchone()
+        finally:
+            con.close()
+        if row and row[0] == "ok":
+            return ""
+        return row[0] if row else "empty result"
+    except Exception as e:  # noqa: BLE001
+        return f"{type(e).__name__}: {e}"
+
+
 def save(data: bytes, dest: Path) -> str:
-    """原子写入。返回 'written' 或 'unchanged'。"""
+    """原子写入 + 完整性校验。返回 'written' / 'unchanged' / 'corrupt'。
+
+    ⚠️ 临时文件名必须**每进程唯一**。LIVE（每 2 分钟）和 DAILY 可能同时
+       下载同一个文件；共用 `gadgetbridge.db.tmp` 会互相截断，最后原子
+       替换进去的是一份坏的 SQLite —— 2026-11-22 实测就是这样把本机那份
+       弄坏的（下游只报 `database disk image is malformed`）。
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists() and dest.read_bytes() == data:
-        return "unchanged"
-    tmp = dest.with_suffix(dest.suffix + ".tmp")
-    tmp.write_bytes(data)
-    tmp.replace(dest)
-    return "written"
+    if dest.exists():
+        try:
+            if dest.read_bytes() == data:
+                return "unchanged"
+        except OSError:
+            pass
+
+    tmp = dest.with_name(dest.name + f".{os.getpid()}.tmp")
+    try:
+        tmp.write_bytes(data)
+        bad = _quick_check(tmp)
+        if bad:
+            # 中继那份自己就是坏的（上传截断 / 两个上传撞车）。保留本机
+            # 上一份完整的，不要用坏数据覆盖它。
+            print(f"  ⚠️  downloaded SQLite failed quick_check: {bad}")
+            print("      Keeping the previous local copy; the relay file may be truncated.")
+            return "corrupt"
+        tmp.replace(dest)
+        return "written"
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
 
 
 def main() -> None:
@@ -125,6 +168,9 @@ def main() -> None:
     result = save(data, dest)
     if result == "unchanged":
         print(f"  . Local copy already up to date ({len(data):,} bytes)")
+    elif result == "corrupt":
+        print("  FAIL relay copy is not a usable SQLite; local copy left untouched")
+        sys.exit(1)
     else:
         print(f"  OK  Saved {len(data):,} bytes -> {dest}")
 

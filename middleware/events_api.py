@@ -92,16 +92,22 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_blocks_dedup
 
 
 def db() -> sqlite3.Connection:
+    # ⚠️ 不要在这里执行 `PRAGMA journal_mode=WAL`。
+    #    journal_mode 是写进库头的**持久属性**，建库时设一次就够；
+    #    每次连接都设一遍会让这个连接去抢写锁 —— 采集/归一化正在写时，
+    #    它要等满 timeout=30s 的 busy timeout 才返回。健康检查只等 2–3 秒，
+    #    于是「服务其实活着、只是被写锁挡住」会被误判成「服务没起来」，
+    #    2026-11-21 22:00 那次「LifeLogging 被挡住了」就是这么来的。
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")   # 采集与查询并发
     conn.execute("PRAGMA synchronous=NORMAL;")
     return conn
 
 
 def init_db() -> None:
     with closing(db()) as conn:
+        conn.execute("PRAGMA journal_mode=WAL;")   # 采集与查询并发（持久属性）
         conn.executescript(SCHEMA)
         conn.commit()
 
@@ -490,7 +496,9 @@ def delete_day(day: str, source: str | None = None) -> dict[str, Any]:
 @app.get("/health")
 def health() -> dict[str, Any]:
     try:
-        with closing(db()) as conn:
+        # 独立的短超时连接：健康检查是存活探针，不能被写事务拖满 30 秒。
+        # （流水线只等 2–3 秒，一次写锁就会把「忙着」误报成「挂了」。）
+        with closing(sqlite3.connect(DB_PATH, timeout=5.0)) as conn:
             n = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
         return {"ok": True, "events": n, "db": str(DB_PATH)}
     except Exception as e:  # noqa: BLE001

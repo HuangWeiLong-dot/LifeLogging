@@ -140,7 +140,60 @@ def main() -> None:
     if prev_qa_payload:
         qa_client.save_local(prev_day, prev_qa_payload)
 
-    
+    # ⚠️ 这一行是整套东西的关键。见模块开头的说明 —— 没有它，服务器会拿
+    #    笔记本 18:00 那次推送的半截数据去写一整天的日记。
+    final = datetime.now(TZ) >= day.end_local
+    payload = {
+        "day": day.iso,
+        "final": final,
+        "pushed_at": datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"),
+        "timeline": timeline,
+        "carryover": carryover,
+        "tasks": tasks,
+        "history": history,
+        "qa": qa,
+        "previous_day_qa": previous_day_qa,
+        "previous_day_recap": previous_day_recap,
+    }
+
+    print(f"-> timeline: {len(timeline.get('blocks') or [])} blocks, "
+          f"{timeline.get('total_hours')}h")
+    print(f"-> carryover: {len(carryover)}, tasks: {len(tasks)}")
+    print(f"-> history: {len(history)} 条"
+          + ("" if history else "  （没有召回相关的历史）"))
+    print(f"-> qa: {len(qa)} today / {len(previous_day_qa)} yesterday"
+          + ("" if (qa or previous_day_qa) else "  （中继没有 /qa 或没答过）"))
+    print(f"-> final={final}"
+          + ("" if final else f"  （{day.iso} 还没过完，服务器不会据此写日记）"))
+
+    if args.dry_run:
+        print("-> dry run, not pushed")
+        return
+
+    conn = relay()
+    if conn is None:
+        write_final_marker(day.iso, final, relay_ok=False)
+        print("  ⚠️  relay not configured — final marker written with relay_ok=false")
+        return
+    base, key = conn
+    try:
+        r = httpx.post(f"{base}/journal/inputs", headers={"X-API-Key": key},
+                       json=payload, timeout=60.0)
+    except Exception as e:  # noqa: BLE001
+        write_final_marker(day.iso, final, relay_ok=False)
+        print(f"  ⚠️  Could not reach the phone relay at {base}: {e}")
+        print("  ⚠️  final marker relay_ok=false — watermark must not advance")
+        return
+    if r.status_code != 200:
+        write_final_marker(day.iso, final, relay_ok=False)
+        print(f"  ⚠️  relay returned {r.status_code}: {r.text[:200]}")
+        print("  ⚠️  final marker relay_ok=false — watermark must not advance")
+        return
+    write_final_marker(day.iso, final, relay_ok=True)
+    print(f"  OK  pushed ({r.json().get('detail')})")
+    print(f"  OK  final marker: final={final} relay_ok=true")
+
+
 def _qa_from_events(day: "Day") -> list[dict]:
     """从本地事件表还原当天问答 —— 飞书下线后的**主路径**。
 
@@ -211,59 +264,6 @@ def _merge_qa(relay: list[dict], local: list[dict]) -> list[dict]:
         if qid and qid not in seen:
             seen[qid] = x
     return list(seen.values())
-
-# ⚠️ 这一行是整套东西的关键。见模块开头的说明 —— 没有它，服务器会拿
-    #    笔记本 18:00 那次推送的半截数据去写一整天的日记。
-    final = datetime.now(TZ) >= day.end_local
-    payload = {
-        "day": day.iso,
-        "final": final,
-        "pushed_at": datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"),
-        "timeline": timeline,
-        "carryover": carryover,
-        "tasks": tasks,
-        "history": history,
-        "qa": qa,
-        "previous_day_qa": previous_day_qa,
-        "previous_day_recap": previous_day_recap,
-    }
-
-    print(f"-> timeline: {len(timeline.get('blocks') or [])} blocks, "
-          f"{timeline.get('total_hours')}h")
-    print(f"-> carryover: {len(carryover)}, tasks: {len(tasks)}")
-    print(f"-> history: {len(history)} 条"
-          + ("" if history else "  （没有召回相关的历史）"))
-    print(f"-> qa: {len(qa)} today / {len(previous_day_qa)} yesterday"
-          + ("" if (qa or previous_day_qa) else "  （中继没有 /qa 或没答过）"))
-    print(f"-> final={final}"
-          + ("" if final else f"  （{day.iso} 还没过完，服务器不会据此写日记）"))
-
-    if args.dry_run:
-        print("-> dry run, not pushed")
-        return
-
-    conn = relay()
-    if conn is None:
-        write_final_marker(day.iso, final, relay_ok=False)
-        print("  ⚠️  relay not configured — final marker written with relay_ok=false")
-        return
-    base, key = conn
-    try:
-        r = httpx.post(f"{base}/journal/inputs", headers={"X-API-Key": key},
-                       json=payload, timeout=60.0)
-    except Exception as e:  # noqa: BLE001
-        write_final_marker(day.iso, final, relay_ok=False)
-        print(f"  ⚠️  Could not reach the phone relay at {base}: {e}")
-        print("  ⚠️  final marker relay_ok=false — watermark must not advance")
-        return
-    if r.status_code != 200:
-        write_final_marker(day.iso, final, relay_ok=False)
-        print(f"  ⚠️  relay returned {r.status_code}: {r.text[:200]}")
-        print("  ⚠️  final marker relay_ok=false — watermark must not advance")
-        return
-    write_final_marker(day.iso, final, relay_ok=True)
-    print(f"  OK  pushed ({r.json().get('detail')})")
-    print(f"  OK  final marker: final={final} relay_ok=true")
 
 
 if __name__ == "__main__":
