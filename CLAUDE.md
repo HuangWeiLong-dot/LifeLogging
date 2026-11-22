@@ -9,14 +9,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 个人全量生命记录系统（Lifelogging）：把电脑 / 手机 / 可穿戴的可记录数据自动采集 → 规则 + LLM
 理解 → 结构化日记 → 写入 Obsidian，并把**脱敏聚合**与**原始归档**发布到 `liveinpassion.me`。
 
-**双机分工**（2026-10 起，这是理解本仓库的第一件事）：
+**双机分工**（2026-11-21 服务器迁到阿里云，这是理解本仓库的第一件事）：
 
 - **Win11 笔记本**：有 GUI 的采集（ActivityWatch 必须在本机）、规则归类、写 vault。
-  靠计划任务 + 无窗口守护程序 `windows/live-daemon/LifeLoggingLive.exe`。
-- **Linux 服务器（24h 开着，Tailscale 主机名 `vm-0-17-ubuntu-1`）**：手机上报的中继、
-  每 15 分钟用 `close_day.py` 写日记正文、每 20 秒发实时 NOW、每 15 分钟发布手表轨迹。
-  代码在 `/opt/lifelogging/repo`（git clone），venv 在 `/opt/lifelogging/venv`，
-  数据在 `/var/lib/lifelogging/`，密钥在 `/etc/lifelogging/*.env`。
+  **所有定时任务都由无窗口桌面调度器 `LifeLoggingLive.exe` 负责**（托盘 + 看板），
+  Windows 计划任务全部停用 —— 计划任务每次启动都会闪一下控制台窗口、抢走鼠标焦点。
+- **阿里云 Linux 服务器（24h 开着，Tailscale 主机名 `aliyun-1` / `100.119.148.3`）**：
+  手机上报的中继、每 15 分钟用 `close_day.py` 写日记正文、每 2 分钟发实时 NOW、
+  每 15 分钟发布手表轨迹、每 5 分钟发布手机事件。
+  **整机是 Docker 部署**：`/srv/stacks/lifelogging/`（`compose.yml` + `app/` + `data/` + `env/`），
+  镜像 `lifelogging:local` 由 `app/` **构建进镜像**；数据在 `/srv/stacks/lifelogging/data/`
+  （容器里是 `/var/lib/lifelogging`），密钥在 `env/*.env`。Dawarich 在
+  `/srv/stacks/dawarich/`，cloudflared 在 `/srv/stacks/cloudflared/`。
+  旧的腾讯机（`vm-0-17-ubuntu-1` / `100.127.41.49`）已于 2026-11-21 停机。
 - **个人站点**（另一个仓库 `C:\Users\LongGe\Desktop\liveinpassion`）：Cloudflare Worker
   + D1/R2，只读本仓库发布上去的数据。
 
@@ -47,7 +52,7 @@ pip install -r requirements.txt
 cp config/config.example.yaml config/config.yaml    # 然后填 vault 路径 / API key / 服务器地址
 
 # ── 验证（不碰任何采集源，改完代码先跑这个）────────────────
-python scripts/smoke_test.py                         # 71 项，全绿才算过；无参数、不能只跑一项
+python scripts/smoke_test.py                         # 92 项，全绿才算过；无参数、不能只跑一项
 powershell -NoProfile -File scripts\check_ps1.ps1    # 只做语法解析，不检查 BOM —— BOM 要自己确认
 
 # ── 常驻服务 ────────────────────────────────────────────
@@ -69,7 +74,7 @@ python scripts/push_journal_input.py --date today    # 标 final=true 才允许�
 python scripts/pull_journal_output.py --days 3       # 取回正文并组装 vault
 # 调试可在本机直跑（会花钱）：python scripts/generate_journal.py --date today --dry-run
 
-# ── 整条流水线（计划任务用的就是这个）────────────────────
+# ── 整条流水线（桌面调度器的 DAILY / REFRESH 用的就是这个）──────
 powershell -ExecutionPolicy Bypass -File scripts\run_daily.ps1
 powershell -ExecutionPolicy Bypass -File scripts\run_daily.ps1 -Date 2026-10-12
 powershell -ExecutionPolicy Bypass -File scripts\run_daily.ps1 -Refresh   # 只拉今天，不推进水位线
@@ -92,24 +97,36 @@ python scripts/reconcile_cost.py --days 7 [--write-vault]
 
 # ── 其它 ────────────────────────────────────────────────
 python scripts/geo.py [lat lon]                      # 离线逆地理编码自测
-powershell -File scripts\setup_scheduler.ps1         # 注册 Daily + Refresh + Desktop 三个任务
-powershell -File scripts\setup_live_task.ps1         # 可选；实际推荐 windows/live-daemon 的 exe
+powershell -ExecutionPolicy Bypass -File windows\live-daemon\install.ps1  # 桌面调度器 + 看板（推荐）
+powershell -File scripts\setup_scheduler.ps1         # 回退：重新启用计划任务（会闪窗，不推荐）
 ```
 
-服务器侧：
+服务器侧（阿里云，Tailscale 名 `aliyun-1`）：
 
 ```bash
-ssh vm-0-17-ubuntu-1                                  # Tailscale
-sudo /opt/lifelogging/repo/server/deploy.sh           # git ff-only + 按改动重启常驻服务
+ssh aliyun                                            # ~/.ssh/config 里的别名
+# 代码不是 git clone，是 /srv/stacks/lifelogging/app/ 下的一份拷贝：
+rsync -av --exclude config/config.yaml --exclude __pycache__ \
+  ./scripts ./server ./middleware ./requirements.txt \
+  aliyun:/srv/stacks/lifelogging/app/
+ssh aliyun 'cd /srv/stacks/lifelogging && docker compose build && docker compose up -d relay'
 ```
 
-`deploy.sh` **不装依赖、不更新 unit/timer**。动了 `requirements.txt` 要手动
-`pip install -r ...`；动了 unit 要手动复制并 `systemctl daemon-reload`。
-更新后别只看 `/health`（新旧版本长得一样），打一个新路由（如 `/ask/pending`）确认。
+**配置是构建进镜像的**：`/srv/stacks/lifelogging/app/config/config.yaml` 改完必须
+`docker compose build`，否则新代码/新配置不会生效。`setup` 里的 oneshot timer
+（`close-day` / `live-now` / `watch-publish` / `phone-publish` / `live-questions` /
+`engage`）每次都用镜像跑，重编译后下一轮自动用新的；常驻 relay 要 `up -d` 重建。
 
-**没有单元测试框架**。`scripts/smoke_test.py` 就是测试套件（当前 71 项）；改了
+**容器里不能写 `127.0.0.1:<宿主机端口>`** —— 那指向容器自己。同一 `edge` 网络里
+用服务名：`dawarich_app:3000`、`lifelogging-relay:8788`。Dawarich 的
+`APPLICATION_HOSTS` 必须包含 `aliyun-1.tailb2abc0.ts.net` 和 `dawarich_app`，
+否则 Rails 直接 403。
+
+`deploy.sh` 是旧腾讯机那套（git ff-only + venv），**在新服务器上不适用**。
+
+**没有单元测试框架**。`scripts/smoke_test.py` 就是测试套件（当前 92 项）；改了
 `normalize.py` / `common.py` / `events_api.py` / 发布逻辑后，正确验证方式就是跑它。
-本机没装 `recall`、`lark_oapi` 时只会 warn，不影响 71 项全绿 —— 那不是失败。
+本机没装 `recall`、`lark_oapi` 时只会 warn，不影响 92 项全绿 —— 那不是失败。
 
 ---
 
@@ -190,35 +207,53 @@ sudo /opt/lifelogging/repo/server/deploy.sh           # git ff-only + 按改动�
   但**不是定时主链路**。
 - **发布 / 运维**：`publish_life_site` `publish_life_raw` `publish_live_now` `translate`
   `cost_guard` `reconcile_cost` `geo` `write_notes` `common`；入口 `run_daily.ps1`
-  `run_live.ps1` `setup_scheduler.ps1` `setup_live_task.ps1`、根目录 `更新数据.cmd`。
+  `run_live.ps1`、桌面调度器 `windows/live-daemon/`（`install.ps1` + `Program.cs`）、
+  根目录 `更新数据.cmd`。`setup_scheduler.ps1` / `setup_live_task.ps1` 只是回退方案。
 
-### 笔记本上的定时任务
+### 笔记本上的定时任务（全部由 `LifeLoggingLive.exe` 调度）
 
-| 任务 | 何时 | 做什么 |
+**Windows 计划任务全部停用** —— 它们每次触发都会闪一下控制台窗口、抢走鼠标焦点。
+`windows/live-daemon/LifeLoggingLive.exe` 是常驻托盘 + 看板的 WinExe，在进程内
+调度四个任务，子进程一律 `CreateNoWindow + Hidden`：
+
+| 任务 | 节奏 | 跑什么 |
 |---|---|---|
-| `LifeLogging-Refresh` | 每 2 小时 | 只拉今天，不调 AI、不推进水位线（= `-Date today -SkipAI`） |
-| `LifeLogging-Daily` | 23:00 + 每次解锁 / 登录 | 正式处理：补跑漏天、采集、normalize、推日记输入、发布，推进水位线 |
-| `LifeLogging-Desktop` | 每 10 分钟 | `push_desktop.py`，让机器人能在笔记本睡着后回答电脑的事 |
-| `LifeLoggingLive.exe` | 每 2 分钟 | `run_live.ps1`：桌面 / 手机事件 / normalize / 当天聚合 / NOW；每 15 分钟重采集位置、手表、AI 账单，并单独发当天 `blocks` 原始归档 |
+| `LIVE` | 每 2 分钟 | `run_live.ps1 -HeavyMinutes 15`：桌面 / 手机事件 / normalize / 当天聚合 / NOW；每 15 分钟重采集位置、手表、AI 账单，并单独发当天 `blocks` |
+| `DESKTOP` | 每 10 分钟 | `push_desktop.py`，让机器人能在笔记本睡着后回答电脑的事 |
+| `REFRESH` | 每 2 小时 | 只拉今天，不调 AI、不推进水位线（`run_daily.ps1 -Refresh`） |
+| `DAILY` | 23:00 + 登录 / 解锁补跑 | 正式处理：补跑漏天、采集、normalize、推日记输入、发布，推进水位线 |
 
-`LifeLogging-Live` 计划任务已被停用（会闪 PowerShell 窗口），别为了「再注册一次」重跑
-`setup_live_task.ps1` 把会闪窗的任务重新启用。窗口全部隐藏，**想知道跑没跑看
-`state/last_run.md`**（摘要 + 最近 15 次），日志在 `state/logs/`。
+- 安装 / 更新：`powershell -ExecutionPolicy Bypass -File windows\live-daemon\install.ps1`
+  （编译 exe、放登录自启快捷方式、停用上面四个计划任务、启动看板）。
+- `REFRESH` 与 `DAILY` 都跑 `run_daily.ps1`，共享一把门锁，**不会同时跑**；
+  `LIVE` / `DESKTOP` 各自独立线程，长时间补跑不会卡住实时发布。
+- 看板：双击托盘图标；显示每个任务的 `RUNNING/IDLE/WAITING/PAUSED/ERROR`、上次
+  结果、下次倒计时、今天时间轴 / 水位线 / 最近日记 / 上次 Daily 结论，以及
+  `live-daemon.log` 的实时尾部。关闭窗口 = 收进托盘；托盘 `Exit` 才退出。
+- 想看跑没跑，除了看板还可以看 `state/last_run.md`（摘要 + 最近 15 次），
+  日志在 `state/logs/`。
 
-> ⚠️ 没有 `Refresh` 时，当天的数据永远不会自己出现：`Daily` 白天必然什么都不做，
+> ⚠️ 没有 `REFRESH` 时，当天的数据永远不会自己出现：`DAILY` 白天必然什么都不做，
 > 23:00 那次又需要机器开着。这是 refresh 存在的理由。
+>
+> ⚠️ `setup_scheduler.ps1` / `setup_live_task.ps1` 是旧的回退方案：重跑它们会把
+> 会闪窗的计划任务重新注册回来。只有桌面调度器不可用时才这么做。
 
 ### 服务器上的服务
 
 | 服务 | 形态 | 作用 |
 |---|---|---|
-| `lifelogging-relay`（`server/phone-relay/`） | 常驻，`100.x:8788` | 手机唯一上报入口：手机事件、Gadgetbridge DB、GPX/FIT 上传、提问收发、日记中转。**手机事件和问答是不可重建的唯一副本** |
-| `lifelogging-close-day`（`server/close-day/`） | timer 15 分钟 | 扫最近 3 天，只有 `final=true` 才调 AI 写正文；**不碰 vault** |
+| `lifelogging-relay`（`server/phone-relay/`） | **Docker 常驻**，绑 `100.119.148.3:8788` | 手机唯一上报入口：手机事件、Gadgetbridge DB、GPX/FIT 上传、提问收发、日记中转。**手机事件和问答是不可重建的唯一副本** |
+| `lifelogging-close-day`（`scripts/close_day.py`） | systemd timer 15 分钟 | 扫最近 3 天，只有 `final=true` 才调 AI 写正文；**不碰 vault** |
 | `lifelogging-live-now`（`server/live-now/`） | timer 2 分钟 | 组装 `/api/life/now`；笔记本关机后继续更新位置 / 手机 / 问答 / 手表 |
 | `lifelogging-watch-publish`（`server/watch-publisher/`） | timer 15 分钟 | 直接解析中继的 GPX/FIT → `life/raw/watch/<day>.json`；**不写 events.db、不做聚合** |
 | `lifelogging-phone-publish`（`server/phone-publisher/`） | timer 5 分钟 | 直接读中继的 `phone-<day>.jsonl` → `life/raw/phone/<day>.json` + `POST /api/life/phone/ingest`；笔记本关机时手机卡片和 EVENTS 仍然更新 |
-| `lifelogging-feishu-bot`（可选） | 常驻，出站长连接 | 提问推送与文字答题；挂了是**静默的**（进程活着、长连接死了） |
-| `lifelogging-live-questions`（可选） | timer 30 分钟 | 手机当天第一次亮屏 / 解锁后开始生成小时实时题（不再固定 08:00）；默认 23:00 收尾 |
+| `lifelogging-live-questions` | timer 30 分钟 | 手机当天第一次亮屏 / 解锁后开始生成小时实时题；默认 23:00 收尾 |
+| `lifelogging-engage`（`server/engage/`） | timer 15 分钟 | 看当天真实数据写 1–3 道带锚点的 ASSOC 题，推到中继给 App；没有素材就返回空 |
+| `lifelogging-feishu-bot`（可选，已停用） | 常驻，出站长连接 | 已被 App 答题端取代；`docker compose --profile feishu-bot` 才会起 |
+
+除 relay 是常驻容器外，其余都是 `/etc/systemd/system/` 里的 oneshot + timer，
+实际执行 `docker run --rm --network edge lifelogging:local python ...`。
 
 `server/README.md` 开头还写着「两个服务」，且没列 watch-publisher —— 以本文件为准。
 Cloudflare Tunnel（`server/cloudflare-tunnel/`）把中继暴露成 `relay.liveinpassion.me`，
@@ -390,8 +425,9 @@ Leisure / Health / Social`（小时）：Work/Study/Life/Leisure = 桌面分类 
   `LIFE_INGEST_TOKEN`、`DEEPSEEK_USER_TOKEN`、`FEISHU_APP_SECRET`、中继 key 都不进仓库。
   `config/config.yaml`、`config/timetable.yaml` 本身也被 ignore。
 - 备份清单：`state/events.db`（WAL，要连 `-wal`/`-shm`）、`state/cost_ledger.jsonl`、
-  `config/config.yaml`、vault（单独同步）；服务器 `/var/lib/lifelogging/`
-  （手机事件 / 问答是唯一副本）和 `/etc/lifelogging/*.env`。
+  `config/config.yaml`、vault（单独同步）；服务器 `/srv/stacks/lifelogging/data/`
+  （容器里是 `/var/lib/lifelogging`；手机事件 / 问答是唯一副本）和
+  `/srv/stacks/lifelogging/env/*.env`。
 - `state/` 下可重建的：`timeline-*`、`features.jsonl`、`dataset.jsonl`、`graph.json`、
   `weeks/`、`translation_cache.json`。必须备份的：`events.db`、`cost_ledger.jsonl`、
   `last_processed.json`，以及 `state/gpx|fit/` 里还没导入 / 已导入的原始文件
@@ -399,13 +435,19 @@ Leisure / Health / Social`（小时）：Work/Study/Life/Leisure = 桌面分类 
 
 ### 服务器部署
 
-- `deploy.sh` 用 `git merge --ff-only`；工作区有被改过的**被跟踪**文件时拒绝合并（该由人看）。
-  它**不装依赖、不复制 unit**；close-day / live-questions / watch-publish 是 oneshot，
-  不用重启；中继和飞书常驻必须重启。
-- 加了 `lark-oapi` 之类的依赖而没 `pip install`，飞书会 `Restart=always` **无限 ImportError
-  重启**，`systemctl status` 还显示 active (running)，看着像一切正常。
+- 阿里云机是 **Docker 部署**，不是 `deploy.sh` 那套。更新流程见「常用命令 → 服务器侧」：
+  拷贝 `scripts/ server/ middleware/ requirements.txt` 到 `app/`，再
+  `docker compose build`；常驻 relay 要 `docker compose up -d relay`。
+- `close-day` / `live-now` / `watch-publish` / `phone-publish` / `live-questions` /
+  `engage` 都是 oneshot + timer，**不用重启**，下一轮自动用新镜像。
+- 改了 `app/config/config.yaml` 或 `requirements.txt` 必须重建镜像 ——
+  **配置是构建进镜像的**，改文件不会热生效。
 - 服务器自己的 `config/config.yaml` 和笔记本那份**不一样**：`vault_path`（服务器没有 vault）、
-  `state_dir`（指到 `/var/lib/lifelogging`）、`sources.phone_relay.api_base`。git pull 不会碰它。
+  `state_dir`（指到 `/var/lib/lifelogging`）、`sources.phone_relay.api_base`
+  （容器里是 `http://lifelogging-relay:8788`）、`sources.dawarich.api_base`
+  （容器里是 `http://dawarich_app:3000`）。拷贝代码时**不要覆盖**它。
+- 容器里 `127.0.0.1` 指向容器自己，不是宿主机。同网络用服务名。
+- 旧的腾讯机 `deploy.sh`（git ff-only + venv）已不再使用。
 - 中继 unit 的 `RELAY_HOST` 要改成 Tailscale 地址手机才连得上，**别写 `0.0.0.0`**。
 
 ### 飞书机器人
@@ -460,4 +502,4 @@ Leisure / Health / Social`（小时）：Work/Study/Life/Leisure = 桌面分类 
   屏幕亮灭 / 电量 / 网络 / 支付），含无 Gradle 构建、版本与签名说明
 - `server/*/README.md`、`docker/grafana/README.md`、`windows/live-daemon/README.md`
 - `README.md` —— 总览与「已验证到什么程度」；注意里面 smoke 数字（8/8）已过时，
-  以本文件 71 项为准。`docs/实现文档.md`（20/20）同理。
+  以本文件 92 项为准。`docs/实现文档.md`（20/20）同理。

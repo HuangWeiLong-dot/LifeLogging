@@ -152,15 +152,18 @@ LifeLogging/
 │   ├── cost_guard.py            ← 预算硬封顶 + 每日花费写进事件表
 │   ├── collect_ai_usage.py      ← AI 真实花费：平台账单 + 余额 + Claude Code 分布
 │   ├── reconcile_cost.py        ← 与厂商账单对账
-│   ├── run_daily.ps1            ← 每日流水线（供计划任务调用）
-│   ├── setup_scheduler.ps1      ← 注册 Windows 计划任务
+│   ├── run_daily.ps1            ← 每日流水线
+│   ├── setup_scheduler.ps1      ← 回退：注册 Windows 计划任务（现在由 live-daemon 调度）
 │   └── check_ps1.ps1            ← .ps1 语法预检（改完脚本先跑它）
-├── server/                      ← Linux 服务器：代码是 git clone 到 /opt/lifelogging/repo
-│   ├── README.md                ← ★ 服务器侧总说明（布局 / 首次部署 / 升级）
-│   ├── deploy.sh                ← 升级就一条命令：快进 + 按需重启
+├── windows/live-daemon/         ← 常驻桌面调度器 + 看板（无窗口，托盘）
+├── server/                      ← Linux 服务器：Docker 部署在 /srv/stacks/lifelogging/
+│   ├── README.md                ← 服务器侧说明（部分内容仍是旧腾讯机的）
 │   ├── phone-relay/             ← 手机使用事件中继 + 每日提问 + 日记中转（单文件，无依赖）
 │   ├── close-day/               ← 关账 + 调 AI 写日记正文（systemd timer）
-│   └── feishu-bot/              ← 可选：飞书机器人，每日提问的收发通道（长连接出站，不开端口）
+│   ├── live-now/                ← 实时 NOW 快照
+│   ├── watch-publisher/         ← 手表轨迹原始归档
+│   ├── phone-publisher/         ← 手机事件原始归档 + 手机卡片
+│   └── engage/                  ← App 侧带锚点的问题
 ├── docker/
 │   ├── dawarich/                ← Linux 服务器：位置后端
 │   ├── grafana/                 ← 可视化：6 个仪表盘，直接读 state/events.db
@@ -198,15 +201,19 @@ python scripts/generate_journal.py --date today    # 生成日记
 
 ### 当天的数据是自动保持新鲜的
 
-正式运行（含 AI 日记）在 23:00，但**当天的数据不用等到那时候**：计划任务
-`LifeLogging-Refresh` 每 2 小时跑一次「只拉今天」，白天打开 Grafana 刷新
+正式运行（含 AI 日记）在 23:00，但**当天的数据不用等到那时候**：常驻桌面
+调度器里的 `REFRESH` 每 2 小时跑一次「只拉今天」，白天打开 Grafana 刷新
 就能看到当天的应用时长 / 浏览器 / 手机数据。
+
+所有定时任务都由 `windows/live-daemon/` 的 `LifeLoggingLive.exe` 调度
+（托盘 + 看板，子进程全部隐藏；Windows 计划任务已停用，不再闪窗）：
 
 | 任务 | 何时 | 做什么 |
 |---|---|---|
-| `LifeLogging-Refresh` | 每 2 小时 | 只拉今天。**不调 AI、不推进水位线** —— 重复跑不花钱，也不会掩盖漏掉的天 |
-| `LifeLogging-Daily` | 每日 23:00 + 每次解锁 + 每次登录 | 正式处理：补跑漏掉的天、生成日记、推进水位线 |
-| `LifeLogging-Desktop` | 每 10 分钟 | 把「电脑上今天到目前」推给服务器，好让机器人能在笔记本睡着后还答得出电脑的事 |
+| `REFRESH` | 每 2 小时 | 只拉今天。**不调 AI、不推进水位线** —— 重复跑不花钱，也不会掩盖漏掉的天 |
+| `DAILY` | 每日 23:00 + 每次解锁 + 每次登录 | 正式处理：补跑漏掉的天、生成日记、推进水位线 |
+| `DESKTOP` | 每 10 分钟 | 把「电脑上今天到目前」推给服务器，好让机器人能在笔记本睡着后还答得出电脑的事 |
+| `LIVE` | 每 2 分钟 | 实时链路 + 当天聚合 + 实时 NOW |
 
 两个任务都跑在隐藏窗口里，看不见。**想知道它到底跑没跑，打开
 `state/last_run.md`** —— 里面有本次运行的摘要和最近 15 次运行的时间线。
