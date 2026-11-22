@@ -2,6 +2,12 @@
 # Windows: python -m venv .venv && .venv/Scripts/activate && pip install -r requirements.txt
 
 fastapi>=0.115
+# ⚠️ 必须和 fastapi 同代。2026-11-22 实测：fastapi 0.104.1 搭配
+#    starlette 1.6 直接抛 `Router.__init__() got an unexpected keyword
+#    argument 'on_startup'`，连 `import events_api` 都过不去 ——
+#    而 smoke_test 只报两条莫名的失败，看不出根因。
+#    starlette 1.6 是另一个包（godot-ai）钉死的，所以这里给 fastapi 配同代值。
+starlette>=1.6,<2
 uvicorn[standard]>=0.32
 httpx>=0.27
 fitdecode>=0.10
