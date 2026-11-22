@@ -5327,6 +5327,29 @@ check("patterns: Fisher z 置信区间", t_fisher_ci)
 check("patterns: 同来源配对被排除 / 结果字段完整", t_source_filter)
 
 
+# ── 32. 发布：包名状的应用名 ──────────────────────────────────────
+print("\n[32] Publish: package-looking app names")
+
+
+def t_public_app_name():
+    import publish_life_site as PL
+
+    # 桌面 exe 里带点和版本号的名字，会被 Worker 的包名校验判成违规，
+    # 导致**整天** 400（2026-11-22 实测）。首字母大写必须能把它掰开。
+    assert PL.public_app_name("study_x64_1.4.5_202611041930").startswith("S")
+    assert PL.public_app_name("com.tencent.mm").startswith("C")
+    # 正常名字原样不动
+    assert PL.public_app_name("Trae CN") == "Trae CN"
+    assert PL.public_app_name("Balls") == "Balls"
+    # 带 .exe 的也符合包名形状（`msedge` + `.exe`），同样会被掰开 ——
+    # 这里锁住这个行为，免得以后误以为它「应该原样保留」
+    assert PL.public_app_name("msedge.exe") == "Msedge.exe"
+    assert PL.public_app_name(None) is None
+
+
+check("publish: 包名状应用名被掰开，正常名字不动", t_public_app_name)
+
+
 # ── 汇总 ───────────────────────────────────────────────────────────
 print("\n" + "=" * 64)
 print(f"passed {PASS} · failed {FAIL}")

@@ -184,6 +184,19 @@ def desktop_name(raw: str | None) -> str | None:
     return clean_name(stem, 40)
 
 
+# 桌面 exe 名里带点和版本号时（`study_x64_1.4.5_202611041930`）会长得
+# 和 Android 包名一模一样。Worker 用 PACKAGE_RE 挡包名泄露，于是这种名字
+# 会被判成违规，**整天** 400 —— 实测 2026-11-22 就是这么挂的。
+# 首字母大写既保留可读性，又让正则的 `^[a-z]` 不再命中。
+_PKG_LIKE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$")
+
+
+def public_app_name(name: str | None) -> str | None:
+    if not name:
+        return name
+    return name[:1].upper() + name[1:] if _PKG_LIKE.match(name) else name
+
+
 def build_desktop(blocks: list[sqlite3.Row], categories_cfg: list[str]) -> tuple[dict | None, float | None, list | None]:
     if not blocks:
         return None, None, None
@@ -199,7 +212,7 @@ def build_desktop(blocks: list[sqlite3.Row], categories_cfg: list[str]) -> tuple
         cat = clean_name(row["category"], 24) or "Other"
         categories[cat] = categories.get(cat, 0.0) + hours
         total += hours
-        name = desktop_name(row["app"])
+        name = public_app_name(desktop_name(row["app"]))
         if name:
             apps[name] = apps.get(name, 0.0) + hours
 
@@ -567,8 +580,14 @@ def build_location(
     inferred = min(inferred, 1440.0)
     if moving + inferred > 1440:
         inferred = max(0.0, 1440.0 - moving)
+    # stay 也要封顶：Dawarich 的 visit 会重叠或跨天（2026-11-18 实测
+    # 6 个停留合计 1530 分钟），Worker 的 `stayMinutes <= 1440` 校验会
+    # 400 掉**整批** 30 天。和 moving 一样：封顶、保留这一天、出声。
+    if stay > 1440:
+        capped = (capped + "; " if capped else "") + f"stay {stay:.0f} -> 1440"
+        stay = 1440.0
     if capped:
-        print(f"  ⚠️  location: {capped}（一天不可能超过 24 小时；上游 transport 行有问题）")
+        print(f"  ⚠️  location: {capped}（一天不可能超过 24 小时；上游 location 行有问题）")
 
     return {
         "city": main_city,
