@@ -1,14 +1,20 @@
-# 安装 / 更新 LifeLoggingLive 守护程序。
+﻿# 安装 / 更新 LifeLogging 桌面调度器 + 看板。
 #
 #   powershell -ExecutionPolicy Bypass -File windows\live-daemon\install.ps1
 #
 # 做四件事：
-#   1. 编译 LifeLoggingLive.exe（如果没有）
-#   2. 在「启动」文件夹放一个快捷方式 → 登录后自动启动（无窗口）
-#   3. 停用 LifeLogging-Live 计划任务（它每 2 分钟拉 PowerShell，就是那个闪窗）
-#   4. 把 LifeLogging-Desktop 任务改成 pythonw.exe（另一个每 10 分钟的闪窗源）
+#   1. 编译 LifeLoggingLive.exe（用系统自带 csc，不装 SDK）
+#   2. 在「启动」文件夹放一个快捷方式 → 登录后自动启动（无窗口，-silent）
+#   3. 停用全部 LifeLogging 计划任务 —— 它们每次触发都会闪一下控制台窗口、
+#      抢走鼠标焦点；现在改由这个常驻程序在进程内调度：
+#         LifeLogging-Live     每 2 分钟
+#         LifeLogging-Desktop  每 10 分钟
+#         LifeLogging-Refresh  每 2 小时
+#         LifeLogging-Daily    每天 23:00 + 登录 / 解锁补跑
+#   4. 立刻启动新版并显示一次看板；之后登录启动走 -silent，只在托盘。
 #
-# 不需要管理员。卸载见同目录 README.md。
+# 不需要管理员。回退：重新 Enable-ScheduledTask 那几个任务，并退出本程序。
+# 卸载见同目录 README.md。
 
 param(
     [switch]$NoStart,
@@ -23,7 +29,6 @@ $Root = (Resolve-Path $Root).Path
 $exe = Join-Path $Root "LifeLoggingLive.exe"
 
 # 更新时先停掉旧实例：exe 正在运行时 csc 写不进去。
-# （同时也会让旧版“无 UI 守护程序”让位给新版控制面板。）
 $running = Get-Process -Name "LifeLoggingLive" -ErrorAction SilentlyContinue
 if ($running) {
     foreach ($p in $running) {
@@ -48,49 +53,52 @@ $lnk.TargetPath = $exe
 $lnk.Arguments = "`"$Root`" -silent"
 $lnk.WorkingDirectory = $Root
 $lnk.WindowStyle = 7
-$lnk.Description = "LifeLogging live pipeline (hidden)"
+$lnk.Description = "LifeLogging desktop scheduler (hidden)"
 $lnk.Save()
 Write-Host "OK   startup shortcut: $lnkPath"
 
-# 2) 停用旧的 Live 计划任务（避免两份同时跑，也去掉每 2 分钟的闪窗）
+# 2) 停用全部计划任务：闪窗、抢焦点的根源。
+#    留着不删，方便随时 Enable-ScheduledTask 回退。
 if (-not $KeepTask) {
-    $task = Get-ScheduledTask -TaskName "LifeLogging-Live" -ErrorAction SilentlyContinue
-    if ($task) {
-        Disable-ScheduledTask -TaskName "LifeLogging-Live" | Out-Null
-        Write-Host "OK   disabled scheduled task: LifeLogging-Live"
-    } else {
-        Write-Host "     no LifeLogging-Live task (fine)"
+    $names = @(
+        "LifeLogging-Live",
+        "LifeLogging-Desktop",
+        "LifeLogging-Refresh",
+        "LifeLogging-Daily"
+    )
+    foreach ($name in $names) {
+        $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+        if ($task) {
+            $wasState = $task.State
+            if ($wasState -ne "Disabled") {
+                Disable-ScheduledTask -TaskName $name | Out-Null
+            }
+            Write-Host "OK   disabled scheduled task: $name (was $wasState)"
+        } else {
+            Write-Host "     no $name task (fine)"
+        }
     }
 }
 
-# 3) Desktop 任务改用 pythonw.exe：push_desktop.py 不需要控制台
-$pyw = Join-Path $Root ".venv\Scripts\pythonw.exe"
-$desk = Get-ScheduledTask -TaskName "LifeLogging-Desktop" -ErrorAction SilentlyContinue
-if ($desk -and (Test-Path $pyw)) {
-    $action = New-ScheduledTaskAction `
-        -Execute $pyw `
-        -Argument "`"$Root\scripts\push_desktop.py`"" `
-        -WorkingDirectory $Root
-    Set-ScheduledTask -TaskName "LifeLogging-Desktop" -Action $action | Out-Null
-    Write-Host "OK   LifeLogging-Desktop now uses pythonw.exe"
-} elseif (-not (Test-Path $pyw)) {
-    Write-Host "WARN venv pythonw.exe not found; Desktop task left unchanged" -ForegroundColor Yellow
-}
-
-# 4) 立即启动。更新时先停掉旧实例（老版没有 UI，会占着 Mutex）：
-#    停掉 → 启动新版 → 这次带面板启动，让你立刻看到 UI。
+# 3) 立刻启动。这次带面板，让你直接看到看板。
 #    登录时启动的是 startup 快捷方式，它带 -silent，只在托盘。
 if (-not $NoStart) {
     Start-Process -FilePath $exe -ArgumentList "`"$Root`"" -WorkingDirectory $Root
-    Write-Host "OK   LifeLoggingLive started (panel shown once; login start is silent)"
+    Write-Host "OK   LifeLogging started (dashboard shown once; login start is silent)"
 }
 
 Write-Host ""
+Write-Host "Scheduled by the app:"
+Write-Host "  LIVE      every 2 min    scripts\run_live.ps1 -HeavyMinutes 15"
+Write-Host "  DESKTOP   every 10 min   scripts\push_desktop.py"
+Write-Host "  REFRESH   every 2 h      scripts\run_daily.ps1 -Refresh"
+Write-Host "  DAILY     daily 23:00    scripts\run_daily.ps1  (+ login / unlock catch-up)"
+Write-Host ""
 Write-Host "Logs:"
-Write-Host "  state\logs\live-daemon.log   (daemon start / exit / errors)"
+Write-Host "  state\logs\live-daemon.log   (job start / exit / errors; also in the dashboard)"
 Write-Host "  state\logs\live_<date>.log   (each run_live.ps1 round)"
 Write-Host ""
-Write-Host "Uninstall:"
+Write-Host "Rollback:"
 Write-Host "  Get-Process LifeLoggingLive -ErrorAction SilentlyContinue | Stop-Process"
 Write-Host "  Remove-Item `"$lnkPath`" -Force"
-Write-Host "  Enable-ScheduledTask -TaskName LifeLogging-Live"
+Write-Host "  Enable-ScheduledTask -TaskName LifeLogging-Live,LifeLogging-Desktop,LifeLogging-Refresh,LifeLogging-Daily"

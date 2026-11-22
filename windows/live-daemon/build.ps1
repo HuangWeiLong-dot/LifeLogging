@@ -1,4 +1,4 @@
-# 编译 LifeLoggingLive.exe（无控制台的 WinExe）。
+﻿# 编译 LifeLoggingLive.exe（无控制台的 WinExe）。
 #
 #   powershell -ExecutionPolicy Bypass -File windows\live-daemon\build.ps1
 #
